@@ -10,6 +10,10 @@ if (!scriptPath) throw new Error("Bundle JavaScript não encontrado.");
 const script = strFromU8(archive[scriptPath]);
 const fontPaths = Object.keys(archive).filter((path) => /\.(woff2?|ttf|otf)$/.test(path));
 const checks = [
+  [Boolean(archive["LICENSE"] && archive["NOTICE"] && archive["THIRD_PARTY_LICENSES.md"] && archive["TRADEMARKS.md"]), "avisos legais no pacote"],
+  [Boolean(archive["LICENSES/MPL-2.0.txt"] && archive["LICENSES/fflate-MIT.txt"]), "textos completos MPL e MIT"],
+  [["ibm-plex-mono", "ibm-plex-sans", "inter", "space-grotesk", "syne"].every((font) => Boolean(archive[`LICENSES/${font}-OFL-1.1.txt`])), "cinco avisos OFL"],
+  [script.includes("Copyright Ricardo Palmieri / Noisetupi") && script.includes("Mozilla Public"), "comentários legais preservados no JavaScript"],
   [version.version === "0.6.2", "version.json 0.6.2"],
   [index.includes('application-version" content="0.6.2'), "index identificado como 0.6.2"],
   [index.includes(scriptPath), "index aponta para o bundle atual"],
