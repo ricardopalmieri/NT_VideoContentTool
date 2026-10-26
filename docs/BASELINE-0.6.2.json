@@ -1,0 +1,85 @@
+{
+  "description": "Build do fonte original, antes de qualquer modularização ou alteração de configuração.",
+  "sourceArchive": "archives/0.6.2/NoisetupiVideoContentToolWeb-Source-0.6.2.zip",
+  "sourceSha256": "6776fcfee54577e68b99485f8fc7e99466d12608ab97c74e73f81eebca4b03ce",
+  "referenceCommit": "41af6f6",
+  "node": "v24.19.0",
+  "files": [
+    {
+      "path": ".htaccess",
+      "sha256": "304d72ed291aa110b2479dabdfc954e008ecc550948f815e8a484655d02e05ef"
+    },
+    {
+      "path": "assets/ibm-plex-mono-latin-400-normal-DMJ8VG8y.woff2",
+      "sha256": "08949f728dc52d528e69b1667d15c89a5686a4ee9a296ff90983985f99c380f7"
+    },
+    {
+      "path": "assets/ibm-plex-sans-latin-300-normal-b4i7YzLG.woff2",
+      "sha256": "c4557c8a3ca4284da9445c144dd302689b723a6b95e5e4e140211a6132d8e0be"
+    },
+    {
+      "path": "assets/ibm-plex-sans-latin-400-normal-CDDApCn2.woff2",
+      "sha256": "3b646991d30055a93a4ecc499713d4347953a74a947ecab435ab72070cbdab0e"
+    },
+    {
+      "path": "assets/ibm-plex-sans-latin-500-normal-6ng42L7E.woff2",
+      "sha256": "0717336fb31fcdcde4b8deb3675bb4a0f7f6d484864afcd6751ac29975962203"
+    },
+    {
+      "path": "assets/index-BZJa5JOo.js",
+      "sha256": "310a2693f70054413dab4bbc4cc2e5e2bd94480b6874ba4a49dc5252765cc30f"
+    },
+    {
+      "path": "assets/index-CXAokcqt.css",
+      "sha256": "8d0acb770dcc1ef37f65a808ccb6720262a8575bdc7eb85684ade0b134d41111"
+    },
+    {
+      "path": "assets/inter-latin-400-normal-C38fXH4l.woff2",
+      "sha256": "8909904ab6c872eb994093482a88a28eca2cd95912d7b6fecd72103b0dc07edc"
+    },
+    {
+      "path": "assets/inter-latin-500-normal-Cerq10X2.woff2",
+      "sha256": "f3779f1efccc4bdcdf9c0a02ab95bf6bd092ed09c48c08cedc725889edd1d19f"
+    },
+    {
+      "path": "assets/space-grotesk-latin-400-normal-CJ-V5oYT.woff2",
+      "sha256": "65fd17fcbd2e2f522940b5f67ead3d23329e02891aa5495e74d11a499c0b0673"
+    },
+    {
+      "path": "assets/space-grotesk-latin-500-normal-lFbtlQH6.woff2",
+      "sha256": "1b1a8131d9edf975d9decee81e2f2bf504812f7a4f498e5500f28a613e22e64c"
+    },
+    {
+      "path": "assets/syne-latin-400-normal-CcHADMBd.woff2",
+      "sha256": "98ffc84a339a19a2b3af38d8ead818823eed865bdc419693c77c9929494acca2"
+    },
+    {
+      "path": "assets/syne-latin-500-normal-emxikWQ7.woff2",
+      "sha256": "023f5b6b242fd4c48f9c19740d380e183e7455cac2a89abc25aa0370c9799fc9"
+    },
+    {
+      "path": "index.html",
+      "sha256": "70219ec00876956c09fe1e23bff75ac5dc16e32089034820edadc3ecb980665f"
+    },
+    {
+      "path": "logo-noisetupi-transparent.png",
+      "sha256": "cfcd61c15dde207aa137cf8edf7136012cac9bf7fd2779c7a33aa6da7d577fdf"
+    },
+    {
+      "path": "logo-noisetupi.png",
+      "sha256": "d42e8ceb898edc72d41c6ab795b0c7e3e58839b40c6548dd6cb36577c69f4d35"
+    },
+    {
+      "path": "logo-simple.png",
+      "sha256": "5467067d4805794d0a0d92c7a6846f50e52866c61d42a72f6a6d06b70753ded4"
+    },
+    {
+      "path": "manifest.webmanifest",
+      "sha256": "a7064c5e73070e9b021d6f8e095027d0bdeca23c7d74d662efd379a2ecd882e5"
+    },
+    {
+      "path": "version.json",
+      "sha256": "9d067401d8f1a2ef283842eea425be591ebbe1f60e2dd0b7dbd412a48f3646cd"
+    }
+  ]
+}

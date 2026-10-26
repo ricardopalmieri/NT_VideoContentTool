@@ -1,0 +1,26 @@
+{
+  "name": "noisetupi-video-content-tool-web",
+  "private": true,
+  "version": "0.6.2",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "package:hostinger": "npm run build && node scripts/package-hostinger.mjs",
+    "verify:release": "node scripts/verify-release.mjs"
+  },
+  "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.2.7",
+    "@fontsource/ibm-plex-sans": "^5.2.7",
+    "@fontsource/inter": "^5.3.0",
+    "@fontsource/space-grotesk": "^5.3.0",
+    "@fontsource/syne": "^5.3.0",
+    "fflate": "^0.8.3",
+    "mediabunny": "^1.52.3"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.2",
+    "vite": "^7.1.3"
+  }
+}
