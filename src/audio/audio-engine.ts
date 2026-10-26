@@ -1,4 +1,4 @@
-import { fadeEnvelope } from "../timeline/timing";
+import { fadeInEnvelope, fadeOutEnvelope } from "../timeline/timing";
 import type { AudioTrack, ProjectDocument } from "../model/types";
 import { resolveAssetUrl } from "../io/web-platform";
 
@@ -122,13 +122,23 @@ function applyAudioEffects(context: BaseAudioContext, input: AudioNode, track: A
 
 function connectTrack(context: BaseAudioContext, source: AudioBufferSourceNode, track: AudioTrack, destination: AudioNode, contextStart: number, timelineStart: number) {
   const volume = Math.max(0, Math.min(2, track.volume));
-  const gain = context.createGain();
-  gain.gain.setValueAtTime(fadeEnvelope(track, timelineStart) * volume, contextStart);
-  const points = [...new Set([track.fadeInStart, track.fadeInEnd, track.fadeOutStart, track.fadeOutEnd])]
-    .filter((point) => point > timelineStart)
-    .sort((a, b) => a - b);
-  for (const point of points) gain.gain.linearRampToValueAtTime(fadeEnvelope(track, point) * volume, contextStart + point - timelineStart);
-  applyAudioEffects(context, source, track).connect(gain).connect(destination);
+  const volumeGain = context.createGain();
+  volumeGain.gain.setValueAtTime(volume, contextStart);
+  const fadeInGain = context.createGain();
+  const fadeOutGain = context.createGain();
+  const schedule = (gain: GainNode, envelope: typeof fadeInEnvelope, start: number, end: number) => {
+    gain.gain.setValueAtTime(envelope(track, timelineStart), contextStart);
+    for (const point of [start, end]) {
+      if (point > timelineStart) gain.gain.linearRampToValueAtTime(envelope(track, point), contextStart + point - timelineStart);
+    }
+  };
+  schedule(fadeInGain, fadeInEnvelope, track.fadeInStart, track.fadeInEnd);
+  schedule(fadeOutGain, fadeOutEnvelope, track.fadeOutStart, track.fadeOutEnd);
+  applyAudioEffects(context, source, track)
+    .connect(volumeGain)
+    .connect(fadeInGain)
+    .connect(fadeOutGain)
+    .connect(destination);
 }
 
 export class AudioTimelineEngine {

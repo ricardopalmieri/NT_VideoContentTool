@@ -1,5 +1,6 @@
 import { vertexSource, fragmentSource } from "./shaders";
 import { sourceTimeFor } from "./source-time";
+import { shouldSeekVideo } from "./video-seek";
 import { fadeEnvelope } from "../timeline/timing";
 import type { EffectNode, Layer, ProjectDocument } from "../model/types";
 import { resolveAssetUrl } from "../io/web-platform";
@@ -34,9 +35,21 @@ export class ComposerRenderer {
   private previewScale = 1;
   private activeScale = 1;
   private previewPlaying = false;
+  private contextLost = false;
+  private readonly handleContextLost = (event: Event) => {
+    event.preventDefault();
+    this.contextLost = true;
+    this.invalidate();
+  };
+  private readonly handleContextRestored: () => void;
 
-  constructor(canvas: HTMLCanvasElement, private readonly invalidate: () => void = () => undefined) {
+  constructor(
+    canvas: HTMLCanvasElement,
+    private readonly invalidate: () => void = () => undefined,
+    onContextRestored: () => void = () => undefined,
+  ) {
     this.canvas = canvas;
+    this.handleContextRestored = onContextRestored;
     const gl = canvas.getContext("webgl2", {
       alpha: true,
       antialias: true,
@@ -56,6 +69,8 @@ export class ComposerRenderer {
     for (const name of ["u_texture", "u_texture_r", "u_texture_g", "u_texture_b", "u_resolution", "u_time", "u_effect", "u_mix", ...Array.from({ length: 8 }, (_, i) => `u_p${i}`)]) {
       this.uniforms.set(name, gl.getUniformLocation(this.program, name)!);
     }
+    canvas.addEventListener("webglcontextlost", this.handleContextLost);
+    canvas.addEventListener("webglcontextrestored", this.handleContextRestored);
   }
 
   setProject(project: ProjectDocument, _root: string) {
@@ -186,7 +201,10 @@ export class ComposerRenderer {
   }
 
   dispose() {
+    this.canvas.removeEventListener("webglcontextlost", this.handleContextLost);
+    this.canvas.removeEventListener("webglcontextrestored", this.handleContextRestored);
     for (const id of [...this.media.keys()]) this.removeMedia(id);
+    if (this.contextLost) return;
     this.clearEffectHistories();
     const gl = this.gl;
     const renderTargets = this.compTarget ? [...this.targets, this.compTarget] : this.targets;
@@ -354,14 +372,54 @@ export class ComposerRenderer {
       if (!metadataReady) return false;
     }
     const target = Math.max(0, Math.min(video.duration || time, time));
-    if (Math.abs(video.currentTime - target) < 1 / Math.max(1, this.project.settings.fps)) return true;
-    await new Promise<void>((resolve) => {
-      const done = () => resolve();
-      video.addEventListener("seeked", done, { once: true });
-      video.currentTime = target;
-      window.setTimeout(done, 500);
+    if (!shouldSeekVideo(video.currentTime, target) && video.readyState >= 2) return true;
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (ready: boolean) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        video.removeEventListener("seeked", checkReady);
+        video.removeEventListener("loadeddata", checkReady);
+        video.removeEventListener("error", fail);
+        video.removeEventListener("abort", fail);
+        resolve(ready);
+      };
+      const checkReady = () => {
+        if (video.readyState >= 2 && !video.seeking && !shouldSeekVideo(video.currentTime, target)) finish(true);
+      };
+      const fail = () => finish(false);
+      const timeout = window.setTimeout(fail, 1500);
+      video.addEventListener("seeked", checkReady);
+      video.addEventListener("loadeddata", checkReady);
+      video.addEventListener("error", fail);
+      video.addEventListener("abort", fail);
+      if (shouldSeekVideo(video.currentTime, target)) {
+        video.currentTime = target;
+      } else if (video.readyState >= 2) {
+        checkReady();
+      }
     });
-    return true;
+  }
+
+  private waitForImage(image: HTMLImageElement) {
+    if (image.complete) return Promise.resolve(image.naturalWidth > 0 && image.naturalHeight > 0);
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (loaded: boolean) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        image.removeEventListener("load", onLoad);
+        image.removeEventListener("error", onError);
+        resolve(loaded && image.naturalWidth > 0 && image.naturalHeight > 0);
+      };
+      const onLoad = () => finish(true);
+      const onError = () => finish(false);
+      const timeout = window.setTimeout(() => finish(false), 10_000);
+      image.addEventListener("load", onLoad);
+      image.addEventListener("error", onError);
+    });
   }
 
   private syncVideoPlayback(layerId: string, video: HTMLVideoElement, sourceTime: number, speed: number) {
@@ -555,11 +613,8 @@ export class ComposerRenderer {
         } else {
           this.captureVideoFrame(layer.id, media);
         }
-      } else if (!media.complete) {
-        await new Promise<void>((resolve) => {
-          media.addEventListener("load", () => resolve(), { once: true });
-          media.addEventListener("error", () => resolve(), { once: true });
-        });
+      } else if (!await this.waitForImage(media)) {
+        return false;
       }
       const sourceW = drawable instanceof HTMLVideoElement
         ? drawable.videoWidth
@@ -742,6 +797,9 @@ export class ComposerRenderer {
   }
 
   async render(time: number, exporting = false) {
+    if (this.contextLost || this.gl.isContextLost()) {
+      throw new Error("WebGL context was lost. Restore the browser tab before rendering.");
+    }
     this.ensureRenderScale(exporting ? 1 : this.previewScale);
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.compTarget.framebuffer);
@@ -757,7 +815,9 @@ export class ComposerRenderer {
       const trail = enabledEffects.find((effect) => effect.kind === "feedback");
       const visualEffects = enabledEffects.filter((effect) => effect !== trail);
       if (!trail) {
-        if (await this.rasterize(layer, time, exporting)) this.compositeRaster(layer, visualEffects, time);
+        const ready = await this.rasterize(layer, time, exporting);
+        if (ready) this.compositeRaster(layer, visualEffects, time);
+        else if (exporting) throw new Error(`Não foi possível renderizar a mídia da layer "${layer.name}".`);
         continue;
       }
       const requestedCount = Math.round(this.effectParam(trail, "count", time));
@@ -779,6 +839,7 @@ export class ComposerRenderer {
           offsetY * index,
         );
         if (ready) this.compositeRaster(layer, visualEffects, time);
+        else if (exporting) throw new Error(`Não foi possível renderizar a mídia da layer "${layer.name}" no frame ${Math.round(sampleTime * this.project.settings.fps)}.`);
       }
     }
 

@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { fadeEnvelope, normalizeFades } from '../../src/timeline/timing';
+import { fadeEnvelope, fadeInEnvelope, fadeOutEnvelope, normalizeFades } from '../../src/timeline/timing';
 import { sourceTimeFor } from '../../src/renderer/source-time';
 import { snapTimelineTime, timelineSnapCandidates } from '../../src/timeline/snapping';
-import { createLayer, createProject } from '../../src/model/types';
+import { shouldSeekVideo } from '../../src/renderer/video-seek';
+import { createAudioTrack, createLayer, createProject } from '../../src/model/types';
 
 const settings = { name: 'Teste', width: 320, height: 180, fps: 10, duration: 10, background: '#000000', transparent: true };
 describe('timing histórico 0.6.2', () => {
@@ -13,7 +14,11 @@ describe('timing histórico 0.6.2', () => {
     expect(fadeEnvelope({ fadeInStart: 3, fadeInEnd: 3, fadeOutStart: 5, fadeOutEnd: 5 }, -100)).toBe(1);
   });
   it('fades sobrepostos multiplicam os envelopes', () => {
-    expect(fadeEnvelope({ fadeInStart: 0, fadeInEnd: 4, fadeOutStart: 0, fadeOutEnd: 4 }, 2)).toBe(.25);
+    const fades = { fadeInStart: 0, fadeInEnd: 4, fadeOutStart: 0, fadeOutEnd: 4 };
+    expect(fadeInEnvelope(fades, 2)).toBe(.5);
+    expect(fadeOutEnvelope(fades, 2)).toBe(.5);
+    expect(fadeInEnvelope(fades, 2) * fadeOutEnvelope(fades, 2)).toBe(.25);
+    expect(fadeEnvelope(fades, 2)).toBe(.25);
   });
   it('normalização preserva duração zero e não corrige timing do clipe', () => {
     const layer = createLayer('text', settings, { startTime: 2, endTime: 8, fadeInStart: 10, fadeInEnd: 1, fadeOutStart: 7, fadeOutEnd: 3 });
@@ -44,11 +49,19 @@ describe('timing histórico 0.6.2', () => {
     expect(snapTimelineTime(1.26, project, true, unexpected, unexpected, true)).toBe(1.3);
     expect(snapTimelineTime(1.26, null, true, unexpected, unexpected)).toBe(1.26);
   });
-  it('snap inclui próprio fade e playhead; último candidato ganha empates', () => {
+  it('snap exclui o clipe arrastado e o playhead quando o próprio playhead é arrastado', () => {
     const project = createProject(settings);
-    project.layers.push(createLayer('text', settings, { fadeInEnd: 2.5 }));
-    expect(timelineSnapCandidates(project, 3)).toContain(2.5);
-    expect(timelineSnapCandidates(project, 3, project.layers[0].id)).toEqual([0, 10, 3]);
+    const layer = createLayer('text', settings, { fadeInEnd: 2.5 });
+    const linkedAudio = createAudioTrack('Áudio', 'media/audio.wav', 10, {
+      linked: true,
+      linkedLayerId: layer.id,
+      fadeInEnd: 2.75,
+    });
+    project.layers.push(layer);
+    project.audioTracks.push(linkedAudio);
+    expect(timelineSnapCandidates(project, 3, { layerId: layer.id })).toEqual([0, 10, 3]);
+    expect(timelineSnapCandidates(project, 3, { audioId: linkedAudio.id })).toEqual([0, 10, 3]);
+    expect(timelineSnapCandidates(project, 3, { playhead: true })).not.toContain(3);
     expect(snapTimelineTime(5, project, true, () => 90, () => [4.5, 5.5])).toBe(5.5);
   });
   it('limiar usa 9 px e no mínimo um frame', () => {
@@ -56,5 +69,9 @@ describe('timing histórico 0.6.2', () => {
     expect(snapTimelineTime(5, project, true, () => 100, () => [5.9])).toBe(5);
     expect(snapTimelineTime(5, project, true, () => 90, () => [5.9])).toBe(5.9);
     expect(snapTimelineTime(5, project, true, () => 10000, () => [5.05])).toBe(5.05);
+  });
+  it('não pula seek entre frames consecutivos quando a diferença é menor que um frame', () => {
+    expect(shouldSeekVideo(.75, .8749)).toBe(true);
+    expect(shouldSeekVideo(.8749, .875)).toBe(false);
   });
 });

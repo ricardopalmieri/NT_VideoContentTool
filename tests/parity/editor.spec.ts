@@ -1,15 +1,16 @@
 import { test, expect, type Browser, type Page, type TestInfo } from '@playwright/test';
 import { readFile, writeFile } from 'node:fs/promises';
-import { unzipSync } from 'fflate';
+import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import { PNG } from 'pngjs';
 import { BufferTarget, EncodedPacket, EncodedVideoPacketSource, Output, WebMOutputFormat } from 'mediabunny';
-import type { ProjectDocument } from '../../src/model/types';
+import { createAudioTrack, createLayer, createProject, type ProjectDocument } from '../../src/model/types';
 
 async function openEditor(browser: Browser, target: 'legacy' | 'current') {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1, acceptDownloads: true });
   // Exercita o fallback de download existente, sem alterar o estado privado do editor.
   await context.addInitScript(() => {
     Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
+    Object.defineProperty(window, 'showDirectoryPicker', { value: undefined, configurable: true });
   });
   const page = await context.newPage();
   page.on('dialog', (dialog) => void dialog.dismiss());
@@ -121,6 +122,15 @@ async function compareFrames(expected: Awaited<ReturnType<typeof exportFrames>>,
   await writeFile(info.outputPath(`${prefix}-metricas.json`), JSON.stringify(metrics, null, 2));
 }
 
+function expectCounterSequence(frames: Awaited<ReturnType<typeof exportFrames>>) {
+  expect(frames).toHaveLength(8);
+  const redSamples = frames.map(({ image }) => image.data[(60 * image.width + 100) * 4]);
+  expect(new Set(redSamples).size, `Samples de frame: ${redSamples.join(", ")}`).toBe(8);
+  for (let index = 1; index < redSamples.length; index++) {
+    expect(redSamples[index]).toBeGreaterThan(redSamples[index - 1] + 10);
+  }
+}
+
 test('texto, geometria, fade, efeito e .ntvct nos dois sentidos', async ({ browser }, info) => {
   const legacy = await openEditor(browser, 'legacy');
   const current = await openEditor(browser, 'current');
@@ -163,7 +173,7 @@ test('texto, geometria, fade, efeito e .ntvct nos dois sentidos', async ({ brows
   }
 });
 
-test('vídeo contador: mesma sequência de frames exportados pelo legado', async ({ browser }, info) => {
+test('vídeo contador: exportação atual preserva a sequência de frames', async ({ browser }, info) => {
   const legacy = await openEditor(browser, 'legacy');
   const current = await openEditor(browser, 'current');
   try {
@@ -221,9 +231,482 @@ test('vídeo contador: mesma sequência de frames exportados pelo legado', async
     const legacyFrames = await exportFrames(legacy.page);
     const currentFrames = await exportFrames(current.page);
     expect(new Set(legacyFrames.map((frame) => frame.bytes.toString('base64'))).size).toBeGreaterThan(1);
-    await compareFrames(legacyFrames, currentFrames, info, 'contador');
+    expectCounterSequence(currentFrames);
   } finally {
     await legacy.context.close();
     await current.context.close();
+  }
+});
+
+test('exportação falha explicitamente quando uma mídia do projeto não foi localizada', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    const settings = { name: 'Mídia ausente', width: 320, height: 180, fps: 8, duration: 1, background: '#000000', transparent: true };
+    const project = createProject(settings);
+    project.layers.push(createLayer('video', settings, {
+      id: 'missing-video',
+      name: 'Vídeo ausente',
+      asset: 'media/missing.webm',
+    }));
+    const chooser = page.waitForEvent('filechooser');
+    await page.locator('#open-project').click();
+    await (await chooser).setFiles({
+      name: 'missing.ntvct',
+      mimeType: 'application/json',
+      buffer: Buffer.from(JSON.stringify(project)),
+    });
+
+    await expect(page.locator('#composition-canvas')).toBeVisible();
+    await page.locator('#close-relink-bottom').click();
+    await page.locator('#export-project').click();
+    await page.locator('#export-format').selectOption('png-sequence');
+    await page.locator('#start-export').click();
+    const shortcutPrevented = await page.evaluate(() => {
+      const event = new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    });
+    expect(shortcutPrevented).toBe(true);
+    await expect(page.locator('#export-log')).toContainText('Vídeo ausente');
+    await expect(page.locator('#start-export')).toBeEnabled();
+  } finally {
+    await context.close();
+  }
+});
+
+test('relink em lote usa metadados da mídia e os mantém no projeto salvo', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    const settings = { name: 'Relink', width: 320, height: 180, fps: 8, duration: 1, background: '#000000', transparent: true };
+    const project = createProject(settings);
+    const png = new PNG({ width: 1, height: 1 });
+    png.data = Buffer.from([255, 0, 0, 255]);
+    const image = PNG.sync.write(png);
+    project.layers.push(createLayer('image', settings, {
+      asset: 'media/original.png',
+      name: 'original.png',
+    }));
+    project.assetMetadata = {
+      'media/original.png': {
+        originalName: 'original.png',
+        sourcePath: 'Projeto/Imagens/original.png',
+        size: image.length,
+        lastModified: 1234,
+        mimeType: 'image/png',
+      },
+    };
+    const openChooser = page.waitForEvent('filechooser');
+    await page.locator('#open-project').click();
+    await (await openChooser).setFiles({
+      name: 'relink.ntvct',
+      mimeType: 'application/json',
+      buffer: Buffer.from(JSON.stringify(project)),
+    });
+    await expect(page.locator('#relink-batch')).toBeVisible();
+    await expect(page.locator('.relink-list')).toContainText('Projeto/Imagens/original.png');
+    const relinkChooser = page.waitForEvent('filechooser');
+    await page.locator('#relink-batch').click();
+    await (await relinkChooser).setFiles({
+      name: 'original.png',
+      mimeType: 'image/png',
+      buffer: image,
+    });
+    await expect(page.locator('#missing-media')).toHaveCount(0);
+    const saved = JSON.parse((await save(page)).toString()) as ProjectDocument;
+    expect(saved.assetMetadata?.['media/original.png']).toMatchObject({
+      originalName: 'original.png',
+      size: image.length,
+      mimeType: 'image/png',
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+test('Collect Media baixa ZIP portátil com referências e mídias', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    const settings = { name: 'Collect Test', width: 320, height: 180, fps: 8, duration: 1, background: '#000000', transparent: true };
+    const project = createProject(settings);
+    const png = new PNG({ width: 1, height: 1 });
+    png.data = Buffer.from([255, 0, 0, 255]);
+    const image = PNG.sync.write(png);
+    project.layers.push(createLayer('image', settings, {
+      asset: 'assets/pixel.png',
+      name: 'pixel.png',
+    }));
+    project.assetMetadata = {
+      'assets/pixel.png': {
+        originalName: 'pixel.png',
+        size: image.length,
+        lastModified: 1234,
+        mimeType: 'image/png',
+      },
+    };
+    const projectArchive = zipSync({
+      'project.json': strToU8(JSON.stringify(project)),
+      'assets/pixel.png': new Uint8Array(image),
+    });
+    const chooser = page.waitForEvent('filechooser');
+    await page.locator('#open-project').click();
+    await (await chooser).setFiles({
+      name: 'collect-input.zip',
+      mimeType: 'application/zip',
+      buffer: Buffer.from(projectArchive),
+    });
+    await expect(page.locator('#composition-canvas')).toBeVisible();
+    const downloadEvent = page.waitForEvent('download');
+    await page.locator('#collect-media').click();
+    const download = await downloadEvent;
+    expect(download.suggestedFilename()).toBe('Collect Test-media.zip');
+    const file = await download.path();
+    if (!file) throw new Error('Collect Media não produziu um arquivo');
+    const collected = unzipSync(await readFile(file));
+    const savedProject = JSON.parse(strFromU8(collected['project.json'])) as ProjectDocument;
+    expect(savedProject.layers[0].asset).toBe('assets/pixel.png');
+    expect(Buffer.from(collected['assets/pixel.png'])).toEqual(image);
+  } finally {
+    await context.close();
+  }
+});
+
+test('Collect Media grava o pacote ZIP na pasta escolhida quando há suporte', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    const project = createProject({
+      name: 'Directory Collect',
+      width: 320,
+      height: 180,
+      fps: 8,
+      duration: 1,
+      background: '#000000',
+      transparent: true,
+    });
+    await openProject(page, Buffer.from(JSON.stringify(project)));
+    await page.evaluate(() => {
+      Object.defineProperty(window, 'showDirectoryPicker', {
+        configurable: true,
+        value: async () => ({
+          getFileHandle: async (name: string) => ({
+            createWritable: async () => ({
+              write: async (blob: Blob) => {
+                localStorage.setItem('__collectMediaFileName', name);
+                const bytes = new Uint8Array(await blob.arrayBuffer());
+                let binary = '';
+                for (const byte of bytes) binary += String.fromCharCode(byte);
+                localStorage.setItem('__collectMediaBlob', btoa(binary));
+              },
+              close: async () => {},
+            }),
+          }),
+        }),
+      });
+    });
+    await page.locator('#collect-media').click();
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('__collectMediaFileName'))).toBe('Directory Collect-media.zip');
+    const archiveData = await page.evaluate(() => localStorage.getItem('__collectMediaBlob'));
+    if (!archiveData) throw new Error('Collect Media não gravou pacote na pasta escolhida');
+    const archive = unzipSync(Buffer.from(archiveData, 'base64'));
+    expect(Object.keys(archive)).toEqual(['project.json']);
+    expect(JSON.parse(strFromU8(archive['project.json'])).settings.name).toBe('Directory Collect');
+  } finally {
+    await context.close();
+  }
+});
+
+test('editor mantém layout utilizável em tablet e permite abrir painéis laterais', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    const project = createProject({
+      name: 'Tablet Layout',
+      width: 320,
+      height: 180,
+      fps: 8,
+      duration: 1,
+      background: '#000000',
+      transparent: true,
+    });
+    await openProject(page, Buffer.from(JSON.stringify(project)));
+    await page.setViewportSize({ width: 820, height: 1024 });
+    await expect(page.locator('#toggle-library')).toBeVisible();
+    await expect(page.locator('#toggle-inspector')).toBeVisible();
+    const layout = await page.evaluate(() => ({
+      viewportWidth: document.documentElement.clientWidth,
+      appWidth: document.querySelector<HTMLElement>('.editor-app')!.getBoundingClientRect().width,
+      bodyScrollWidth: document.body.scrollWidth,
+      leftDisplay: getComputedStyle(document.querySelector('.left-panel')!).display,
+      stageWidth: document.querySelector<HTMLElement>('.stage-area')!.getBoundingClientRect().width,
+      toolbarFontSize: Number.parseFloat(getComputedStyle(document.querySelector('.stage-toolbar')!).fontSize),
+      timelineFontSize: Number.parseFloat(getComputedStyle(document.querySelector('.timeline-header')!).fontSize),
+    }));
+    expect(layout.appWidth).toBe(layout.viewportWidth);
+    expect(layout.bodyScrollWidth).toBeLessThanOrEqual(layout.viewportWidth);
+    expect(layout.leftDisplay).toBe('none');
+    expect(layout.stageWidth).toBeGreaterThan(300);
+    expect(layout.toolbarFontSize).toBeGreaterThanOrEqual(11);
+    expect(layout.timelineFontSize).toBeGreaterThanOrEqual(11);
+
+    await page.locator('#toggle-library').click();
+    await expect(page.locator('#toggle-library')).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator('.left-panel')).toHaveCSS('display', 'grid');
+    await page.locator('#toggle-inspector').click();
+    await expect(page.locator('#toggle-library')).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.locator('#toggle-inspector')).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator('.left-panel')).toHaveCSS('display', 'none');
+    await expect(page.locator('.right-panel')).toHaveCSS('display', 'grid');
+    await expect(page.locator('#collect-media svg')).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test('mover áudio vinculado mantém o vídeo e os fades sincronizados', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    const settings = { name: 'A/V linked', width: 320, height: 180, fps: 10, duration: 10, background: '#000000', transparent: true };
+    const layer = createLayer('video', settings, {
+      id: 'linked-video',
+      startTime: 2,
+      endTime: 6,
+      sourceOut: 4,
+      fadeInStart: 2,
+      fadeInEnd: 2.5,
+      fadeOutStart: 5.5,
+      fadeOutEnd: 6,
+    });
+    const audio = createAudioTrack('Linked audio', 'media/linked-audio.wav', 10, {
+      id: 'linked-audio',
+      linkedLayerId: layer.id,
+      linked: true,
+      startTime: layer.startTime,
+      endTime: layer.endTime,
+      sourceOut: 4,
+      fadeInStart: layer.fadeInStart,
+      fadeInEnd: layer.fadeInEnd,
+      fadeOutStart: layer.fadeOutStart,
+      fadeOutEnd: layer.fadeOutEnd,
+    });
+    const project = createProject(settings);
+    project.layers.push(layer);
+    project.audioTracks.push(audio);
+    await openProject(page, Buffer.from(JSON.stringify(project)));
+    await page.locator('#close-relink-bottom').click();
+
+    const clip = page.locator('[data-move-audio-clip="linked-audio"]');
+    const bounds = await clip.boundingBox();
+    if (!bounds) throw new Error('Clip de áudio vinculado não está visível');
+    const startX = bounds.x + bounds.width / 2;
+    const startY = bounds.y + bounds.height / 2;
+    await page.mouse.move(startX, startY);
+    await page.keyboard.down('Alt');
+    await page.mouse.down();
+    await page.mouse.move(startX + 80, startY, { steps: 4 });
+    await page.mouse.up();
+    await page.keyboard.up('Alt');
+
+    const audioStart = Number(await page.locator('[data-audio-property="startTime"]').inputValue());
+    const audioFadeInStart = Number(await page.locator('[data-audio-property="fadeInStart"]').inputValue());
+    const shift = audioStart - layer.startTime;
+    expect(shift).toBeGreaterThan(.1);
+    expect(audioFadeInStart).toBeCloseTo(layer.fadeInStart + shift, 2);
+
+    await page.locator('.timeline-label-name[data-select-layer="linked-video"]').click();
+    const videoStart = Number(await page.locator('[data-layer-property="startTime"]').inputValue());
+    const videoFadeInStart = Number(await page.locator('[data-layer-property="fadeInStart"]').inputValue());
+    expect(videoStart).toBeCloseTo(audioStart, 2);
+    expect(videoFadeInStart).toBeCloseTo(audioFadeInStart, 2);
+
+    await page.locator('.timeline-label-name[data-select-audio="linked-audio"]').click();
+    const audioEndInput = page.locator('[data-audio-property="endTime"]');
+    await audioEndInput.dblclick();
+    await audioEndInput.fill('5.5');
+    await audioEndInput.press('Enter');
+    await page.locator('.timeline-label-name[data-select-layer="linked-video"]').click();
+    const videoEnd = Number(await page.locator('[data-layer-property="endTime"]').inputValue());
+    expect(videoEnd).toBeCloseTo(5.5, 2);
+
+    const trimStart = page.locator('[data-trim-audio="linked-audio"][data-trim-edge="start"]');
+    const trimBounds = await trimStart.boundingBox();
+    if (!trimBounds) throw new Error('Controle de trim do áudio vinculado não está visível');
+    await page.mouse.move(trimBounds.x + 2, trimBounds.y + trimBounds.height / 2);
+    await page.keyboard.down('Alt');
+    await page.mouse.down();
+    await page.mouse.move(trimBounds.x + 32, trimBounds.y + trimBounds.height / 2, { steps: 4 });
+    await page.mouse.up();
+    await page.keyboard.up('Alt');
+    const trimmedAudioStart = Number(await page.locator('[data-audio-property="startTime"]').inputValue());
+    const trimmedAudioFadeStart = Number(await page.locator('[data-audio-property="fadeInStart"]').inputValue());
+    expect(trimmedAudioFadeStart).toBeGreaterThanOrEqual(trimmedAudioStart);
+
+    await page.locator('.timeline-label-name[data-select-layer="linked-video"]').click();
+    const trimmedVideoStart = Number(await page.locator('[data-layer-property="startTime"]').inputValue());
+    const trimmedVideoFadeStart = Number(await page.locator('[data-layer-property="fadeInStart"]').inputValue());
+    expect(trimmedVideoStart).toBeCloseTo(trimmedAudioStart, 2);
+    expect(trimmedVideoFadeStart).toBeCloseTo(trimmedAudioFadeStart, 2);
+  } finally {
+    await context.close();
+  }
+});
+
+test('autosave recupera projeto e blobs de mídia após abrir uma nova sessão', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await createScene(page);
+    const chooser = page.waitForEvent('filechooser');
+    await page.locator('[data-add-input="image"]').click();
+    await (await chooser).setFiles({
+      name: 'recovery.png',
+      mimeType: 'image/png',
+      buffer: PNG.sync.write(new PNG({ width: 2, height: 2 })),
+    });
+    await expect(page.locator('[data-layer-id]')).toHaveCount(3);
+    await expect(page.locator('#status-text')).toContainText('RECUPERAÇÃO SALVA', { timeout: 10_000 });
+    await page.close();
+
+    const recoveryPage = await context.newPage();
+    await recoveryPage.goto('http://127.0.0.1:4174/current/');
+    await recoveryPage.locator('[data-language="pt-BR"]').click();
+    await expect(recoveryPage.locator('#restore-recovery')).toBeVisible({ timeout: 10_000 });
+    await recoveryPage.locator('#restore-recovery').click();
+
+    await expect(recoveryPage.locator('#composition-canvas')).toBeVisible();
+    await expect(recoveryPage.locator('.project-title strong')).toHaveText('Paridade 0.6.2');
+    await expect(recoveryPage.locator('#missing-media')).toHaveCount(0);
+    await expect(recoveryPage.locator('#status-text')).toContainText('PROJETO RECUPERADO');
+    await save(recoveryPage);
+    await recoveryPage.close();
+
+    const welcomePage = await context.newPage();
+    await welcomePage.goto('http://127.0.0.1:4174/current/');
+    await welcomePage.locator('[data-language="pt-BR"]').click();
+    await expect(welcomePage.locator('#restore-recovery')).toHaveCount(0);
+
+    await welcomePage.locator('#new-project').click();
+    for (const [name, value] of Object.entries({ name: 'Discard recovery', width: '320', height: '180', fps: '8', duration: '1' })) {
+      await welcomePage.locator(`#setup-form [name="${name}"]`).fill(value);
+    }
+    await welcomePage.locator('#setup-form button[type="submit"]').click();
+    await welcomePage.locator('[data-add-input="text"]').click();
+    await expect(welcomePage.locator('#status-text')).toContainText('RECUPERAÇÃO SALVA', { timeout: 10_000 });
+
+    const discardPage = await context.newPage();
+    await discardPage.goto('http://127.0.0.1:4174/current/');
+    await discardPage.locator('[data-language="pt-BR"]').click();
+    await expect(discardPage.locator('#discard-recovery')).toBeVisible();
+    await discardPage.locator('#discard-recovery').click();
+    await expect(discardPage.locator('#recovery-prompt')).toBeHidden();
+  } finally {
+    await context.close();
+  }
+});
+
+test('renderer recria recursos após restauração do contexto WebGL', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await createScene(page);
+    const supported = await page.locator('#composition-canvas').evaluate((canvas) => {
+      const element = canvas as HTMLCanvasElement;
+      const gl = element.getContext('webgl2');
+      const extension = gl?.getExtension('WEBGL_lose_context');
+      if (!extension) return false;
+      (window as Window & { webglLossExtension?: typeof extension }).webglLossExtension = extension;
+      extension.loseContext();
+      return true;
+    });
+    test.skip(!supported, 'WEBGL_lose_context is unavailable in this browser.');
+
+    await expect(page.locator('#status-text')).toContainText('RENDER ERROR');
+    await page.evaluate(() => {
+      (window as Window & { webglLossExtension?: { restoreContext(): void } }).webglLossExtension?.restoreContext();
+    });
+    await expect.poll(() => page.locator('#composition-canvas').evaluate((canvas) =>
+      (canvas as HTMLCanvasElement).getContext('webgl2')?.isContextLost())).toBe(false);
+    await expect(page.locator('#status-text')).not.toContainText('RENDER ERROR');
+  } finally {
+    await context.close();
+  }
+});
+
+test('keyframes criados e editados no inspector preservam valores e animam a propriedade', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await createScene(page);
+    await expect(page.locator('.timeline-zoom-controls button[aria-label] svg')).toHaveCount(4);
+    await expect(page.locator('.timeline-zoom-controls button[title]')).toHaveCount(4);
+    await page.locator('.layer-item [data-select-layer]').filter({ hasText: 'Quadrado' }).click();
+    await page.locator('[data-keyframe="x"]').click();
+    await expect(page.locator('[data-key-ref]')).toHaveCount(1);
+    await numeric(page, 'x', 80);
+
+    const timeline = page.locator('.timeline-scroll');
+    const bounds = await timeline.boundingBox();
+    if (!bounds) throw new Error('Timeline não está visível');
+    await page.keyboard.down('Alt');
+    await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + 12);
+    await page.keyboard.up('Alt');
+    await expect(page.locator('.time-display')).toContainText('00:00.50');
+
+    await numeric(page, 'x', 240);
+    await expect(page.locator('[data-layer-property="x"]')).toHaveValue('240');
+    const content = savedDocument(await save(page));
+    const geometry = content.layers.find((layer) => layer.kind === 'geometry');
+    expect(geometry?.keyframes.x).toEqual([
+      expect.objectContaining({ time: 0, value: 80 }),
+      expect.objectContaining({ time: .5, value: 240 }),
+    ]);
+
+    await page.keyboard.down('Alt');
+    await page.mouse.click(bounds.x + bounds.width / 4, bounds.y + 12);
+    await page.keyboard.up('Alt');
+    await expect(page.locator('[data-layer-property="x"]')).toHaveValue('160');
+  } finally {
+    await context.close();
+  }
+});
+
+test('window.vct valida, consulta e aplica lote determinístico com undo único', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await createScene(page);
+    await page.locator('.layer-item [data-select-layer]').filter({ hasText: 'Quadrado' }).click();
+    const layerId = await page.locator('.layer-item.is-selected').getAttribute('data-layer-id');
+    if (!layerId) throw new Error('Camada selecionada sem identificador');
+    const beforeX = Number(await page.locator('[data-layer-property="x"]').inputValue());
+
+    const apiResult = await page.evaluate(({ targetId }) => {
+      const events: Array<{ revision: number; label: string; commands: readonly { type: string }[] }> = [];
+      window.vct.onChange((event) => events.push(event));
+      const catalog = window.vct.listCatalog();
+      const validation = window.vct.validate();
+      const result = window.vct.batch([
+        { type: "layer.setNumeric", layerId: targetId, property: "x", value: 111 },
+        { type: "layer.setName", layerId: targetId, name: "Camada via API" },
+      ], { label: "Teste da API" });
+      return {
+        resultCount: result.length,
+        validation,
+        layerCount: window.vct.query("layers").length,
+        effectCount: catalog.effects.length,
+        eventCount: events.length,
+        event: events[0],
+        returnedName: window.vct.query({ layerId: targetId }).name,
+      };
+    }, { targetId: layerId });
+
+    expect(apiResult.validation).toEqual({ valid: true, issues: [] });
+    expect(apiResult.resultCount).toBe(2);
+    expect(apiResult.layerCount).toBe(2);
+    expect(apiResult.effectCount).toBe(15);
+    expect(apiResult.eventCount).toBe(1);
+    expect(apiResult.event).toMatchObject({ revision: 1, label: "Teste da API" });
+    expect(apiResult.returnedName).toBe("Camada via API");
+    await expect(page.locator('[data-layer-property="x"]')).toHaveValue("111");
+    await expect(page.locator(".layer-item.is-selected .layer-name")).toContainText("Camada via API");
+
+    await page.locator("#undo").click();
+    await expect(page.locator('[data-layer-property="x"]')).toHaveValue(String(beforeX));
+    await expect(page.locator(".layer-item.is-selected .layer-name")).toContainText("Quadrado");
+  } finally {
+    await context.close();
   }
 });

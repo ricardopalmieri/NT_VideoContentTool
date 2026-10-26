@@ -1,18 +1,33 @@
 import type { ProjectDocument } from "../model/types";
 import { clamp } from "../model/math";
 
-// TODO(rodada1): preservar self-snap e desempate pelo último candidato.
-export function timelineSnapCandidates(project: ProjectDocument | null, currentTime: number, excludeLayerId = "", excludeAudioId = "") {
+export interface TimelineSnapExclusions {
+  layerId?: string;
+  audioId?: string;
+  playhead?: boolean;
+}
+
+export function timelineSnapCandidates(
+  project: ProjectDocument | null,
+  currentTime: number,
+  exclusions: TimelineSnapExclusions = {},
+) {
   if (!project) return [];
-  const values = [0, project.settings.duration, currentTime];
+  const excludedLayers = new Set(exclusions.layerId ? [exclusions.layerId] : []);
+  const excludedAudio = new Set(exclusions.audioId ? [exclusions.audioId] : []);
+  for (const track of project.audioTracks) {
+    if (track.linked && track.linkedLayerId && excludedLayers.has(track.linkedLayerId)) excludedAudio.add(track.id);
+    if (track.linked && track.linkedLayerId && excludedAudio.has(track.id)) excludedLayers.add(track.linkedLayerId);
+  }
+  const values = exclusions.playhead ? [0, project.settings.duration] : [0, project.settings.duration, currentTime];
   for (const layer of project.layers) {
-    if (layer.id === excludeLayerId) continue;
+    if (excludedLayers.has(layer.id)) continue;
     values.push(layer.startTime, layer.endTime, layer.fadeInStart, layer.fadeInEnd, layer.fadeOutStart, layer.fadeOutEnd);
     for (const keys of Object.values(layer.keyframes)) for (const key of keys) values.push(key.time);
     for (const effect of layer.effects) for (const keys of Object.values(effect.keyframes)) for (const key of keys) values.push(key.time);
   }
   for (const track of project.audioTracks) {
-    if (track.id === excludeAudioId) continue;
+    if (excludedAudio.has(track.id)) continue;
     values.push(track.startTime, track.endTime, track.fadeInStart, track.fadeInEnd, track.fadeOutStart, track.fadeOutEnd);
   }
   return values;

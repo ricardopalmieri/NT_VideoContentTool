@@ -1,3 +1,5 @@
+import { AUDIO_EFFECT_CATALOG, EFFECT_CATALOG } from "./effect-catalog";
+
 export type Language = "pt-BR" | "en";
 export type InputKind = "image" | "video" | "guide" | "geometry" | "text";
 export type GeometryKind = "rectangle" | "ellipse" | "triangle" | "polygon" | "line";
@@ -132,6 +134,7 @@ export interface ProjectDocument {
   layers: Layer[];
   audioTracks: AudioTrack[];
   postEffects: EffectNode[];
+  assetMetadata?: Record<string, AssetSourceMetadata>;
   createdAt: string;
   modifiedAt: string;
 }
@@ -146,6 +149,15 @@ export interface ImportedAsset {
   relativePath: string;
   absolutePath: string;
   fileName: string;
+  sourceMetadata: AssetSourceMetadata;
+}
+
+export interface AssetSourceMetadata {
+  originalName: string;
+  sourcePath?: string;
+  size: number;
+  lastModified: number;
+  mimeType: string;
 }
 
 export interface ExportOptions {
@@ -177,51 +189,20 @@ export const uid = (prefix = "node") =>
   `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 export const createEffect = (kind: EffectKind): EffectNode => {
-  const defaults: Record<EffectKind, Record<string, number>> = {
-    mirror: { mode: 1, center: 0.5 },
-    feedback: { count: 8, spacing: 0.06, decay: 0.78, offsetX: 6, offsetY: 6 },
-    levels: { brightness: 0, contrast: 1, saturation: 1, gamma: 1 },
-    kaleidoscope: { segments: 6, rotation: 0, zoom: 1 },
-    blur: { radius: 8, quality: 2 },
-    crop: { left: 0, right: 1, top: 0, bottom: 1 },
-    edge: { amount: 1, threshold: 0.15, colorize: 0 },
-    colorKey: { hue: 0.33, tolerance: 0.15, softness: 0.08 },
-    animaTracer: {
-      progress: 0,
-      sensitivity: 0.2,
-      thickness: 1,
-      softness: 0.08,
-      direction: 0,
-      irregularity: 0.15,
-      invert: 0,
-    },
-    rgbDelay: { redDelay: 0, greenDelay: -3, blueDelay: -6, mix: 1 },
-    noise: { amount: 0.12, scale: 1 },
-    glitch: { amount: 0.3, frequency: 8, blockSize: 36, shift: 0.12, rgbSplit: 7, scanlines: 0.18, mix: 1 },
-    vhs: { amount: 0.25, scanlines: 480, tracking: 0.15 },
-    cameraShake: { amount: 0.01, speed: 8 },
-    glow: { threshold: 0.62, radius: 14, intensity: 1.4, knee: 0.22, saturation: 1, mix: 1 },
-  };
+  const definition = EFFECT_CATALOG[kind];
   return {
     id: uid("fx"),
     kind,
     name: kind,
     enabled: true,
-    params: { mix: 1, ...defaults[kind] },
+    params: { mix: 1, ...definition.defaults },
     keyframes: {},
   };
 };
 
 export const createAudioEffect = (kind: AudioEffectKind): AudioEffectNode => {
-  const defaults: Record<AudioEffectKind, Record<string, number>> = {
-    lowpass: { frequency: 12000, resonance: .7 },
-    highpass: { frequency: 80, resonance: .7 },
-    eq3: { low: 0, mid: 0, high: 0 },
-    delay: { time: .25, feedback: .3, mix: .25 },
-    compressor: { threshold: -18, ratio: 4, attack: .01, release: .25 },
-    reverb: { duration: 1.5, decay: 2.5, mix: .25 },
-  };
-  return { id: uid("afx"), kind, enabled: true, params: { ...defaults[kind] } };
+  const definition = AUDIO_EFFECT_CATALOG[kind];
+  return { id: uid("afx"), kind, enabled: true, params: { ...definition.defaults } };
 };
 
 export const createLayer = (

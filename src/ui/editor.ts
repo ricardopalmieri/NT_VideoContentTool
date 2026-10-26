@@ -2,18 +2,39 @@ import { clamp } from "../model/math";
 import { normalizeFades } from "../timeline/timing";
 import { timelineSnapCandidates as collectTimelineSnapCandidates, snapTimelineTime as calculateTimelineSnap } from "../timeline/snapping";
 import { migrateProject } from "../model/migrate-project";
+import { UndoHistory } from "../model/undo-history";
+import { syncLinkedAudioTracks, syncLinkedVideoLayer } from "../model/linked-media";
+import {
+  AUDIO_EFFECT_CATALOG,
+  AUDIO_EFFECT_PARAMETERS,
+  EFFECT_CATALOG,
+  EFFECT_PARAMETERS,
+  type EffectParameterDefinition,
+} from "../model/effect-catalog";
+import { createVctApi, type VctApi } from "../automation/window-vct";
+import {
+  keyframeAt as findKeyframeAt,
+  upsertKeyframe as upsertDomainKeyframe,
+} from "../model/keyframes";
 import { translate, type TranslationKey } from "../i18n";
 import { ComposerRenderer } from "../renderer/composer-renderer";
 import { AudioTimelineEngine, mixProjectAudio, probeAudio } from "../audio/audio-engine";
 import {
   chooseFile,
   chooseFiles,
+  assetSourceMetadata,
+  collectWebProject,
+  clearProjectRecovery,
   createWebProject,
+  discardProjectRecovery,
+  findRelinkFile,
   hasWebAsset,
   importWebAsset,
   openWebProject,
+  readProjectRecovery,
   registerWebAsset,
   resolveAssetUrl,
+  saveProjectRecovery,
   saveWebProject,
 } from "../io/web-platform";
 import {
@@ -64,6 +85,7 @@ const COMPOSITION_PRESETS = [
 document.addEventListener("contextmenu", (event) => event.preventDefault());
 let language: Language = (localStorage.getItem("nt-vct-language") as Language) || "pt-BR";
 let project: ProjectDocument | null = null;
+let automationApi: VctApi;
 let projectRoot = "";
 let projectJsonPath = "";
 let selectedLayerId = "";
@@ -98,9 +120,14 @@ let libraryAccordion: "effects" | "post" = "effects";
 let selectedKeyRef = "";
 const recordedTracks = new Set<string>();
 const recordedRanges = new Map<string, { min: number; max: number }>();
+let autosaveTimer = 0;
+let autosaveGeneration = 0;
+let autosaveWrites = Promise.resolve();
+let autosaveFingerprint = "";
 let renderer: ComposerRenderer | null = null;
 let zoom = 1;
 let exportCancelled = false;
+let exportInProgress = false;
 let exportSessionId: string | null = null;
 type ActiveExporter = {
   start(): Promise<void>;
@@ -109,8 +136,7 @@ type ActiveExporter = {
   cancel(): Promise<void> | void;
 };
 let activeExporter: ActiveExporter | null = null;
-let undoStack: string[] = [];
-let redoStack: string[] = [];
+const history = new UndoHistory();
 let renderInFlight = false;
 let renderQueued = false;
 let timelineRefreshTimer = 0;
@@ -197,11 +223,56 @@ function escapeHtml(value: unknown) {
 
 function snapshot() {
   if (!project) return;
-  const value = JSON.stringify(project);
-  if (undoStack.at(-1) !== value) undoStack.push(value);
-  if (undoStack.length > 60) undoStack.shift();
-  redoStack = [];
+  history.checkpoint(JSON.stringify(project));
 }
+
+function markProjectModified(target: ProjectDocument | null = project) {
+  if (!target) return;
+  target.modifiedAt = new Date().toISOString();
+  scheduleProjectAutosave(target);
+}
+
+function scheduleProjectAutosave(target: ProjectDocument) {
+  window.clearTimeout(autosaveTimer);
+  const generation = ++autosaveGeneration;
+  autosaveTimer = window.setTimeout(() => {
+    if (project !== target || generation !== autosaveGeneration) return;
+    const snapshot = structuredClone(target);
+    const fingerprint = JSON.stringify(snapshot);
+    autosaveWrites = autosaveWrites.then(async () => {
+      if (project !== target || generation !== autosaveGeneration) return;
+      try {
+        await saveProjectRecovery(snapshot);
+        autosaveFingerprint = fingerprint;
+        if (project === target) setStatus(language === "pt-BR" ? "RECUPERAÇÃO SALVA" : "RECOVERY SAVED");
+      } catch (error) {
+        console.error("Project recovery autosave failed.", error);
+        if (project === target) setStatus(`${language === "pt-BR" ? "FALHA NA RECUPERAÇÃO" : "RECOVERY FAILED"} · ${String(error)}`);
+      }
+    });
+  }, 1500);
+}
+
+function startProjectAutosaveTracking(target: ProjectDocument) {
+  window.clearTimeout(autosaveTimer);
+  autosaveGeneration++;
+  autosaveFingerprint = JSON.stringify(target);
+}
+
+function clearRecoveryForProjectChange() {
+  window.clearTimeout(autosaveTimer);
+  autosaveGeneration++;
+  autosaveWrites = autosaveWrites.then(() => clearProjectRecovery()).catch((error: unknown) => {
+    console.error("Could not clear the previous recovery snapshot.", error);
+    setStatus(`${language === "pt-BR" ? "FALHA AO LIMPAR RECUPERAÇÃO" : "COULD NOT CLEAR RECOVERY"} · ${String(error)}`);
+  });
+}
+
+window.setInterval(() => {
+  if (!project) return;
+  const fingerprint = JSON.stringify(project);
+  if (fingerprint !== autosaveFingerprint) scheduleProjectAutosave(project);
+}, 2000);
 
 function restore(value: string) {
   project = JSON.parse(value) as ProjectDocument;
@@ -210,10 +281,22 @@ function restore(value: string) {
   selectedAudioTrackId = "";
   selectedEffectId = "";
   selectedKeyRef = "";
+  renderer?.dispose();
+  renderer = null;
   renderEditor();
   const canvas = app.querySelector<HTMLCanvasElement>("#composition-canvas")!;
-  renderer = new ComposerRenderer(canvas, () => void renderFrame());
-  renderer.setProject(project, projectRoot);
+  initializeRenderer(canvas);
+}
+
+function initializeRenderer(canvas: HTMLCanvasElement) {
+  renderer?.dispose();
+  const onContextRestored = () => {
+    if (app.querySelector("#composition-canvas") !== canvas) return;
+    initializeRenderer(canvas);
+    setStatus("READY · PREVIEW FULL");
+  };
+  renderer = new ComposerRenderer(canvas, () => void renderFrame(), onContextRestored);
+  renderer.setProject(project!, projectRoot);
   void renderFrame();
 }
 
@@ -239,15 +322,15 @@ function applyPresetToInputs(select: HTMLSelectElement, width: HTMLInputElement,
 }
 
 function undo() {
-  if (!project || !undoStack.length) return;
-  redoStack.push(JSON.stringify(project));
-  restore(undoStack.pop()!);
+  if (!project) return;
+  const previous = history.undo(JSON.stringify(project));
+  if (previous !== null) restore(previous);
 }
 
 function redo() {
-  if (!project || !redoStack.length) return;
-  undoStack.push(JSON.stringify(project));
-  restore(redoStack.pop()!);
+  if (!project) return;
+  const next = history.redo(JSON.stringify(project));
+  if (next !== null) restore(next);
 }
 
 function renderLanguage() {
@@ -287,12 +370,56 @@ function renderWelcome() {
           <button class="secondary-button" id="open-project">${t("openProject")}</button>
         </div>
       </section>
+      <section class="recovery-prompt" id="recovery-prompt" hidden></section>
       <footer class="welcome-footer"><span>WEB APP ${APP_VERSION}</span><span>WEBGL2 + WEBCODECS</span><span>LOCAL PROCESSING</span></footer>
     </main>`;
   bindBrandLink();
   app.querySelector("#change-language")?.addEventListener("click", renderLanguage);
   app.querySelector("#new-project")?.addEventListener("click", renderProjectSetup);
   app.querySelector("#open-project")?.addEventListener("click", () => void chooseOpenProject());
+  void updateRecoveryPrompt();
+}
+
+async function updateRecoveryPrompt() {
+  const prompt = app.querySelector<HTMLElement>("#recovery-prompt");
+  if (!prompt) return;
+  try {
+    const recovery = await readProjectRecovery();
+    if (!recovery || !prompt.isConnected) return;
+    const time = new Date(recovery.savedAt).toLocaleString(language === "pt-BR" ? "pt-BR" : "en");
+    prompt.hidden = false;
+    prompt.innerHTML = `<span class="eyebrow">${language === "pt-BR" ? "RECUPERAÇÃO DISPONÍVEL" : "RECOVERY AVAILABLE"}</span>
+      <strong>${escapeHtml(recovery.project.settings.name)}</strong>
+      <small>${language === "pt-BR" ? "Autos salvo em" : "Autosaved"} ${escapeHtml(time)}</small>
+      <div><button class="primary-button" id="restore-recovery">${language === "pt-BR" ? "RECUPERAR PROJETO" : "RESTORE PROJECT"}</button>
+      <button class="text-button" id="discard-recovery">${language === "pt-BR" ? "Descartar" : "Discard"}</button></div>`;
+    prompt.querySelector("#restore-recovery")?.addEventListener("click", () => void restoreProjectRecovery().catch((error) => window.alert(String(error))));
+    prompt.querySelector("#discard-recovery")?.addEventListener("click", () => void (async () => {
+      try {
+        await discardProjectRecovery();
+        prompt.hidden = true;
+      } catch (error) {
+        window.alert(String(error));
+      }
+    })());
+  } catch (error) {
+    console.error("Could not check for a project recovery snapshot.", error);
+    prompt.hidden = false;
+    prompt.textContent = `${language === "pt-BR" ? "Não foi possível verificar a recuperação" : "Could not check project recovery"}: ${String(error)}`;
+  }
+}
+
+async function restoreProjectRecovery() {
+  const recovery = await readProjectRecovery();
+  if (!recovery) return;
+  for (const [reference, blob] of recovery.assets) registerWebAsset(reference, blob);
+  loadProject({
+    root: "web-project",
+    jsonPath: `Recovery · ${recovery.project.settings.name}`,
+    project: recovery.project,
+  }, true);
+  setStatus(language === "pt-BR" ? "PROJETO RECUPERADO" : "PROJECT RECOVERED");
+  if (missingMediaReferences().length) window.setTimeout(showMissingMediaModal, 0);
 }
 
 function renderProjectSetup() {
@@ -400,6 +527,12 @@ function mediaBaseName(reference: string) {
   return reference.replaceAll("\\", "/").split("/").pop()?.toLowerCase() || reference.toLowerCase();
 }
 
+function rememberAssetSource(reference: string, metadata: NonNullable<ProjectDocument["assetMetadata"]>[string]) {
+  if (!project) return;
+  project.assetMetadata ||= {};
+  project.assetMetadata[reference] = metadata;
+}
+
 function mediaAccept(reference: string) {
   const usedAsVideo = project?.layers.some((layer) => layer.asset === reference && layer.kind === "video");
   const usedAsImage = project?.layers.some((layer) => layer.asset === reference && (layer.kind === "image" || layer.kind === "guide"));
@@ -418,7 +551,8 @@ function refreshRelinkedMedia() {
 }
 
 function showMissingMediaModal() {
-  if (!project) return;
+  const currentProject = project;
+  if (!currentProject) return;
   const missing = missingMediaReferences();
   if (!missing.length) {
     app.querySelector("#modal-root")!.innerHTML = "";
@@ -429,8 +563,11 @@ function showMissingMediaModal() {
   const root = app.querySelector<HTMLDivElement>("#modal-root")!;
   root.innerHTML = `<div class="modal-backdrop"><section class="export-modal relink-modal">
     <header><div><span class="micro">MEDIA RELINK</span><h2>${language === "pt-BR" ? "Localizar mídias" : "Locate media"}</h2></div><button id="close-relink">×</button></header>
-    <p class="relink-intro">${language === "pt-BR" ? "O projeto guarda somente os caminhos. Selecione os arquivos originais para reconectar as tracks." : "The project stores paths only. Select the original files to reconnect the tracks."}</p>
-    <div class="relink-list">${missing.map((reference) => `<div><span><strong>${escapeHtml(mediaBaseName(reference))}</strong><small>${escapeHtml(reference)}</small></span><button data-relink-one="${escapeHtml(reference)}">LOCALIZAR</button></div>`).join("")}</div>
+    <p class="relink-intro">${language === "pt-BR" ? "O navegador não fornece caminhos absolutos. O projeto guarda nome e metadados da mídia para ajudar a localizar os arquivos originais." : "Browsers do not provide absolute paths. The project stores media names and metadata to help locate the original files."}</p>
+    <div class="relink-list">${missing.map((reference) => {
+      const metadata = currentProject.assetMetadata?.[reference];
+      return `<div><span><strong>${escapeHtml(metadata?.originalName || mediaBaseName(reference))}</strong><small>${escapeHtml(metadata?.sourcePath || reference)}${metadata ? ` · ${metadata.size} bytes` : ""}</small></span><button data-relink-one="${escapeHtml(reference)}">LOCALIZAR</button></div>`;
+    }).join("")}</div>
     <footer><button id="close-relink-bottom">${language === "pt-BR" ? "ABRIR SEM MÍDIA" : "OPEN OFFLINE"}</button><button class="primary-button" id="relink-batch">${language === "pt-BR" ? "LOCALIZAR EM LOTE" : "LOCATE BATCH"} →</button></footer>
   </section></div>`;
   const close = () => root.innerHTML = "";
@@ -438,10 +575,13 @@ function showMissingMediaModal() {
   root.querySelector("#close-relink-bottom")?.addEventListener("click", close);
   root.querySelector("#relink-batch")?.addEventListener("click", async () => {
     const files = await chooseFiles("image/*,video/*,audio/*,.png,.jpg,.jpeg,.webp,.bmp,.gif,.mp4,.webm,.mov,.m4v,.mp3,.wav,.m4a,.aac,.ogg,.oga,.flac");
-    const byName = new Map(files.map((file) => [file.name.toLowerCase(), file]));
+    if (project !== currentProject) return;
     for (const reference of missingMediaReferences()) {
-      const file = byName.get(mediaBaseName(reference));
-      if (file) registerWebAsset(reference, file);
+      const file = findRelinkFile(reference, currentProject.assetMetadata?.[reference], files);
+      if (file) {
+        registerWebAsset(reference, file);
+        rememberAssetSource(reference, assetSourceMetadata(file));
+      }
     }
     showMissingMediaModal();
   });
@@ -449,16 +589,20 @@ function showMissingMediaModal() {
     const reference = button.dataset.relinkOne!;
     const file = await chooseFile(mediaAccept(reference));
     if (!file) return;
+    if (project !== currentProject) return;
     registerWebAsset(reference, file);
+    rememberAssetSource(reference, assetSourceMetadata(file));
     showMissingMediaModal();
   }));
 }
 
-function loadProject(result: OpenProjectResult) {
+function loadProject(result: OpenProjectResult, recovering = false) {
+  if (!recovering) clearRecoveryForProjectChange();
   videoThumbnailCache.clear();
   audioWaveformCache.clear();
   project = result.project;
   migrateProject(project);
+  startProjectAutosaveTracking(project);
   projectRoot = result.root;
   projectJsonPath = result.jsonPath;
   selectedLayerId = project.layers[0]?.id || "";
@@ -467,13 +611,10 @@ function loadProject(result: OpenProjectResult) {
   selectedKeyRef = "";
   currentTime = 0;
   playing = false;
-  undoStack = [];
-  redoStack = [];
+  history.reset();
   renderEditor();
   const canvas = app.querySelector<HTMLCanvasElement>("#composition-canvas")!;
-  renderer = new ComposerRenderer(canvas, () => void renderFrame());
-  renderer.setProject(project, projectRoot);
-  void renderFrame();
+  initializeRenderer(canvas);
   for (const layer of project.layers) if (layer.kind === "video") void generateVideoThumbnails(layer);
   for (const track of project.audioTracks) void generateAudioWaveform(track.asset);
 }
@@ -503,20 +644,23 @@ function renderEditor() {
   app.innerHTML = `
     <div class="editor-app ${playing || recordMode ? "is-live" : ""}" style="--left-width:${leftColumnWidth}px;--right-width:${rightColumnWidth}px;--timeline-height:${timelineHeight}px">
       <header class="editor-topbar">
-        <button class="nt-link editor-brand" id="brand-link" title="noisetupi.com.br"><img class="brand-icon" src="${logoSimple}" alt="Noisetupi"></button>
+        <button class="nt-link editor-brand" id="brand-link" title="noisetupi.com.br" aria-label="Noisetupi"><img class="brand-icon" src="${logoSimple}" alt=""></button>
         <div class="project-title"><strong>${escapeHtml(settings.name)}</strong><span>${settings.width}×${settings.height} / ${settings.fps} FPS</span></div>
         <div class="history-actions">
-          <button id="undo" title="${t("undo")}" ${undoStack.length ? "" : "disabled"}>↶</button>
-          <button id="redo" title="${t("redo")}" ${redoStack.length ? "" : "disabled"}>↷</button>
+          <button id="undo" title="${t("undo")}" aria-label="${t("undo")}" ${project && history.canUndo(JSON.stringify(project)) ? "" : "disabled"}>↶</button>
+          <button id="redo" title="${t("redo")}" aria-label="${t("redo")}" ${project && history.canRedo(JSON.stringify(project)) ? "" : "disabled"}>↷</button>
         </div>
         <div class="top-actions">
-          <button id="new-project">${t("newProject")}</button>
-          <button id="open-project">${t("openProject")}</button>
-          <button id="save-project">${t("save")}</button>
-          ${missingMediaReferences().length ? `<button class="missing-media-button" id="missing-media">MEDIA !</button>` : ""}
-          <button id="composition-settings">${language === "pt-BR" ? "COMPOSIÇÃO" : "COMPOSITION"}</button>
-          <button class="export-button" id="export-project">${t("export")} ↗</button>
-          <button class="language-mini" id="language">${language === "pt-BR" ? "PT" : "EN"}</button>
+          <button id="toggle-library" class="tablet-panel-toggle" aria-label="${t("inputs")} / ${t("layers")}" aria-expanded="false" title="${t("inputs")} / ${t("layers")}">${uiIcon("library")}<span>${language === "pt-BR" ? "MÍDIA" : "MEDIA"}</span></button>
+          <button id="toggle-inspector" class="tablet-panel-toggle" aria-label="${t("properties")}" aria-expanded="false" title="${t("properties")}">${uiIcon("inspector")}<span>${t("properties")}</span></button>
+          <button id="new-project" aria-label="${t("newProject")}" title="${t("newProject")}">${uiIcon("new")}<span>${t("newProject")}</span></button>
+          <button id="open-project" aria-label="${t("openProject")}" title="${t("openProject")}">${uiIcon("open")}<span>${t("openProject")}</span></button>
+          <button id="save-project" aria-label="${t("save")}" title="${t("save")}">${uiIcon("save")}<span>${t("save")}</span></button>
+          <button id="collect-media" title="${t("collectMedia")}" aria-label="${t("collectMedia")}">${uiIcon("collect")}<span>${t("collectMedia")}</span></button>
+          ${missingMediaReferences().length ? `<button class="missing-media-button" id="missing-media" aria-label="${language === "pt-BR" ? "Localizar mídias ausentes" : "Locate missing media"}" title="${language === "pt-BR" ? "Localizar mídias ausentes" : "Locate missing media"}">${uiIcon("missing")}<span>MEDIA</span></button>` : ""}
+          <button id="composition-settings" aria-label="${language === "pt-BR" ? "Composição" : "Composition"}" title="${language === "pt-BR" ? "Composição" : "Composition"}">${uiIcon("settings")}<span>${language === "pt-BR" ? "COMPOSIÇÃO" : "COMPOSITION"}</span></button>
+          <button class="export-button" id="export-project" aria-label="${t("export")}" title="${t("export")}">${uiIcon("export")}<span>${t("export")}</span></button>
+          <button class="language-mini" id="language" aria-label="${language === "pt-BR" ? "Mudar idioma" : "Change language"}" title="${language === "pt-BR" ? "Mudar idioma" : "Change language"}">${uiIcon("language")}<span>${language === "pt-BR" ? "PT" : "EN"}</span></button>
         </div>
       </header>
       <aside class="left-panel">
@@ -573,8 +717,8 @@ function renderLibrary() {
   const inputButtons: Array<[InputKind, string]> = [
     ["image", t("image")], ["video", t("video")], ["guide", t("guide")], ["geometry", t("geometry")], ["text", t("text")],
   ];
-  const effects: EffectKind[] = ["mirror", "feedback", "levels", "kaleidoscope", "blur", "crop", "edge", "colorKey", "animaTracer"];
-  const post: EffectKind[] = ["rgbDelay", "noise", "glitch", "vhs", "cameraShake", "glow"];
+  const effects = (Object.keys(EFFECT_CATALOG) as EffectKind[]).filter((kind) => EFFECT_CATALOG[kind].category === "layer");
+  const post = (Object.keys(EFFECT_CATALOG) as EffectKind[]).filter((kind) => EFFECT_CATALOG[kind].category === "post");
   return `
     <section class="library-section">
       <details open><summary><span>${t("inputs")}</span><b>+</b></summary><div class="tool-grid">
@@ -591,14 +735,7 @@ function renderLibrary() {
 }
 
 function effectLabel(kind: EffectKind) {
-  const labels: Record<EffectKind, [string, string]> = {
-    mirror: ["Espelho", "Mirror"], feedback: ["Rastro", "Trail"], levels: ["Níveis / cores", "Levels / color"],
-    kaleidoscope: ["Caleidoscópio", "Kaleidoscope"], blur: ["Desfoque", "Blur"], crop: ["Recorte", "Crop"],
-    edge: ["Bordas", "Edge"], colorKey: ["Chroma key", "Color key"], animaTracer: ["animaTracer", "animaTracer"],
-    rgbDelay: ["RGB Delay", "RGB Delay"], noise: ["Ruído", "Noise"], glitch: ["Glitch", "Glitch"],
-    vhs: ["VHS", "VHS"], cameraShake: ["Tremor de câmera", "Camera shake"], glow: ["Bloom", "Bloom"],
-  };
-  return labels[kind][language === "pt-BR" ? 0 : 1];
+  return EFFECT_CATALOG[kind].labels[language === "pt-BR" ? "pt-BR" : "en"];
 }
 
 function renderLayerItem(layer: Layer) {
@@ -619,7 +756,7 @@ function keyframeTolerance() {
 }
 
 function keyframeAt(keys: Keyframe[] | undefined, time = currentTime) {
-  return keys?.find((key) => Math.abs(key.time - time) <= keyframeTolerance());
+  return findKeyframeAt(keys, time, keyframeTolerance());
 }
 
 function keyframeFromRef(ref = selectedKeyRef) {
@@ -654,14 +791,9 @@ function upsertKeyframe(keys: Keyframe[], value: number) {
   const keyTime = recordMode && playing && project
     ? Math.round(currentTime * project.settings.fps) / project.settings.fps
     : currentTime;
-  const existing = keyframeAt(keys, keyTime);
-  if (existing) {
-    existing.value = value;
-    return false;
-  }
-  keys.push({ time: keyTime, value, easing: recordMode && playing ? "linear" : "easeInOut" });
-  keys.sort((a, b) => a.time - b.time);
-  return true;
+  const result = upsertDomainKeyframe(keys, keyTime, value, keyframeTolerance(), recordMode && playing ? "linear" : "easeInOut");
+  keys.splice(0, keys.length, ...result.keyframes);
+  return result.created;
 }
 
 function markRecordedTrack(token: string) {
@@ -833,18 +965,11 @@ function renderAudioInspector(track: AudioTrack) {
 }
 
 function audioEffectLabel(kind: AudioEffectKind) {
-  return ({ lowpass: "LOW PASS", highpass: "HIGH PASS", eq3: "EQ 3-BAND", delay: "DELAY", compressor: "COMPRESSOR", reverb: "REVERB" } as Record<AudioEffectKind, string>)[kind];
+  return AUDIO_EFFECT_CATALOG[kind].label;
 }
 
-function audioEffectDefinitions(effect: AudioEffectNode): Array<[string, string, number, number, number]> {
-  return ({
-    lowpass: [["FREQUENCY", "frequency", 20, 22000, 1], ["RESONANCE", "resonance", .01, 30, .01]],
-    highpass: [["FREQUENCY", "frequency", 20, 22000, 1], ["RESONANCE", "resonance", .01, 30, .01]],
-    eq3: [["LOW DB", "low", -24, 24, .1], ["MID DB", "mid", -24, 24, .1], ["HIGH DB", "high", -24, 24, .1]],
-    delay: [["TIME", "time", .01, 4, .01], ["FEEDBACK", "feedback", 0, .92, .01], ["MIX", "mix", 0, 1, .01]],
-    compressor: [["THRESHOLD", "threshold", -80, 0, 1], ["RATIO", "ratio", 1, 20, .1], ["ATTACK", "attack", 0, 1, .001], ["RELEASE", "release", .01, 1, .01]],
-    reverb: [["DURATION", "duration", .1, 6, .1], ["DECAY", "decay", .1, 8, .1], ["MIX", "mix", 0, 1, .01]],
-  } as Record<AudioEffectKind, Array<[string, string, number, number, number]>>)[effect.kind];
+function audioEffectDefinitions(effect: AudioEffectNode): readonly EffectParameterDefinition[] {
+  return AUDIO_EFFECT_PARAMETERS[effect.kind];
 }
 
 function renderAudioEffect(effect: AudioEffectNode) {
@@ -902,26 +1027,12 @@ function renderEffectChain(effects: EffectNode[]) {
 }
 
 function effectParamDefinition(effect: EffectNode, layer: Layer) {
-  const common: Record<EffectKind, Array<[string, string, number, number, number]>> = {
-    mirror: [["MODE", "mode", 1, 3, 1], ["CENTER", "center", 0, 1, .01]],
-    feedback: [["INSTANCES", "count", 1, 32, 1], ["TIME SPACING", "spacing", 0, 1, .01], ["OPACITY DECAY", "decay", .05, 1, .01], ["OFFSET X", "offsetX", -500, 500, 1], ["OFFSET Y", "offsetY", -500, 500, 1]],
-    levels: [["BRIGHTNESS", "brightness", -1, 1, .01], ["CONTRAST", "contrast", 0, 4, .01], ["SATURATION", "saturation", 0, 4, .01], ["GAMMA", "gamma", .05, 4, .01]],
-    kaleidoscope: [["SEGMENTS", "segments", 2, 32, 1], ["ROTATION", "rotation", -6.28, 6.28, .01], ["ZOOM", "zoom", .1, 5, .01]],
-    blur: [["GAUSSIAN RADIUS", "radius", 0, 160, .1], ["QUALITY", "quality", 1, 3, 1]],
-    crop: [["LEFT", "left", 0, 1, .01], ["RIGHT", "right", 0, 1, .01], ["TOP", "top", 0, 1, .01], ["BOTTOM", "bottom", 0, 1, .01]],
-    edge: [["AMOUNT", "amount", 0, 4, .01], ["THRESHOLD", "threshold", 0, 1, .01], ["COLORIZE", "colorize", 0, 1, 1]],
-    colorKey: [["HUE", "hue", 0, 1, .01], ["TOLERANCE", "tolerance", 0, 1, .01], ["SOFTNESS", "softness", 0, .5, .01]],
-    animaTracer: layer.kind === "image" || layer.kind === "video" || layer.kind === "guide"
-      ? [["PROGRESS", "progress", 0, 1, .001], ["EDGE SENSITIVITY", "sensitivity", 0, 1, .01], ["LINE THICKNESS", "thickness", .5, 12, .1], ["SOFTNESS", "softness", .001, .5, .001], ["DIRECTION", "direction", 0, 3, 1], ["IRREGULARITY", "irregularity", 0, 1, .01], ["INVERT", "invert", 0, 1, 1]]
-      : [["PROGRESS", "progress", 0, 1, .001], ["LINE SENSITIVITY", "sensitivity", 0, 1, .01], ["STROKE WIDTH", "thickness", .5, 12, .1], ["SOFTNESS", "softness", .001, .5, .001], ["DIRECTION", "direction", 0, 3, 1], ["IRREGULARITY", "irregularity", 0, 1, .01], ["INVERT", "invert", 0, 1, 1]],
-    rgbDelay: [["RED DELAY / FRAMES", "redDelay", -24, 0, 1], ["GREEN DELAY / FRAMES", "greenDelay", -24, 0, 1], ["BLUE DELAY / FRAMES", "blueDelay", -24, 0, 1]],
-    noise: [["AMOUNT", "amount", 0, 1, .01], ["SCALE", "scale", .1, 10, .1]],
-    glitch: [["AMOUNT", "amount", 0, 1, .01], ["RATE", "frequency", .1, 60, .1], ["BLOCK SIZE", "blockSize", 2, 240, 1], ["H SHIFT", "shift", 0, .5, .001], ["RGB SPLIT", "rgbSplit", 0, 80, .5], ["SCANLINES", "scanlines", 0, 1, .01]],
-    vhs: [["AMOUNT", "amount", 0, 1, .01], ["SCANLINES", "scanlines", 20, 2000, 1], ["TRACKING", "tracking", 0, 1, .01]],
-    cameraShake: [["AMOUNT", "amount", 0, .2, .001], ["SPEED", "speed", .1, 60, .1]],
-    glow: [["THRESHOLD", "threshold", 0, 1, .01], ["SOFT KNEE", "knee", .01, .75, .01], ["RADIUS", "radius", 0, 120, .5], ["INTENSITY", "intensity", 0, 6, .01], ["SATURATION", "saturation", 0, 2, .01]],
-  };
-  return common[effect.kind];
+  return EFFECT_PARAMETERS[effect.kind].map(([label, key, min, max, step]) => {
+    if (effect.kind !== "animaTracer") return [label, key, min, max, step] as const;
+    if (key === "sensitivity") return [layer.kind === "image" || layer.kind === "video" || layer.kind === "guide" ? "EDGE SENSITIVITY" : "LINE SENSITIVITY", key, min, max, step] as const;
+    if (key === "thickness") return [layer.kind === "image" || layer.kind === "video" || layer.kind === "guide" ? "LINE THICKNESS" : "STROKE WIDTH", key, min, max, step] as const;
+    return [label, key, min, max, step] as const;
+  });
 }
 
 function renderEffectInspector(layer: Layer, effect: EffectNode) {
@@ -955,8 +1066,12 @@ function renderTimeline() {
       </div>
       <div class="curve-tools" id="curve-tools">${renderCurveTools()}</div>
       <div class="timeline-zoom-controls">
-        <span>H</span><button data-timeline-zoom="x:-1">−</button><button data-timeline-zoom="x:1">+</button>
-        <span>V</span><button data-timeline-zoom="y:-1">−</button><button data-timeline-zoom="y:1">+</button>
+        <span title="${language === "pt-BR" ? "Zoom horizontal" : "Horizontal zoom"}">H</span>
+        <button data-timeline-zoom="x:-1" title="${language === "pt-BR" ? "Reduzir zoom horizontal" : "Zoom out horizontally"}" aria-label="${language === "pt-BR" ? "Reduzir zoom horizontal" : "Zoom out horizontally"}"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="8" r="5"/><path d="M4.8 8h6.4M12 12l5 5"/></svg></button>
+        <button data-timeline-zoom="x:1" title="${language === "pt-BR" ? "Ampliar zoom horizontal" : "Zoom in horizontally"}" aria-label="${language === "pt-BR" ? "Ampliar zoom horizontal" : "Zoom in horizontally"}"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="8" r="5"/><path d="M4.8 8h6.4M8 4.8v6.4M12 12l5 5"/></svg></button>
+        <span title="${language === "pt-BR" ? "Zoom vertical" : "Vertical zoom"}">V</span>
+        <button data-timeline-zoom="y:-1" title="${language === "pt-BR" ? "Reduzir zoom vertical" : "Zoom out vertically"}" aria-label="${language === "pt-BR" ? "Reduzir zoom vertical" : "Zoom out vertically"}"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="8" r="5"/><path d="M4.8 8h6.4M12 12l5 5"/></svg></button>
+        <button data-timeline-zoom="y:1" title="${language === "pt-BR" ? "Ampliar zoom vertical" : "Zoom in vertically"}" aria-label="${language === "pt-BR" ? "Ampliar zoom vertical" : "Zoom in vertically"}"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="8" r="5"/><path d="M4.8 8h6.4M8 4.8v6.4M12 12l5 5"/></svg></button>
       </div>
       <button class="snap-toggle ${timelineSnap ? "is-active" : ""}" id="timeline-snap" title="${language === "pt-BR" ? "Snap em frames, bordas, clipes e keyframes" : "Snap to frames, edges, clips and keyframes"}">SNAP</button>
       <label>${t("duration").toUpperCase()} <input id="duration-input" type="number" min=".1" max="7200" step=".1" value="${duration}"> SEC</label>
@@ -1219,6 +1334,22 @@ function updatePreviewQualityState() {
   if (target) target.textContent = previewQualityState();
 }
 
+function uiIcon(name: "library" | "inspector" | "new" | "open" | "save" | "collect" | "missing" | "settings" | "export" | "language") {
+  const paths = {
+    library: '<path d="M4 5h16M4 12h16M4 19h16"/><path d="M7 5v14"/>',
+    inspector: '<rect x="4" y="4" width="16" height="16" rx="1"/><path d="M10 4v16"/>',
+    new: '<path d="M12 5v14M5 12h14"/><rect x="3" y="3" width="18" height="18" rx="2"/>',
+    open: '<path d="M3 7V5h7l2 2h9v12H3z"/><path d="M3 10h18"/>',
+    save: '<path d="M4 3h14l3 3v15H3V3z"/><path d="M7 3v6h10V3M7 21v-8h10v8"/>',
+    collect: '<path d="M4 7h16v13H4z"/><path d="M8 7V4h8v3M8 12h8M8 16h5"/>',
+    missing: '<path d="M12 3 2.8 20h18.4L12 3z"/><path d="M12 9v5M12 17h.01"/>',
+    settings: '<rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 9h18M9 9v11"/>',
+    export: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 17v4h16v-4"/>',
+    language: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+  } as const;
+  return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name]}</svg>`;
+}
+
 function bindEditor() {
   bindBrandLink();
   app.querySelectorAll<HTMLDetailsElement>("[data-library-accordion]").forEach((details) => details.addEventListener("toggle", () => {
@@ -1238,6 +1369,7 @@ function bindEditor() {
     playing = false;
     playbackGeneration++;
     project = null;
+    renderer?.dispose();
     renderer = null;
     renderProjectSetup();
   })());
@@ -1246,6 +1378,35 @@ function bindEditor() {
     await chooseOpenProject();
   })());
   app.querySelector("#save-project")?.addEventListener("click", () => void saveProject());
+  app.querySelector("#toggle-library")?.addEventListener("click", () => {
+    const editor = app.querySelector<HTMLElement>(".editor-app");
+    const open = editor?.classList.toggle("is-library-open") || false;
+    editor?.classList.remove("is-inspector-open");
+    app.querySelector("#toggle-library")?.setAttribute("aria-expanded", String(open));
+    app.querySelector("#toggle-inspector")?.setAttribute("aria-expanded", "false");
+  });
+  app.querySelector("#toggle-inspector")?.addEventListener("click", () => {
+    const editor = app.querySelector<HTMLElement>(".editor-app");
+    const open = editor?.classList.toggle("is-inspector-open") || false;
+    editor?.classList.remove("is-library-open");
+    app.querySelector("#toggle-inspector")?.setAttribute("aria-expanded", String(open));
+    app.querySelector("#toggle-library")?.setAttribute("aria-expanded", "false");
+  });
+  app.querySelector("#collect-media")?.addEventListener("click", () => void (async () => {
+    if (!project) return;
+    const button = app.querySelector<HTMLButtonElement>("#collect-media");
+    if (button) button.disabled = true;
+    try {
+      const fileName = await collectWebProject(project);
+      setStatus(`${language === "pt-BR" ? "MÍDIAS COLETADAS" : "MEDIA COLLECTED"} · ${fileName}`);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      window.alert(String(error));
+    } finally {
+      const currentButton = app.querySelector<HTMLButtonElement>("#collect-media");
+      if (currentButton) currentButton.disabled = false;
+    }
+  })());
   app.querySelector("#missing-media")?.addEventListener("click", showMissingMediaModal);
   app.querySelector("#composition-settings")?.addEventListener("click", showCompositionModal);
   app.querySelector("#export-project")?.addEventListener("click", showExportModal);
@@ -1305,6 +1466,11 @@ function bindDynamicControls(root: ParentNode = app) {
     if (!track) return;
     snapshot();
     track.linked = !track.linked;
+    if (track.linked && track.linkedLayerId) {
+      const owner = project!.layers.find((layer) => layer.id === track.linkedLayerId);
+      if (owner?.kind === "video") syncLinkedAudio(owner);
+    }
+    project!.modifiedAt = new Date().toISOString();
     updateTimeline();
     updateInspector();
   }));
@@ -1484,17 +1650,13 @@ function bindDynamicControls(root: ParentNode = app) {
       track.endTime = Math.max(track.startTime + 1 / project!.settings.fps, track.endTime);
       track.sourceOut = Math.max(track.sourceIn + .001, track.sourceOut);
       normalizeFades(track);
-      if (track.linked && track.linkedLayerId) {
-        const owner = project!.layers.find((layer) => layer.id === track.linkedLayerId);
-        if (owner) {
-          owner.fadeInStart = track.fadeInStart;
-          owner.fadeInEnd = track.fadeInEnd;
-          owner.fadeOutStart = track.fadeOutStart;
-          owner.fadeOutEnd = track.fadeOutEnd;
-        }
-      }
+      const linkedLayer = track.linked ? syncLinkedLayer(track) : undefined;
       updateParamScrub(input);
       project!.modifiedAt = new Date().toISOString();
+      if (linkedLayer) {
+        renderer?.setPlaybackState(playing, currentTime);
+        void renderFrame();
+      }
       if (playing) void audioEngine.play(project!, currentTime);
       requestTimelineRefresh();
     });
@@ -1568,7 +1730,16 @@ function bindDynamicControls(root: ParentNode = app) {
     const track = selectedAudioTrack();
     if (!track) return;
     snapshot();
-    (track as unknown as Record<string, boolean>)[input.dataset.audioCheck!] = input.checked;
+    if (input.dataset.audioCheck === "linked") {
+      track.linked = input.checked;
+      if (track.linked && track.linkedLayerId) {
+        const owner = project!.layers.find((layer) => layer.id === track.linkedLayerId);
+        if (owner?.kind === "video") syncLinkedAudio(owner);
+      }
+    } else {
+      (track as unknown as Record<string, boolean>)[input.dataset.audioCheck!] = input.checked;
+    }
+    project!.modifiedAt = new Date().toISOString();
     if (playing) void audioEngine.play(project!, currentTime);
     updateTimeline();
   }));
@@ -1694,11 +1865,11 @@ function findEffect(id: string) {
 
 function renderEditorPreservingCanvas() {
   if (!project) return;
+  renderer?.dispose();
+  renderer = null;
   renderEditor();
   const canvas = app.querySelector<HTMLCanvasElement>("#composition-canvas")!;
-  renderer = new ComposerRenderer(canvas, () => void renderFrame());
-  renderer.setProject(project, projectRoot);
-  void renderFrame();
+  initializeRenderer(canvas);
 }
 
 function updatePanels() {
@@ -1804,6 +1975,7 @@ async function addInput(kind: InputKind) {
     }
   }
   project.layers.unshift(layer);
+  if (asset) rememberAssetSource(asset.relativePath, asset.sourceMetadata);
   selectedLayerId = layer.id;
   selectedAudioTrackId = "";
   selectedEffectId = "";
@@ -1848,6 +2020,7 @@ async function addAudioInput() {
     if (duration > project.settings.duration) project.settings.duration = duration;
     const track = createAudioTrack(asset.fileName, asset.relativePath, duration);
     project.audioTracks.push(track);
+    rememberAssetSource(asset.relativePath, asset.sourceMetadata);
     selectedAudioTrackId = track.id;
     selectedLayerId = "";
     selectedEffectId = "";
@@ -1882,6 +2055,7 @@ async function replaceLayerMedia(layerId: string) {
     }
     snapshot();
     layer.asset = asset.relativePath;
+    rememberAssetSource(asset.relativePath, asset.sourceMetadata);
     renderer?.removeMedia(layer.id);
     videoThumbnailCache.delete(layer.id);
     if (layer.kind === "video") {
@@ -1951,6 +2125,7 @@ async function replaceAudioMedia(trackId: string) {
     const clipDuration = track.endTime - track.startTime;
     audioWaveformCache.delete(track.asset);
     track.asset = asset.relativePath;
+    rememberAssetSource(asset.relativePath, asset.sourceMetadata);
     track.sourceIn = 0;
     track.sourceOut = duration;
     track.loop = clipDuration * Math.max(.05, Math.abs(track.playbackRate)) > duration;
@@ -1977,21 +2152,11 @@ function deleteAudioTrack(id = selectedAudioTrackId) {
 }
 
 function syncLinkedAudio(layer: Layer) {
-  if (!project || layer.kind !== "video") return;
-  for (const track of project.audioTracks) {
-    if (!track.linked || track.linkedLayerId !== layer.id) continue;
-    track.startTime = layer.startTime;
-    track.endTime = layer.endTime;
-    track.sourceIn = layer.sourceIn;
-    track.sourceOut = layer.sourceOut;
-    track.playbackRate = layer.playbackRate;
-    track.reverse = layer.reverse;
-    track.loop = layer.loop;
-    track.fadeInStart = layer.fadeInStart;
-    track.fadeInEnd = layer.fadeInEnd;
-    track.fadeOutStart = layer.fadeOutStart;
-    track.fadeOutEnd = layer.fadeOutEnd;
-  }
+  if (project) syncLinkedAudioTracks(layer, project.audioTracks);
+}
+
+function syncLinkedLayer(track: AudioTrack) {
+  return project ? syncLinkedVideoLayer(track, project.layers, project.audioTracks) : undefined;
 }
 
 function copyParameterSection(section: ClipboardSection) {
@@ -2169,24 +2334,16 @@ function duplicateLayer() {
 function toggleKeyframe(property: string) {
   const layer = selectedLayer();
   if (!layer) return;
-  snapshot();
-  const keys = layer.keyframes[property] || [];
-  const index = keys.findIndex((key) => Math.abs(key.time - currentTime) <= keyframeTolerance());
-  if (index >= 0) {
-    keys.splice(index, 1);
-    selectedKeyRef = "";
-  } else {
-    keys.push({
-      time: currentTime,
-      value: renderer?.layerValue(layer, property as keyof Layer, currentTime)
-        ?? Number((layer as unknown as Record<string, unknown>)[property]),
-      easing: "easeInOut",
-    });
-    selectedKeyRef = `${layer.id}|${property}|${currentTime}`;
-  }
-  keys.sort((a, b) => a.time - b.time);
-  layer.keyframes[property] = keys;
-  project!.modifiedAt = new Date().toISOString();
+  automationApi.dispatch({
+    type: "keyframe.toggle",
+    layerId: layer.id,
+    property,
+    time: currentTime,
+    value: renderer?.layerValue(layer, property as keyof Layer, currentTime)
+      ?? Number((layer as unknown as Record<string, unknown>)[property]),
+  });
+  const keyframe = keyframeAt(layer.keyframes[property]);
+  selectedKeyRef = keyframe ? `${layer.id}|${property}|${keyframe.time}` : "";
   updateInspector();
   updateTimeline();
   void renderFrame();
@@ -2195,27 +2352,18 @@ function toggleKeyframe(property: string) {
 function toggleEffectKeyframe(property: string) {
   const effect = selectedEffect();
   if (!effect) return;
-  snapshot();
-  effect.keyframes ||= {};
-  const keys = effect.keyframes[property] || [];
-  const index = keys.findIndex((key) => Math.abs(key.time - currentTime) <= keyframeTolerance());
-  if (index >= 0) {
-    keys.splice(index, 1);
-    selectedKeyRef = "";
-  } else {
-    keys.push({
-      time: currentTime,
-      value: renderer?.effectValue(effect, property, currentTime) ?? effect.params[property],
-      easing: "easeInOut",
-    });
-    const owner = project!.postEffects.some((item) => item.id === effect.id)
-      ? "__post__"
-      : project!.layers.find((layer) => layer.effects.some((item) => item.id === effect.id))?.id || "__post__";
-    selectedKeyRef = `${owner}|fx:${effect.id}:${property}|${currentTime}`;
-  }
-  keys.sort((a, b) => a.time - b.time);
-  effect.keyframes[property] = keys;
-  project!.modifiedAt = new Date().toISOString();
+  automationApi.dispatch({
+    type: "effect.keyframe.toggle",
+    effectId: effect.id,
+    property,
+    time: currentTime,
+    value: renderer?.effectValue(effect, property, currentTime) ?? effect.params[property],
+  });
+  const owner = project!.postEffects.some((item) => item.id === effect.id)
+    ? "__post__"
+    : project!.layers.find((layer) => layer.effects.some((item) => item.id === effect.id))?.id || "__post__";
+  const keyframe = keyframeAt(effect.keyframes[property]);
+  selectedKeyRef = keyframe ? `${owner}|fx:${effect.id}:${property}|${keyframe.time}` : "";
   updateInspector();
   updateTimeline();
   void renderFrame();
@@ -2224,24 +2372,16 @@ function toggleEffectKeyframe(property: string) {
 function toggleColorKeyframe(property: "fill" | "stroke") {
   const layer = selectedLayer();
   if (!layer) return;
-  snapshot();
   const key = `${property}Color`;
-  const keys = layer.keyframes[key] || [];
-  const index = keys.findIndex((item) => Math.abs(item.time - currentTime) <= keyframeTolerance());
-  if (index >= 0) {
-    keys.splice(index, 1);
-    selectedKeyRef = "";
-  } else {
-    keys.push({
-      time: currentTime,
-      value: parseInt((renderer?.layerColor(layer, property, currentTime) || layer[property]).slice(1), 16),
-      easing: "easeInOut",
-    });
-    selectedKeyRef = `${layer.id}|${key}|${currentTime}`;
-  }
-  keys.sort((a, b) => a.time - b.time);
-  layer.keyframes[key] = keys;
-  project!.modifiedAt = new Date().toISOString();
+  automationApi.dispatch({
+    type: "keyframe.toggle",
+    layerId: layer.id,
+    property: key,
+    time: currentTime,
+    value: parseInt((renderer?.layerColor(layer, property, currentTime) || layer[property]).slice(1), 16),
+  });
+  const keyframe = keyframeAt(layer.keyframes[key]);
+  selectedKeyRef = keyframe ? `${layer.id}|${key}|${keyframe.time}` : "";
   updateInspector();
   updateTimeline();
   void renderFrame();
@@ -2268,8 +2408,12 @@ function updateFadeClipVisuals(clip: HTMLElement, item: Pick<Layer, "startTime" 
   });
 }
 
-function timelineSnapCandidates(excludeLayerId = "", excludeAudioId = "") {
-  return collectTimelineSnapCandidates(project, currentTime, excludeLayerId, excludeAudioId);
+function timelineSnapCandidates(layerId = "", audioId = "", excludePlayhead = false) {
+  return collectTimelineSnapCandidates(project, currentTime, {
+    layerId,
+    audioId,
+    playhead: excludePlayhead,
+  });
 }
 
 function timelineContentRect(scrubArea: HTMLElement) {
@@ -2281,10 +2425,17 @@ function timelineTimeFromPointer(event: PointerEvent, scrubArea: HTMLElement) {
   return clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1) * (project?.settings.duration || 0);
 }
 
-function snapTimelineTime(value: number, scrubArea: HTMLElement, excludeLayerId = "", excludeAudioId = "", bypass = false) {
+function snapTimelineTime(
+  value: number,
+  scrubArea: HTMLElement,
+  excludeLayerId = "",
+  excludeAudioId = "",
+  bypass = false,
+  excludePlayhead = false,
+) {
   return calculateTimelineSnap(value, project, timelineSnap,
     () => timelineContentRect(scrubArea).width,
-    () => timelineSnapCandidates(excludeLayerId, excludeAudioId), bypass);
+    () => timelineSnapCandidates(excludeLayerId, excludeAudioId, excludePlayhead), bypass);
 }
 
 function snapClipStart(value: number, length: number, scrubArea: HTMLElement, excludeLayerId = "", excludeAudioId = "", bypass = false) {
@@ -2501,6 +2652,9 @@ function bindTimeline() {
     const layer = videoId ? project.layers.find((item) => item.id === videoId) : undefined;
     const track = audioId ? project.audioTracks.find((item) => item.id === audioId) : undefined;
     if (!layer && !track) return;
+    const linkedLayer = track?.linked && track.linkedLayerId
+      ? project.layers.find((item) => item.id === track.linkedLayerId && item.kind === "video")
+      : undefined;
     if (layer) selectLayerById(layer.id, false);
     else if (track) selectAudioTrackById(track.id, false);
     snapshot();
@@ -2513,8 +2667,9 @@ function bindTimeline() {
       fadeOutStart: (layer || track)!.fadeOutStart,
       fadeOutEnd: (layer || track)!.fadeOutEnd,
     };
-    const layerKeyTimes = layer ? new Map<string, number[]>(Object.entries(layer.keyframes).map(([property, keys]) => [property, keys.map((key) => key.time)])) : null;
-    const effectKeyTimes = layer ? new Map<string, Map<string, number[]>>(layer.effects.map((effect) => [effect.id, new Map(Object.entries(effect.keyframes).map(([property, keys]) => [property, keys.map((key) => key.time)]))])) : null;
+    const animatedLayer = layer || linkedLayer;
+    const layerKeyTimes = animatedLayer ? new Map<string, number[]>(Object.entries(animatedLayer.keyframes).map(([property, keys]) => [property, keys.map((key) => key.time)])) : null;
+    const effectKeyTimes = animatedLayer ? new Map<string, Map<string, number[]>>(animatedLayer.effects.map((effect) => [effect.id, new Map(Object.entries(effect.keyframes).map(([property, keys]) => [property, keys.map((key) => key.time)]))])) : null;
     const startX = event.clientX;
     const timelinePixelWidth = timelineContentRect(scrubArea).width;
     clip.setPointerCapture(event.pointerId);
@@ -2550,13 +2705,21 @@ function bindTimeline() {
         track.fadeInEnd = initialFades.fadeInEnd + shift;
         track.fadeOutStart = initialFades.fadeOutStart + shift;
         track.fadeOutEnd = initialFades.fadeOutEnd + shift;
-        if (track.linked && track.linkedLayerId) {
-          const owner = project!.layers.find((item) => item.id === track.linkedLayerId);
-          if (owner) {
-            owner.startTime = track.startTime;
-            owner.endTime = track.endTime;
-            syncLinkedAudio(owner);
+        if (linkedLayer) {
+          linkedLayer.startTime = track.startTime;
+          linkedLayer.endTime = track.endTime;
+          linkedLayer.fadeInStart = track.fadeInStart;
+          linkedLayer.fadeInEnd = track.fadeInEnd;
+          linkedLayer.fadeOutStart = track.fadeOutStart;
+          linkedLayer.fadeOutEnd = track.fadeOutEnd;
+          for (const [property, times] of layerKeyTimes || []) linkedLayer.keyframes[property].forEach((key, index) => key.time = clamp(times[index] + shift, 0, project!.settings.duration));
+          for (const effect of linkedLayer.effects) {
+            const sourceTimes = effectKeyTimes?.get(effect.id);
+            if (!sourceTimes) continue;
+            for (const [property, times] of sourceTimes) effect.keyframes[property].forEach((key, index) => key.time = clamp(times[index] + shift, 0, project!.settings.duration));
           }
+          syncLinkedAudio(linkedLayer);
+          updateTimelineClipStyles(linkedLayer.id, linkedLayer.startTime, linkedLayer.endTime);
         }
       }
       clip.style.left = `${snapped / project!.settings.duration * 100}%`;
@@ -2606,13 +2769,12 @@ function bindTimeline() {
       }
       normalizeFades(track);
       if (track.linked && track.linkedLayerId) {
+        syncLinkedLayer(track);
         const owner = project!.layers.find((item) => item.id === track.linkedLayerId);
         if (owner) {
-          owner.startTime = track.startTime;
-          owner.endTime = track.endTime;
-          owner.sourceIn = track.sourceIn;
-          owner.loop = track.loop;
-          syncLinkedAudio(owner);
+          updateTimelineClipStyles(owner.id, owner.startTime, owner.endTime);
+          renderer?.setPlaybackState(playing, currentTime);
+          void renderFrame();
         }
       }
       updateTimelineClipStyles(track.id, track.startTime, track.endTime, true);
@@ -2648,7 +2810,13 @@ function bindTimeline() {
     snapshot();
     handle.setPointerCapture(event.pointerId);
     const move = (moveEvent: PointerEvent) => {
-      item[property] = snapTimelineTime(timelineTimeFromPointer(moveEvent, scrubArea), scrubArea, "", "", moveEvent.altKey);
+      item[property] = snapTimelineTime(
+        timelineTimeFromPointer(moveEvent, scrubArea),
+        scrubArea,
+        layerItem?.id || "",
+        audioItem?.id || "",
+        moveEvent.altKey,
+      );
       normalizeFades(item);
       updateFadeClipVisuals(clip, item);
       if (layerItem?.kind === "video") syncLinkedAudio(layerItem);
@@ -2684,7 +2852,7 @@ function bindTimeline() {
   let scrubbing = false;
   const scrubToPointer = (event: PointerEvent) => {
     if (!project) return;
-    setTime(snapTimelineTime(timelineTimeFromPointer(event, scrubArea), scrubArea, "", "", event.altKey), false);
+    setTime(snapTimelineTime(timelineTimeFromPointer(event, scrubArea), scrubArea, "", "", event.altKey, true), false);
   };
   scrubArea.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || (event.target as HTMLElement).closest("[data-key-ref], [data-trim-clip], [data-trim-audio], [data-fade-handle], [data-move-layer-clip], [data-move-audio-clip]")) return;
@@ -3372,11 +3540,20 @@ function fitCanvas() {
 
 async function saveProject() {
   if (!project) return true;
-  project.modifiedAt = new Date().toISOString();
+  markProjectModified();
   try {
     const savedName = await saveWebProject(project);
     if (!savedName) return false;
     projectJsonPath = savedName;
+    startProjectAutosaveTracking(project);
+    try {
+      await autosaveWrites;
+      await clearProjectRecovery();
+    } catch (error) {
+      console.error("Could not clear the recovery snapshot after saving.", error);
+      setStatus(`${language === "pt-BR" ? "PROJETO SALVO · LIMPE A RECUPERAÇÃO MANUALMENTE" : "PROJECT SAVED · RECOVERY CLEANUP FAILED"} · ${String(error)}`);
+      return true;
+    }
     setStatus(t("projectSaved").toUpperCase());
     return true;
   } catch (error) {
@@ -3545,6 +3722,16 @@ function closeExportModal() {
 }
 
 async function startExport() {
+  if (!project || !renderer || exportInProgress) return;
+  exportInProgress = true;
+  try {
+    await runExport();
+  } finally {
+    exportInProgress = false;
+  }
+}
+
+async function runExport() {
   if (!project || !renderer) return;
   notificationAudio ||= new AudioContext();
   void notificationAudio.resume();
@@ -3617,8 +3804,12 @@ async function startExport() {
     currentTime = previousTime;
     renderer.setPlaybackState(false, currentTime);
     renderer.setPreviewScale(1);
-    await renderer.render(currentTime);
-    setTime(currentTime, false);
+    try {
+      await renderer.render(currentTime);
+      setTime(currentTime, false);
+    } catch (error) {
+      setStatus(`RENDER ERROR: ${String(error)}`);
+    }
   }
 }
 
@@ -3663,6 +3854,13 @@ function setStatus(message: string) {
 }
 
 window.addEventListener("keydown", (event) => {
+  if (exportInProgress) {
+    if ((event.ctrlKey || event.metaKey) || event.code === "Space"
+      || ["Delete", "Backspace", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+      event.preventDefault();
+    }
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
     void saveProject();
@@ -3704,6 +3902,26 @@ window.addEventListener("beforeunload", (event) => {
   event.preventDefault();
   event.returnValue = "";
 });
+
+automationApi = createVctApi({
+  getProject: () => project,
+  keyframeTolerance,
+  confirmConsequential: (message) => window.confirm(language === "pt-BR" ? message : "Confirm effect removal before applying this batch?"),
+  commitProject: (next, label) => {
+    if (!project) throw new Error("Nenhum projeto está aberto.");
+    snapshot();
+    Object.assign(project, next);
+    markProjectModified(project);
+    updatePanels();
+    updateTransformBox();
+    const serialized = JSON.stringify(project);
+    app.querySelector<HTMLButtonElement>("#undo")?.toggleAttribute("disabled", !history.canUndo(serialized));
+    app.querySelector<HTMLButtonElement>("#redo")?.toggleAttribute("disabled", !history.canRedo(serialized));
+    setStatus(`VCT · ${label}`);
+    void renderFrame();
+  },
+});
+Object.defineProperty(window, "vct", { value: automationApi, configurable: true, enumerable: false });
 
 renderLanguage();
 void document.fonts.ready.then(() => void renderFrame());

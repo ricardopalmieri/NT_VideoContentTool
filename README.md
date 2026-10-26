@@ -48,7 +48,7 @@ Não exige conta nem acesso às mídias pessoais.
 ```text
 src/
   main.ts                 entrada do aplicativo
-  model/                  tipos v2, fábricas e migração histórica
+  model/                  tipos v2, migração e operações de domínio puras
   io/                     arquivos, blobs, salvar, abrir e relink
   i18n/                   traduções existentes
   renderer/               compositor WebGL2, shaders e tempo de mídia
@@ -83,8 +83,20 @@ o fonte original antes da modularização; agora use `verify:legacy` e paridade.
 
 WebGL2 é obrigatório. MP4 H.264/AAC depende dos codecs WebCodecs do navegador;
 PNG/ZIP preserva alpha. Projetos `.ntvct` guardam referências e podem exigir
-relink ao reabrir.
+relink ao reabrir. Use **Coletar mídias** no editor para criar um ZIP portátil
+com o projeto e seus assets; navegadores compatíveis permitem escolher a pasta
+de destino, e os demais baixam o pacote. O app também mantém um autosave local
+de recuperação no IndexedDB do navegador, incluindo blobs de mídia disponíveis.
+Na próxima abertura, é possível recuperar ou descartar essa cópia; salvar um
+projeto ou abrir/criar outro limpa a recuperação anterior.
 
 Veja [LICENSE](LICENSE), [terceiros](THIRD_PARTY_LICENSES.md), [NOTICE](NOTICE)
 e [marcas](TRADEMARKS.md). Documentação própria: CC BY 4.0 ([texto](docs/LICENSE)).
 Conteúdos dos usuários continuam pertencendo aos respectivos titulares.
+
+O plano de evolução de UX/UI, edição e automação por IA, com checkpoint para
+continuidade entre sessões, está em
+[docs/UPGRADE-UX-UI-AUTOMACAO.md](docs/UPGRADE-UX-UI-AUTOMACAO.md).
+Para agentes de navegador, veja o contrato atual de comandos locais em
+[docs/AUTOMACAO.md](docs/AUTOMACAO.md). A API `window.vct` não inicia um
+servidor ou uma ponte de rede.
