@@ -1,97 +1,90 @@
 # Noisetupi Video Content Tool Web
 
-Versão 0.6.2 estabiliza o preview de vídeo, unifica a seleção de layers entre canvas e timeline e reduz o pacote de fontes para arquivos WOFF2 com subconjunto latino.
+Editor de motion graphics e videomapping com processamento local no navegador,
+interface PT/EN, WebGL2 e exportação por WebCodecs.
+Código próprio: **MPL-2.0 — Ricardo Palmieri / Noisetupi**.
 
-Versão web bilíngue do editor de motion graphics e conteúdo para videomapping da Noisetupi. A interface, timeline, inputs e shaders vêm da versão Tauri, mas arquivos e exportação usam APIs do navegador. Nenhuma mídia é enviada ao servidor.
+O fonte **0.6.2 foi recuperado**. Antes da reorganização, seu build reproduziu
+os **19 arquivos de produção byte a byte**. Veja [a evidência](docs/BASELINE-0.6.2.json)
+e [o relatório da Rodada 0](docs/RODADA0-RELATORIO.md).
 
-## Recursos
+## Desenvolvimento
 
-- Canvas com dimensão, proporção, FPS, duração, fundo e alpha configuráveis
-- Presets para Instagram, TikTok, YouTube, Facebook, LinkedIn e X na criação do projeto
-- Alteração da composição durante a edição, mantendo as camadas ou adaptando-as proporcionalmente
-- Cor de fundo e transparência alteráveis no menu de composição
-- Redimensionamento do canvas sempre calculado pelo centro, com ou sem escala das layers
-- Imagem, vídeo, imagem guia, geometria e texto
-- Layers e efeitos reordenáveis
-- Transform, composição, preenchimento, contorno, opacidade e edição direta no preview
-- Timeline com keyframes, easing linear/Bezier, zoom, thumbnails de vídeo, waveform de áudio, trim, loop e modo REC
-- Camadas reordenáveis diretamente na timeline por arraste ou botões
-- Fade in e fade out editáveis para todas as layers visuais e de áudio, aplicados no preview e na exportação
-- Cadeado proporcional para escala e tamanho
-- Cópia e colagem de Transform, Timing, Efeitos e parâmetros de Áudio entre tracks
-- Velocidade, reverso e corte de vídeo
-- Vídeos entram sem loop e ocupam sua duração original na timeline
-- Clipes de vídeo e áudio movidos por arraste, com crop pelas alças e loop ao estender
-- Texto, geometria e imagem também possuem trim, arraste e fades na timeline
-- Quatro marcadores de fade ajustáveis diretamente com o mouse
-- Arraste de fade, trim, cursor e clipes calculado no espaço real da timeline ampliada
-- Snap de tempo para frames, bordas, clipes e keyframes
-- Snap no canvas para centro, bordas e alinhamento com outras layers
-- Alturas independentes para as tracks de vídeo e áudio
-- A ordem do áudio vinculado acompanha a ordem das layers de vídeo
-- Projeto `.ntvct` leve, contendo apenas JSON e caminhos lógicos das mídias
-- Relink em lote por nome ou localização individual para arquivos ausentes
-- Substituição de imagem, vídeo e áudio preservando composição e duração da track
-- O áudio embutido vinculado é substituído automaticamente junto com o vídeo
-- Caixa de transformação no canvas com oito alças de tamanho e controle de rotação
-- Caixa de texto redimensionável sem alterar ou comprimir a fonte
-- Geometria inicial quadrada
-- Área de áudio separada abaixo do vídeo, com volume, mute, velocidade, reverso e loop
-- Áudio embutido vinculado ao vídeo por cadeado e suporte a trilhas de áudio independentes
-- Mixagem das faixas de áudio incluída no MP4 final
-- Preview adaptativo ou com resolução manual, sem reduzir a qualidade final
-- Reprodução de vídeo com correção de sincronismo amortecida e retenção do último frame válido
-- Seleção única e sincronizada entre pilha de layers, timeline, canvas e propriedades
-- Seleção escolhida na timeline permanece ativa ao manipular objetos sobrepostos no canvas
-- Fontes locais WOFF2 limitadas ao subconjunto latino, sem dependência externa durante edição ou exportação
-- Mirror, Trail, Levels/Color, Kaleidoscope, Blur Gaussiano, Crop, Edge, Color Key e animaTracer
-- Efeitos de áudio: low-pass, high-pass, EQ de 3 bandas, delay, compressor e reverb
-- RGB Delay, Noise, Glitch, VHS, Camera Shake e Bloom
-- Interface em português e inglês
-- Projeto `.ntvct` leve, com referências de mídia e relink quando necessário
-- Exportação MP4 H.264 ou sequência PNG com alpha dentro de ZIP
+Use Node.js 24 (`.nvmrc`; mínimo 22.12) e npm:
 
-## Rodar em desenvolvimento
-
-Requer Node.js 20 ou mais recente.
-
-```powershell
-npm install
+```sh
+npm ci
 npm run dev
 ```
 
-Abra o endereço exibido no terminal. O Vite atualiza a interface automaticamente quando o código muda.
+Abra `http://127.0.0.1:1420`. Dependências diretas têm versões exatas; o lockfile
+registra as transitivas. Não use `npm update` para reproduzir esta versão.
 
-## Build e pacote Hostinger
+| Comando | Finalidade |
+|---|---|
+| `npm run dev` | Desenvolvimento com Vite |
+| `npm run typecheck` | TypeScript strict do app, testes e configurações |
+| `npm test` | Testes unitários de caracterização |
+| `npm run build` | Typecheck, build em `dist/` e avisos legais |
+| `npm run preview` | Inspeção local do build |
+| `npm run verify:legacy` | Integridade SHA-256 do legado e ZIP original |
+| `npm run test:parity` | Comparação do legado com `dist/` via Playwright |
+| `npm run check` | Integridade, unitários, build e paridade |
+| `npm run package:hostinger` | Build e ZIP verificado em `release/` |
 
-```powershell
-npm run package:hostinger
+Antes do primeiro teste de paridade:
+
+```sh
+npx playwright install chromium --only-shell
+npm run check
 ```
 
-O comando valida TypeScript, cria o build otimizado e gera:
+No Linux, acrescente `--with-deps` à instalação do Chromium.
+A paridade precisa de HTTP em loopback, processo de navegador e WebGL2.
+Não exige conta nem acesso às mídias pessoais.
+
+## Organização
 
 ```text
-release/NoisetupiVideoContentToolWeb-Hostinger-0.6.2.zip
+src/
+  main.ts                 entrada do aplicativo
+  model/                  tipos v2, fábricas e migração histórica
+  io/                     arquivos, blobs, salvar, abrir e relink
+  i18n/                   traduções existentes
+  renderer/               compositor WebGL2, shaders e tempo de mídia
+  audio/                  reprodução, efeitos e mixagem
+  export/                 MP4 e sequência PNG/ZIP
+  timeline/               fades, clamp e snap
+  ui/                     estado, DOM, eventos e CSS
+public/                   logos, manifest, version.json e .htaccess
+tests/                    unitários e paridade
+scripts/                  empacotamento, integridade e servidor de testes
+legacy/0.6.2/             distribuição original imutável
+archives/0.6.2/           ZIP original recuperado
+docs/                     plano, evidências e instruções
+LICENSES/                 textos completos das licenças
+dist/                     build gerado, fora do Git
+release/                  ZIP gerado, fora do Git
 ```
 
-As instruções de publicação estão em `HOSTINGER-DEPLOY.md`.
+Estado e handlers permanecem em `src/ui/editor.ts` para preservar ordem de
+inicialização e closures. A Rodada 0 mantém os bugs conhecidos; as correções
+estão planejadas na Rodada 1.
 
-## Compatibilidade
+## Publicação e colaboração
 
-Chrome e Edge atualizados são a combinação recomendada. WebGL2 é necessário para o compositor. O MP4 usa WebCodecs e deve ser executado em HTTPS. A sequência PNG preserva transparência e funciona como alternativa para alpha.
+Publique **somente o conteúdo de `dist/`**, incluindo arquivos legais e
+`.htaccess`. A CI valida, mas não publica. Veja
+[Hostinger](docs/HOSTINGER-DEPLOY.md) e [contribuição](CONTRIBUTING.md).
 
-## Controles principais
+O build original tem a tag local `v0.6.2-prod`. Evidências temporárias ficam em
+`test-results/` e `playwright-report/`. `scripts/verify-baseline.mjs` serve para
+o fonte original antes da modularização; agora use `verify:legacy` e paridade.
 
-- `Espaço`: play/pause
-- `Ctrl+S`: salvar projeto
-- `Ctrl+Z`: desfazer
-- `Ctrl+Shift+Z`: refazer
-- `Ctrl+D`: duplicar Layer
-- `Setas`: mover 1 pixel
-- `Shift+Setas`: mover 10 pixels
-- `Delete`: excluir Layer
-- Duplo clique em Layer: renomear
-- Duplo clique em keyframe: excluir
-- Arrastar no preview: mover a Layer selecionada
-- `Alt` + clique no preview: percorrer layers sobrepostas
-- `REC` + Play: gravar alterações como keyframes suavizados
+WebGL2 é obrigatório. MP4 H.264/AAC depende dos codecs WebCodecs do navegador;
+PNG/ZIP preserva alpha. Projetos `.ntvct` guardam referências e podem exigir
+relink ao reabrir.
+
+Veja [LICENSE](LICENSE), [terceiros](THIRD_PARTY_LICENSES.md), [NOTICE](NOTICE)
+e [marcas](TRADEMARKS.md). Documentação própria: CC BY 4.0 ([texto](docs/LICENSE)).
+Conteúdos dos usuários continuam pertencendo aos respectivos titulares.

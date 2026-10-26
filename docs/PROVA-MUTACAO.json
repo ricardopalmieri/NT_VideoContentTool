@@ -1,0 +1,10 @@
+{
+  "date": "2026-10-26",
+  "file": "src/timeline/timing.ts",
+  "change": "Multiplicar o envelope de fade por 0.9 no código real do aplicativo.",
+  "unitExitCode": 1,
+  "visualExitCode": 1,
+  "visualAssertion": "Frame 0: tolerância RGBA zero",
+  "differentChannelsInFirstFrame": 602,
+  "sourceRestored": true
+}

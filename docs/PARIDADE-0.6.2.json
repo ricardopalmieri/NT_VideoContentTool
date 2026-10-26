@@ -1,0 +1,189 @@
+{
+  "date": "2026-10-26",
+  "width": 320,
+  "height": 180,
+  "fps": 8,
+  "tolerance": 0,
+  "comparisons": [
+    {
+      "scenario": "atual-para-legado-metricas",
+      "frames": [
+        {
+          "frame": 0,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 1,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 2,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 3,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 4,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 5,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 6,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 7,
+          "differentChannels": 0,
+          "maxDelta": 0
+        }
+      ]
+    },
+    {
+      "scenario": "criacao-metricas",
+      "frames": [
+        {
+          "frame": 0,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 1,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 2,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 3,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 4,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 5,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 6,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 7,
+          "differentChannels": 0,
+          "maxDelta": 0
+        }
+      ]
+    },
+    {
+      "scenario": "legado-para-atual-metricas",
+      "frames": [
+        {
+          "frame": 0,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 1,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 2,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 3,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 4,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 5,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 6,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 7,
+          "differentChannels": 0,
+          "maxDelta": 0
+        }
+      ]
+    },
+    {
+      "scenario": "contador-metricas",
+      "frames": [
+        {
+          "frame": 0,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 1,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 2,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 3,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 4,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 5,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 6,
+          "differentChannels": 0,
+          "maxDelta": 0
+        },
+        {
+          "frame": 7,
+          "differentChannels": 0,
+          "maxDelta": 0
+        }
+      ]
+    }
+  ]
+}
