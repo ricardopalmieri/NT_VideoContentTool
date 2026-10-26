@@ -1,5 +1,25 @@
 # Histórico de alterações
 
+## 0.7.0 — legibilidade e equilíbrio da interface
+
+- Tipografia mínima de 11 px em toda a interface (antes havia textos de 4 a
+  9 px); só as setas ▲▼ de ordenação ficam em 9 px.
+- Barra superior compacta (44 px, antes 56 px no desktop e 96 px no tablet),
+  numa linha só e com botões apenas com ícone; o nome de cada ação continua no
+  tooltip e no rótulo acessível.
+- Barra da timeline no padrão de editor clássico: timecode e frame à esquerda,
+  transporte ao centro, ferramentas (curva, zoom, snap, duração) à direita.
+- Campos numéricos com rótulo acima do valor: "SCALE X", "ROTATION",
+  "OPACITY" etc. não são mais cortados. Campos sem ◆ usam a largura toda.
+- Painéis se adaptam à própria largura (container queries): propriedades em
+  uma coluna e linha de camada compacta quando o painel é estreito.
+- Painéis laterais mais largos (284/340 px), timeline mais alta, biblioteca
+  menor para a pilha de camadas aparecer.
+- Preview reajusta o zoom ao redimensionar a janela enquanto o usuário não
+  muda o zoom à mão.
+- Alças de fade e de transformação maiores, com área de toque ampliada em
+  telas de toque.
+
 ## Rodada 1 — fechamento da estabilidade
 
 - **Fade ancorado no clipe.** O fade-in sempre começa no início do clipe e o

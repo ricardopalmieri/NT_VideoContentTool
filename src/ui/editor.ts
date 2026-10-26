@@ -67,7 +67,7 @@ import {
 } from "../model/types";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
-const APP_VERSION = "0.6.2";
+const APP_VERSION = "0.7.0";
 const COMPOSITION_PRESETS = [
   { group: "Instagram", label: "FEED SQUARE", width: 1080, height: 1080 },
   { group: "Instagram", label: "FEED PORTRAIT", width: 1080, height: 1350 },
@@ -3559,7 +3559,11 @@ async function renderFrame(exporting = false) {
   }
 }
 
-function setZoom(value: number) {
+// Enquanto o usuário não muda o zoom à mão, o preview acompanha o tamanho da janela.
+let canvasAutoFit = true;
+
+function setZoom(value: number, fromFit = false) {
+  canvasAutoFit = fromFit;
   zoom = clamp(value, .1, 3);
   const shell = app.querySelector<HTMLElement>("#canvas-shell");
   if (shell && project) shell.style.width = `${project.settings.width * zoom}px`;
@@ -3573,8 +3577,15 @@ function fitCanvas() {
   if (!viewport) return;
   const availableWidth = viewport.clientWidth - 70;
   const availableHeight = viewport.clientHeight - 70;
-  setZoom(Math.min(1, availableWidth / project.settings.width, availableHeight / project.settings.height));
+  setZoom(Math.min(1, availableWidth / project.settings.width, availableHeight / project.settings.height), true);
 }
+
+let fitOnResizeFrame = 0;
+window.addEventListener("resize", () => {
+  if (!canvasAutoFit) return;
+  cancelAnimationFrame(fitOnResizeFrame);
+  fitOnResizeFrame = requestAnimationFrame(fitCanvas);
+});
 
 async function saveProject() {
   if (!project) return true;

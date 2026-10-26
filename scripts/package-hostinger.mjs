@@ -18,5 +18,5 @@ async function collect(directory) {
 
 await collect(source);
 await mkdir(outputDirectory, { recursive: true });
-await writeFile(new URL("NoisetupiVideoContentToolWeb-Hostinger-0.6.2.zip", outputDirectory), zipSync(files, { level: 6 }));
-console.log("Created release/NoisetupiVideoContentToolWeb-Hostinger-0.6.2.zip");
+await writeFile(new URL("NoisetupiVideoContentToolWeb-Hostinger-0.7.0.zip", outputDirectory), zipSync(files, { level: 6 }));
+console.log("Created release/NoisetupiVideoContentToolWeb-Hostinger-0.7.0.zip");
