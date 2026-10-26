@@ -822,3 +822,13 @@ button { transition: color 120ms ease, background-color 120ms ease, border-color
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
+
+.text-overflow-warning {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border: 1px solid #b8860b;
+  color: #f5c542;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.text-overflow-warning[hidden] { display: none; }

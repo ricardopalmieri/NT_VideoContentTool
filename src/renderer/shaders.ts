@@ -16,6 +16,9 @@ uniform vec2 u_resolution;
 uniform float u_time;
 uniform int u_effect;
 uniform float u_mix;
+// Composite final: opacidade × fade aplicados depois dos efeitos; u_darken compõe sobre branco para o MIN.
+uniform float u_opacity;
+uniform float u_darken;
 uniform float u_p0;
 uniform float u_p1;
 uniform float u_p2;
@@ -181,6 +184,8 @@ void main() {
     c = bloomed;
   }
   if (u_effect != 0) c = mix(source(v_uv), c, clamp(u_mix, 0.0, 1.0));
-  outColor = clamp(c, 0.0, 1.0);
+  c = clamp(c, 0.0, 1.0) * u_opacity;
+  if (u_darken > 0.5) c = vec4(c.rgb + (1.0 - c.a), 1.0);
+  outColor = c;
 }`;
 

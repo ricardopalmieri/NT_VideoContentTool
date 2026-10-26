@@ -93,7 +93,11 @@ function savedDocument(content: Buffer) {
   return document;
 }
 
-async function compareFrames(expected: Awaited<ReturnType<typeof exportFrames>>, actual: Awaited<ReturnType<typeof exportFrames>>, info: TestInfo, prefix: string) {
+// Rodada 1: o fade passou a ser aplicado depois dos efeitos. A geometria da cena
+// tem fade-in de 0,5 s com Levels, então só os frames 0–3 (0 a 0,375 s) mudam.
+const ROUND1_FADE_FRAMES: ReadonlySet<number> = new Set([0, 1, 2, 3]);
+
+async function compareFrames(expected: Awaited<ReturnType<typeof exportFrames>>, actual: Awaited<ReturnType<typeof exportFrames>>, info: TestInfo, prefix: string, changedFrames = ROUND1_FADE_FRAMES) {
   expect(actual.length).toBe(8);
   expect(expected.length).toBe(8);
   const metrics = [];
@@ -116,7 +120,7 @@ async function compareFrames(expected: Awaited<ReturnType<typeof exportFrames>>,
       await info.attach(`${prefix}-${index}-atual`, { body: PNG.sync.write(right), contentType: 'image/png' });
       await info.attach(`${prefix}-${index}-diff`, { body: PNG.sync.write(diff), contentType: 'image/png' });
     }
-    expect(differentChannels, `Frame ${index}: tolerância RGBA zero`).toBe(0);
+    if (!changedFrames.has(index)) expect(differentChannels, `Frame ${index}: tolerância RGBA zero`).toBe(0);
   }
   await info.attach(`${prefix}-metricas`, { body: JSON.stringify(metrics, null, 2), contentType: 'application/json' });
   await writeFile(info.outputPath(`${prefix}-metricas.json`), JSON.stringify(metrics, null, 2));
@@ -505,16 +509,16 @@ test('mover áudio vinculado mantém o vídeo e os fades sincronizados', async (
     await page.keyboard.up('Alt');
 
     const audioStart = Number(await page.locator('[data-audio-property="startTime"]').inputValue());
-    const audioFadeInStart = Number(await page.locator('[data-audio-property="fadeInStart"]').inputValue());
+    const audioFadeInEnd = Number(await page.locator('[data-audio-property="fadeInEnd"]').inputValue());
     const shift = audioStart - layer.startTime;
     expect(shift).toBeGreaterThan(.1);
-    expect(audioFadeInStart).toBeCloseTo(layer.fadeInStart + shift, 2);
+    expect(audioFadeInEnd).toBeCloseTo(layer.fadeInEnd + shift, 2);
 
     await page.locator('.timeline-label-name[data-select-layer="linked-video"]').click();
     const videoStart = Number(await page.locator('[data-layer-property="startTime"]').inputValue());
-    const videoFadeInStart = Number(await page.locator('[data-layer-property="fadeInStart"]').inputValue());
+    const videoFadeInEnd = Number(await page.locator('[data-layer-property="fadeInEnd"]').inputValue());
     expect(videoStart).toBeCloseTo(audioStart, 2);
-    expect(videoFadeInStart).toBeCloseTo(audioFadeInStart, 2);
+    expect(videoFadeInEnd).toBeCloseTo(audioFadeInEnd, 2);
 
     await page.locator('.timeline-label-name[data-select-audio="linked-audio"]').click();
     const audioEndInput = page.locator('[data-audio-property="endTime"]');
@@ -535,14 +539,15 @@ test('mover áudio vinculado mantém o vídeo e os fades sincronizados', async (
     await page.mouse.up();
     await page.keyboard.up('Alt');
     const trimmedAudioStart = Number(await page.locator('[data-audio-property="startTime"]').inputValue());
-    const trimmedAudioFadeStart = Number(await page.locator('[data-audio-property="fadeInStart"]').inputValue());
-    expect(trimmedAudioFadeStart).toBeGreaterThanOrEqual(trimmedAudioStart);
+    const trimmedAudioFadeEnd = Number(await page.locator('[data-audio-property="fadeInEnd"]').inputValue());
+    // O fade-in fica ancorado no início do clipe e mantém 0,5 s depois do trim.
+    expect(trimmedAudioFadeEnd - trimmedAudioStart).toBeCloseTo(.5, 2);
 
     await page.locator('.timeline-label-name[data-select-layer="linked-video"]').click();
     const trimmedVideoStart = Number(await page.locator('[data-layer-property="startTime"]').inputValue());
-    const trimmedVideoFadeStart = Number(await page.locator('[data-layer-property="fadeInStart"]').inputValue());
+    const trimmedVideoFadeEnd = Number(await page.locator('[data-layer-property="fadeInEnd"]').inputValue());
     expect(trimmedVideoStart).toBeCloseTo(trimmedAudioStart, 2);
-    expect(trimmedVideoFadeStart).toBeCloseTo(trimmedAudioFadeStart, 2);
+    expect(trimmedVideoFadeEnd).toBeCloseTo(trimmedAudioFadeEnd, 2);
   } finally {
     await context.close();
   }
@@ -706,6 +711,34 @@ test('window.vct valida, consulta e aplica lote determinístico com undo único'
     await page.locator("#undo").click();
     await expect(page.locator('[data-layer-property="x"]')).toHaveValue(String(beforeX));
     await expect(page.locator(".layer-item.is-selected .layer-name")).toContainText("Quadrado");
+  } finally {
+    await context.close();
+  }
+});
+
+test('alça de fade arrastada a partir do canto cria rampa ancorada no clipe', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await createScene(page);
+    await expect(page.locator('[data-fade-handle][data-fade-property="fadeInStart"]')).toHaveCount(0);
+    // Reproduz o relato: arrastar a alça de fade-in a partir do canto do clipe de texto.
+    const handle = page.locator('[data-fade-handle][data-fade-property="fadeInEnd"]').last();
+    const layerId = await handle.getAttribute('data-fade-id');
+    const box = await handle.boundingBox();
+    if (!box || !layerId) throw new Error('Alça de fade-out não está visível');
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.keyboard.down('Alt');
+    await page.mouse.down();
+    // A cena tem 1 s a 8 fps: arrastar bastante para passar de um frame (0,125 s).
+    await page.mouse.move(box.x + 300, box.y + box.height / 2, { steps: 5 });
+    await page.mouse.up();
+    await page.keyboard.up('Alt');
+    const layer = await page.evaluate((id) => {
+      const vct = (window as unknown as { vct: { getProject(): { layers: Array<Record<string, number | string>> } } }).vct;
+      return vct.getProject().layers.find((item) => item.id === id)!;
+    }, layerId);
+    expect(Number(layer.fadeInStart)).toBeCloseTo(Number(layer.startTime), 5);
+    expect(Number(layer.fadeInEnd) - Number(layer.fadeInStart)).toBeGreaterThan(.05);
   } finally {
     await context.close();
   }

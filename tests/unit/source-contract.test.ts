@@ -22,11 +22,25 @@ function method(name: string) {
   return runInNewContext(`(${javascript.trim()})`) as (this: unknown, ...args: unknown[]) => number;
 }
 
-it('preserva os dois shaders GLSL originais', () => {
+// Rodada 1: a única mudança permitida no fragment shader é o composite final
+// (opacidade × fade depois dos efeitos e o modo darken composto sobre branco).
+const ROUND1_FRAGMENT_PATCHES: Array<[string, string]> = [
+  ['uniform float u_mix;\n', 'uniform float u_mix;\n// Composite final: opacidade × fade aplicados depois dos efeitos; u_darken compõe sobre branco para o MIN.\nuniform float u_opacity;\nuniform float u_darken;\n'],
+  ['  outColor = clamp(c, 0.0, 1.0);\n}', '  c = clamp(c, 0.0, 1.0) * u_opacity;\n  if (u_darken > 0.5) c = vec4(c.rgb + (1.0 - c.a), 1.0);\n  outColor = c;\n}'],
+];
+
+it('preserva os shaders GLSL originais, exceto o composite da Rodada 1', () => {
   for (const [name, expected] of [['vertexSource', vertexSource], ['fragmentSource', fragmentSource]]) {
     const start = renderer.indexOf(`const ${name} = \``) + `const ${name} = \``.length;
     const end = renderer.indexOf('`;', start);
-    expect(renderer.slice(start, end).replaceAll('\r\n', '\n')).toBe(expected);
+    let original = renderer.slice(start, end).replaceAll('\r\n', '\n');
+    if (name === 'fragmentSource') {
+      for (const [from, to] of ROUND1_FRAGMENT_PATCHES) {
+        expect(original).toContain(from);
+        original = original.replace(from, to);
+      }
+    }
+    expect(original).toBe(expected);
   }
 });
 

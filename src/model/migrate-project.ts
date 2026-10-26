@@ -1,5 +1,6 @@
 import type { ProjectDocument, EffectNode, ProjectSettings } from "./types";
 import { clamp } from "./math";
+import { normalizeFades } from "../timeline/timing";
 
 // Normalização histórica in-place: a ordem e os operadores ||= e ??= são intencionais.
 export function migrateProject(project: ProjectDocument) {
@@ -16,6 +17,7 @@ export function migrateProject(project: ProjectDocument) {
     track.fadeInEnd ??= track.startTime;
     track.fadeOutStart ??= track.endTime;
     track.fadeOutEnd ??= track.endTime;
+    normalizeFades(track);
     track.effects ||= [];
   }
   for (const layer of project.layers) {
@@ -35,6 +37,7 @@ export function migrateProject(project: ProjectDocument) {
     layer.fadeInEnd ??= layer.startTime;
     layer.fadeOutStart ??= layer.endTime;
     layer.fadeOutEnd ??= layer.endTime;
+    normalizeFades(layer);
     layer.scaleLocked ??= true;
     layer.sizeLocked ??= true;
     if (legacyProject && layer.kind === "text") layer.sizeLocked = false;

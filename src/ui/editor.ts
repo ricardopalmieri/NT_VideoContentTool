@@ -1,5 +1,5 @@
 import { clamp } from "../model/math";
-import { normalizeFades } from "../timeline/timing";
+import { normalizeFades, setFadeHandle } from "../timeline/timing";
 import { timelineSnapCandidates as collectTimelineSnapCandidates, snapTimelineTime as calculateTimelineSnap } from "../timeline/snapping";
 import { migrateProject } from "../model/migrate-project";
 import { UndoHistory } from "../model/undo-history";
@@ -121,6 +121,7 @@ let selectedKeyRef = "";
 const recordedTracks = new Set<string>();
 const recordedRanges = new Map<string, { min: number; max: number }>();
 let autosaveTimer = 0;
+let renderErrorActive = false;
 let autosaveGeneration = 0;
 let autosaveWrites = Promise.resolve();
 let autosaveFingerprint = "";
@@ -244,7 +245,8 @@ function scheduleProjectAutosave(target: ProjectDocument) {
       try {
         await saveProjectRecovery(snapshot);
         autosaveFingerprint = fingerprint;
-        if (project === target) setStatus(language === "pt-BR" ? "RECUPERAÇÃO SALVA" : "RECOVERY SAVED");
+        // A render error stays visible until a render succeeds again.
+        if (project === target && !renderErrorActive) setStatus(language === "pt-BR" ? "RECUPERAÇÃO SALVA" : "RECOVERY SAVED");
       } catch (error) {
         console.error("Project recovery autosave failed.", error);
         if (project === target) setStatus(`${language === "pt-BR" ? "FALHA NA RECUPERAÇÃO" : "RECOVERY FAILED"} · ${String(error)}`);
@@ -292,6 +294,7 @@ function initializeRenderer(canvas: HTMLCanvasElement) {
   renderer?.dispose();
   const onContextRestored = () => {
     if (app.querySelector("#composition-canvas") !== canvas) return;
+    renderErrorActive = false;
     initializeRenderer(canvas);
     setStatus("READY · PREVIEW FULL");
   };
@@ -835,6 +838,9 @@ function syncLinkedAudioOrder() {
   slots.forEach((slot, index) => project!.audioTracks[slot] = linked[index]);
 }
 
+// O renderer não anima tempo, fades nem trechos de origem; esses campos não mostram ◆.
+const TIMING_PROPERTIES = new Set(["startTime", "endTime", "fadeInStart", "fadeInEnd", "fadeOutStart", "fadeOutEnd", "sourceIn", "sourceOut"]);
+
 function numberField(label: string, property: keyof Layer, value: number, min: number, max: number, step: number) {
   const keys = selectedLayer()?.keyframes[String(property)] || [];
   const active = keyframeAt(keys);
@@ -843,7 +849,7 @@ function numberField(label: string, property: keyof Layer, value: number, min: n
   const displayedValue = property === "sourceOut" && layer && !layer.sourceOut ? value : evaluatedValue;
   const fill = clamp((displayedValue - min) / Math.max(step, max - min) * 100, 0, 100);
   const neutral = ({ scaleX: 1, scaleY: 1, opacity: 1, fillOpacity: 1, strokeOpacity: 1 } as Record<string, number>)[String(property)] ?? 0;
-  return `<label class="numeric-field"><div class="param-scrub" data-param-scrub data-neutral="${neutral}" style="--value-fill:${fill}%"><span>${label}</span><input type="number" readonly data-layer-property="${String(property)}" value="${Number(displayedValue.toFixed(4))}" min="${min}" max="${max}" step="${step}" title="Drag to adjust · Double-click to type"></div><button class="keyframe-button ${active ? "is-active" : ""}" data-keyframe="${String(property)}" title="${t("addKeyframe")}">◆</button>${active ? easingSelect("layer", String(property), active.easing) : ""}</label>`;
+  return `<label class="numeric-field"><div class="param-scrub" data-param-scrub data-neutral="${neutral}" style="--value-fill:${fill}%"><span>${label}</span><input type="number" readonly data-layer-property="${String(property)}" value="${Number(displayedValue.toFixed(4))}" min="${min}" max="${max}" step="${step}" title="Drag to adjust · Double-click to type"></div>${TIMING_PROPERTIES.has(String(property)) ? "" : `<button class="keyframe-button ${active ? "is-active" : ""}" data-keyframe="${String(property)}" title="${t("addKeyframe")}">◆</button>${active ? easingSelect("layer", String(property), active.easing) : ""}`}</label>`;
 }
 
 function easingSelect(scope: "layer" | "effect", property: string, value: Easing) {
@@ -910,10 +916,8 @@ function renderInspector() {
           </div>` : ""}
         <h4 class="subsection-title">${layer.kind === "video" ? "VIDEO FADES" : "FADES"}</h4>
         <div class="property-grid fade-grid">
-          ${numberField("FADE IN START", "fadeInStart", layer.fadeInStart, 0, project.settings.duration, .01)}
-          ${numberField("FADE IN END", "fadeInEnd", layer.fadeInEnd, 0, project.settings.duration, .01)}
-          ${numberField("FADE OUT START", "fadeOutStart", layer.fadeOutStart, 0, project.settings.duration, .01)}
-          ${numberField("FADE OUT END", "fadeOutEnd", layer.fadeOutEnd, 0, project.settings.duration, .01)}
+          ${numberField(language === "pt-BR" ? "FIM DO FADE IN" : "FADE IN END", "fadeInEnd", layer.fadeInEnd, 0, project.settings.duration, .01)}
+          ${numberField(language === "pt-BR" ? "INÍCIO DO FADE OUT" : "FADE OUT START", "fadeOutStart", layer.fadeOutStart, 0, project.settings.duration, .01)}
         </div>
         ${layer.kind === "guide" ? `<label class="check-row"><input type="checkbox" data-layer-check="exportable" ${layer.exportable ? "checked" : ""}><span>EXPORT GUIDE</span></label>` : ""}
       </section>
@@ -943,10 +947,8 @@ function renderAudioInspector(track: AudioTrack) {
         </div>
         <h4 class="subsection-title">FADES</h4>
         <div class="property-grid fade-grid">
-          ${audioNumberField("FADE IN START", "fadeInStart", track.fadeInStart, 0, project.settings.duration, .01)}
-          ${audioNumberField("FADE IN END", "fadeInEnd", track.fadeInEnd, 0, project.settings.duration, .01)}
-          ${audioNumberField("FADE OUT START", "fadeOutStart", track.fadeOutStart, 0, project.settings.duration, .01)}
-          ${audioNumberField("FADE OUT END", "fadeOutEnd", track.fadeOutEnd, 0, project.settings.duration, .01)}
+          ${audioNumberField(language === "pt-BR" ? "FIM DO FADE IN" : "FADE IN END", "fadeInEnd", track.fadeInEnd, 0, project.settings.duration, .01)}
+          ${audioNumberField(language === "pt-BR" ? "INÍCIO DO FADE OUT" : "FADE OUT START", "fadeOutStart", track.fadeOutStart, 0, project.settings.duration, .01)}
         </div>
         <div class="video-mode-row audio-mode-row">
           <label class="check-row"><input type="checkbox" data-audio-check="muted" ${track.muted ? "checked" : ""}><span>MUTE</span></label>
@@ -992,6 +994,7 @@ function renderContentProperties(layer: Layer) {
   if (layer.kind === "text") return `
     <section class="property-group"><h3>${t("text")}</h3>
       <label class="text-area-field"><span>CONTENT</span><textarea data-layer-text="text">${escapeHtml(layer.text)}</textarea></label>
+      <p class="text-overflow-warning" data-text-overflow role="status" hidden>${language === "pt-BR" ? "O texto não cabe na caixa. Aumente a altura ou reduza a fonte." : "The text does not fit the box. Increase the height or reduce the font size."}</p>
       <label class="select-field"><span>FONT</span><select data-layer-text="fontFamily">${["IBM Plex Sans", "IBM Plex Mono", "Inter", "Space Grotesk", "Syne"].map((value) => `<option value="${value}" ${layer.fontFamily === value ? "selected" : ""}>${value}</option>`).join("")}</select></label>
       <div class="property-grid">${numberField("FONT SIZE", "fontSize", layer.fontSize || 80, 4, 2000, 1)}${numberField("WEIGHT", "fontWeight", layer.fontWeight || 500, 100, 900, 100)}</div>
       ${renderColorControls(layer)}
@@ -1237,7 +1240,8 @@ function fadeHandles(item: Pick<Layer, "startTime" | "endTime" | "fadeInStart" |
     const left = (item[property] - item.startTime) / duration * 100;
     return `<button class="fade-handle ${edge} ${property.startsWith("fadeIn") ? "is-in" : "is-out"}" data-fade-handle data-fade-scope="${scope}" data-fade-id="${id}" data-fade-property="${property}" style="left:${left}%" title="${property}"></button>`;
   };
-  return marker("fadeInStart", "top") + marker("fadeInEnd", "bottom") + marker("fadeOutStart", "bottom") + marker("fadeOutEnd", "top");
+  // Uma alça por lado: o fade é ancorado na borda do clipe e a alça define a duração.
+  return marker("fadeInEnd", "top") + marker("fadeOutStart", "top");
 }
 
 function fadeOverlayStyle(item: Pick<Layer, "startTime" | "endTime" | "fadeInStart" | "fadeInEnd" | "fadeOutStart" | "fadeOutEnd">, side: "in" | "out") {
@@ -1750,6 +1754,10 @@ function bindDynamicControls(root: ParentNode = app) {
       const layer = selectedLayer();
       if (!layer || layer.locked) return;
       (layer as unknown as Record<string, unknown>)[input.dataset.layerText!] = input.value;
+      if (layer.kind === "text" && ["text", "fontFamily"].includes(input.dataset.layerText!)) {
+        fitTextHeight(layer);
+        updateTextOverflowWarning(layer);
+      }
       if (input instanceof HTMLInputElement && input.type === "color") {
         const property = `${input.dataset.layerText}Color`;
         let keys = layer.keyframes[property];
@@ -1886,11 +1894,39 @@ function updateLayerStack() {
   bindDragAndDrop(target);
 }
 
+let inspectorScrollKey = "";
+
 function updateInspector() {
   const target = app.querySelector("#inspector");
   if (!target) return;
+  // Mantém a rolagem do painel quando a seleção não mudou (edição de valores).
+  const key = `${selectedLayerId}|${selectedAudioTrackId}|${selectedEffectId}`;
+  const scrollTop = key === inspectorScrollKey ? target.querySelector<HTMLElement>(".inspector-scroll")?.scrollTop || 0 : 0;
+  inspectorScrollKey = key;
   target.innerHTML = renderInspector();
   bindDynamicControls(target);
+  const scroll = target.querySelector<HTMLElement>(".inspector-scroll");
+  if (scroll) scroll.scrollTop = scrollTop;
+  const layer = selectedLayer();
+  if (layer?.kind === "text") updateTextOverflowWarning(layer);
+}
+
+// Cresce a caixa de texto para caber todas as linhas; com altura animada, só avisa.
+function fitTextHeight(layer: Layer) {
+  const layout = renderer?.measureText(layer, currentTime);
+  if (!layout || layout.lines.length <= layout.maxLines || layer.keyframes.height?.length) return;
+  layer.height = Math.ceil(layout.requiredHeight);
+  const input = app.querySelector<HTMLInputElement>('[data-layer-property="height"]');
+  if (input) {
+    input.value = String(layer.height);
+    updateParamScrub(input);
+  }
+}
+
+function updateTextOverflowWarning(layer: Layer) {
+  const warning = app.querySelector<HTMLElement>("[data-text-overflow]");
+  const layout = renderer?.measureText(layer, currentTime);
+  if (warning) warning.hidden = !layout || layout.lines.length <= layout.maxLines;
 }
 
 function updateTimeline() {
@@ -2810,14 +2846,14 @@ function bindTimeline() {
     snapshot();
     handle.setPointerCapture(event.pointerId);
     const move = (moveEvent: PointerEvent) => {
-      item[property] = snapTimelineTime(
+      const time = snapTimelineTime(
         timelineTimeFromPointer(moveEvent, scrubArea),
         scrubArea,
         layerItem?.id || "",
         audioItem?.id || "",
         moveEvent.altKey,
       );
-      normalizeFades(item);
+      setFadeHandle(item, property.startsWith("fadeIn") ? "in" : "out", time);
       updateFadeClipVisuals(clip, item);
       if (layerItem?.kind === "video") syncLinkedAudio(layerItem);
       if (audioItem?.linked && audioItem.linkedLayerId) {
@@ -3513,8 +3549,10 @@ async function renderFrame(exporting = false) {
       await renderer.render(currentTime, false);
       notePreviewPerformance(performance.now() - startedAt);
     } while (renderQueued);
+    renderErrorActive = false;
     updateTransformBox();
   } catch (error) {
+    renderErrorActive = true;
     setStatus(`RENDER ERROR: ${String(error)}`);
   } finally {
     renderInFlight = false;

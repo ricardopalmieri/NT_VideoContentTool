@@ -159,7 +159,21 @@ contratos de domínio necessários e confirmar compatibilidade v2.
   Deduplicar referências repetidas é necessário, e montar ZIPs de mídias grandes
   deve evitar bloquear a UI ou duplicar todo o conteúdo na memória.
 
-## Checkpoint atual — 26/10/2026
+## Checkpoint — Rodada 1 fechada (26/10/2026)
+
+**Branch:** `codex/rodada0-restauracao` (publicada no GitHub).
+
+- Fade ancorado no clipe (`normalizeFades`/`setFadeHandle` em
+  `src/timeline/timing.ts`); uma alça por lado; migração ancora projetos v2.
+- Opacidade × fade no composite (`u_opacity`), blends Add/Darken corrigidos,
+  fade de áudio equal-power, erro de render não é encoberto pelo autosave,
+  rolagem do inspector preservada, caixa de texto com altura automática/aviso.
+- Paridade: frames 0–3 da cena de teste mudam de propósito
+  (`ROUND1_FADE_FRAMES`); os demais seguem com tolerância zero.
+- Pendências: teste manual em iPad real; fontes ≥ 11 px e alvos de toque de
+  44 px (Rodada 4); a seguir, Rodada 2 (modelo de clipes v3 com split).
+
+## Checkpoint anterior — 26/10/2026
 
 **Branch:** `codex/rodada0-restauracao`  
 **Worktree no início desta continuação:** já continha alterações não

@@ -1,5 +1,30 @@
 # Histórico de alterações
 
+## Rodada 1 — fechamento da estabilidade
+
+- **Fade ancorado no clipe.** O fade-in sempre começa no início do clipe e o
+  fade-out sempre termina no fim; só a duração é editada. Arrastar a alça a
+  partir do canto agora cria uma rampa (antes gravava início = fim, fade de
+  duração zero). Mover, aparar ou estender o clipe preserva a duração dos fades
+  e não cria trechos invisíveis. Formato `.ntvct` continua v2; projetos antigos
+  com fade deslocado são ancorados na abertura, mantendo a duração.
+- Timeline mostra uma alça de fade por lado; o painel mostra "Fim do fade in" e
+  "Início do fade out". Campos de tempo, fade e trecho de origem não mostram
+  mais ◆, porque o renderer não anima esses valores.
+- Opacidade e fade são aplicados no composite, depois dos efeitos: chroma key e
+  Levels se comportam igual durante o fade. Frames dentro de um fade com efeito
+  podem diferir da 0.6.2 (intencional; teste de paridade documenta os frames).
+- Blend Add não aplica mais o alpha duas vezes; Darken não escurece mais a área
+  fora da camada.
+- Fades de áudio usam curva equal-power.
+- Erro de render continua visível na barra de status até um render dar certo
+  (o aviso de autosave não o encobre mais).
+- Painel de Propriedades mantém a rolagem ao editar valores.
+- Caixa de texto cresce para caber todas as linhas; com altura animada, o painel
+  mostra um aviso de texto cortado.
+- Testes: regressões de fade (unitários e Playwright), curva de áudio e contrato
+  dos shaders com as mudanças permitidas da Rodada 1.
+
 ## Upgrade de UX/UI e automação — Fase 3
 
 - Plano de continuidade e checkpoint das Fases 0–3 em

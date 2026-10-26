@@ -66,7 +66,7 @@ export class ComposerRenderer {
     const location = gl.getAttribLocation(this.program, "a_position");
     gl.enableVertexAttribArray(location);
     gl.vertexAttribPointer(location, 2, gl.FLOAT, false, 0, 0);
-    for (const name of ["u_texture", "u_texture_r", "u_texture_g", "u_texture_b", "u_resolution", "u_time", "u_effect", "u_mix", ...Array.from({ length: 8 }, (_, i) => `u_p${i}`)]) {
+    for (const name of ["u_texture", "u_texture_r", "u_texture_g", "u_texture_b", "u_resolution", "u_time", "u_effect", "u_mix", "u_opacity", "u_darken", ...Array.from({ length: 8 }, (_, i) => `u_p${i}`)]) {
       this.uniforms.set(name, gl.getUniformLocation(this.program, name)!);
     }
     canvas.addEventListener("webglcontextlost", this.handleContextLost);
@@ -224,6 +224,14 @@ export class ComposerRenderer {
 
   private sourceTimeFor(layer: Layer, timelineTime: number, mediaDuration: number) {
     return sourceTimeFor(layer, timelineTime, mediaDuration, this.evaluated(layer, "playbackRate", timelineTime));
+  }
+
+  // Mede o texto como no render: linhas quebradas, quantas cabem e a altura necessária.
+  measureText(layer: Layer, time: number) {
+    const ctx = measureContext();
+    const fontSize = this.evaluated(layer, "fontSize", time);
+    ctx.font = `${this.evaluated(layer, "fontWeight", time) || 500} ${fontSize || 80}px ${layer.fontFamily || "IBM Plex Sans"}`;
+    return layoutTextLines(ctx, layer.text || "", fontSize, this.evaluated(layer, "width", time), this.evaluated(layer, "height", time));
   }
 
   private fadeEnvelope(layer: Layer, time: number) {
@@ -535,7 +543,8 @@ export class ComposerRenderer {
     ctx.translate(x, y);
     ctx.rotate(rotation);
     ctx.scale(scaleX, scaleY);
-    const layerOpacity = this.evaluated(layer, "opacity", time) * opacityMultiplier * this.fadeEnvelope(layer, time);
+    // Opacidade e fade entram no composite, depois dos efeitos (chroma key, levels etc.).
+    const layerOpacity = opacityMultiplier;
     ctx.globalAlpha = layerOpacity;
 
     if (layer.kind === "geometry") this.drawGeometry(layer, time, layerOpacity);
@@ -547,28 +556,7 @@ export class ComposerRenderer {
       ctx.font = `${fontWeight || 500} ${fontSize || 80}px ${layer.fontFamily || "IBM Plex Sans"}`;
       ctx.textAlign = layer.align || "center";
       ctx.textBaseline = "middle";
-      const padding = Math.max(2, fontSize * .04);
-      const availableWidth = Math.max(1, layerWidth - padding * 2);
-      const lineHeight = fontSize * 1.18;
-      const lines: string[] = [];
-      for (const paragraph of (layer.text || "").split("\n")) {
-        const words = paragraph.split(/\s+/).filter(Boolean);
-        if (!words.length) {
-          lines.push("");
-          continue;
-        }
-        let line = words[0];
-        for (const word of words.slice(1)) {
-          const candidate = `${line} ${word}`;
-          if (ctx.measureText(candidate).width <= availableWidth) line = candidate;
-          else {
-            lines.push(line);
-            line = word;
-          }
-        }
-        lines.push(line);
-      }
-      const maxLines = Math.max(1, Math.floor(Math.max(lineHeight, layerHeight - padding * 2) / lineHeight));
+      const { padding, lineHeight, lines, maxLines } = layoutTextLines(ctx, layer.text || "", fontSize, layerWidth, layerHeight);
       const visibleLines = lines.slice(0, maxLines);
       const startY = -(visibleLines.length - 1) * lineHeight / 2;
       const drawX = layer.align === "left" ? -layerWidth / 2 + padding : layer.align === "right" ? layerWidth / 2 - padding : 0;
@@ -685,6 +673,8 @@ export class ComposerRenderer {
     time: number,
     channels?: [WebGLTexture, WebGLTexture, WebGLTexture],
     parameterOverrides?: number[],
+    opacity = 1,
+    darken = false,
   ) {
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, target?.framebuffer || null);
@@ -704,6 +694,8 @@ export class ComposerRenderer {
     gl.uniform1f(this.uniforms.get("u_time")!, time);
     gl.uniform1i(this.uniforms.get("u_effect")!, effect ? this.effectCode(effect.kind) : 0);
     gl.uniform1f(this.uniforms.get("u_mix")!, effect ? this.effectParam(effect, "mix", time) : 1);
+    gl.uniform1f(this.uniforms.get("u_opacity")!, opacity);
+    gl.uniform1f(this.uniforms.get("u_darken")!, darken ? 1 : 0);
     const values = parameterOverrides || (effect ? this.effectValues(effect, time) : []);
     for (let i = 0; i < 8; i++) gl.uniform1f(this.uniforms.get(`u_p${i}`)!, values[i] || 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -749,7 +741,8 @@ export class ComposerRenderer {
     const gl = this.gl;
     gl.enable(gl.BLEND);
     gl.blendEquation(gl.FUNC_ADD);
-    if (mode === "add") gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    // A cor já chega pré-multiplicada: SRC_ALPHA aplicaria o alpha duas vezes.
+    if (mode === "add") gl.blendFunc(gl.ONE, gl.ONE);
     else if (mode === "multiply") gl.blendFunc(gl.DST_COLOR, gl.ONE_MINUS_SRC_ALPHA);
     else if (mode === "screen") gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_COLOR);
     else if (mode === "lighten") {
@@ -793,7 +786,8 @@ export class ComposerRenderer {
       }
     }
     this.blendFor(layer.blendMode);
-    this.drawPass(current, this.compTarget, null, time);
+    const opacity = this.evaluated(layer, "opacity", time) * this.fadeEnvelope(layer, time);
+    this.drawPass(current, this.compTarget, null, time, undefined, undefined, opacity, layer.blendMode === "darken");
   }
 
   async render(time: number, exporting = false) {
@@ -865,4 +859,37 @@ export class ComposerRenderer {
     const full = match.length === 3 ? match.split("").map((v) => v + v).join("") : match.padEnd(6, "0");
     return [parseInt(full.slice(0, 2), 16) / 255, parseInt(full.slice(2, 4), 16) / 255, parseInt(full.slice(4, 6), 16) / 255, 1];
   }
+}
+
+let measureCanvas: CanvasRenderingContext2D | null = null;
+function measureContext() {
+  measureCanvas ||= document.createElement("canvas").getContext("2d")!;
+  return measureCanvas;
+}
+
+export function layoutTextLines(ctx: Pick<CanvasRenderingContext2D, "measureText">, text: string, fontSize: number, layerWidth: number, layerHeight: number) {
+  const padding = Math.max(2, fontSize * .04);
+  const availableWidth = Math.max(1, layerWidth - padding * 2);
+  const lineHeight = fontSize * 1.18;
+  const lines: string[] = [];
+  for (const paragraph of text.split("\n")) {
+    const words = paragraph.split(/\s+/).filter(Boolean);
+    if (!words.length) {
+      lines.push("");
+      continue;
+    }
+    let line = words[0];
+    for (const word of words.slice(1)) {
+      const candidate = `${line} ${word}`;
+      if (ctx.measureText(candidate).width <= availableWidth) line = candidate;
+      else {
+        lines.push(line);
+        line = word;
+      }
+    }
+    lines.push(line);
+  }
+  const maxLines = Math.max(1, Math.floor(Math.max(lineHeight, layerHeight - padding * 2) / lineHeight));
+  const requiredHeight = lines.length * lineHeight + padding * 2;
+  return { padding, lineHeight, lines, maxLines, requiredHeight };
 }

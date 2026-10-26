@@ -120,6 +120,17 @@ function applyAudioEffects(context: BaseAudioContext, input: AudioNode, track: A
   return current;
 }
 
+// Fade de áudio com curva equal-power: soa linear ao ouvido, sem queda brusca no fim.
+export function equalPowerGain(envelope: number) {
+  return Math.sin(Math.max(0, Math.min(1, envelope)) * Math.PI / 2);
+}
+
+export function fadeGainCurve(track: AudioTrack, envelope: typeof fadeInEnvelope, start: number, end: number, points = 64) {
+  const curve = new Float32Array(points);
+  for (let i = 0; i < points; i++) curve[i] = equalPowerGain(envelope(track, start + (end - start) * i / (points - 1)));
+  return curve;
+}
+
 function connectTrack(context: BaseAudioContext, source: AudioBufferSourceNode, track: AudioTrack, destination: AudioNode, contextStart: number, timelineStart: number) {
   const volume = Math.max(0, Math.min(2, track.volume));
   const volumeGain = context.createGain();
@@ -127,10 +138,13 @@ function connectTrack(context: BaseAudioContext, source: AudioBufferSourceNode, 
   const fadeInGain = context.createGain();
   const fadeOutGain = context.createGain();
   const schedule = (gain: GainNode, envelope: typeof fadeInEnvelope, start: number, end: number) => {
-    gain.gain.setValueAtTime(envelope(track, timelineStart), contextStart);
-    for (const point of [start, end]) {
-      if (point > timelineStart) gain.gain.linearRampToValueAtTime(envelope(track, point), contextStart + point - timelineStart);
+    const segmentStart = Math.max(start, timelineStart);
+    if (end <= segmentStart) {
+      gain.gain.setValueAtTime(equalPowerGain(envelope(track, timelineStart)), contextStart);
+      return;
     }
+    if (segmentStart > timelineStart) gain.gain.setValueAtTime(equalPowerGain(envelope(track, timelineStart)), contextStart);
+    gain.gain.setValueCurveAtTime(fadeGainCurve(track, envelope, segmentStart, end), contextStart + segmentStart - timelineStart, end - segmentStart);
   };
   schedule(fadeInGain, fadeInEnvelope, track.fadeInStart, track.fadeInEnd);
   schedule(fadeOutGain, fadeOutEnvelope, track.fadeOutStart, track.fadeOutEnd);

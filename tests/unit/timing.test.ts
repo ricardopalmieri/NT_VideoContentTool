@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fadeEnvelope, fadeInEnvelope, fadeOutEnvelope, normalizeFades } from '../../src/timeline/timing';
+import { fadeEnvelope, fadeInEnvelope, fadeOutEnvelope, normalizeFades, setFadeHandle } from '../../src/timeline/timing';
 import { sourceTimeFor } from '../../src/renderer/source-time';
 import { snapTimelineTime, timelineSnapCandidates } from '../../src/timeline/snapping';
 import { shouldSeekVideo } from '../../src/renderer/video-seek';
@@ -20,11 +20,37 @@ describe('timing histórico 0.6.2', () => {
     expect(fadeInEnvelope(fades, 2) * fadeOutEnvelope(fades, 2)).toBe(.25);
     expect(fadeEnvelope(fades, 2)).toBe(.25);
   });
-  it('normalização preserva duração zero e não corrige timing do clipe', () => {
+  it('normalização ancora fades nas bordas, zera durações inválidas e não corrige timing do clipe', () => {
     const layer = createLayer('text', settings, { startTime: 2, endTime: 8, fadeInStart: 10, fadeInEnd: 1, fadeOutStart: 7, fadeOutEnd: 3 });
     normalizeFades(layer);
-    expect([layer.fadeInStart, layer.fadeInEnd, layer.fadeOutStart, layer.fadeOutEnd]).toEqual([8, 8, 3, 3]);
+    expect([layer.fadeInStart, layer.fadeInEnd, layer.fadeOutStart, layer.fadeOutEnd]).toEqual([2, 2, 8, 8]);
     expect([layer.startTime, layer.endTime]).toEqual([2, 8]);
+  });
+  it('trim e movimento preservam a duração dos fades (regressão: trecho invisível)', () => {
+    const layer = createLayer('text', settings, { startTime: 0, endTime: 6, fadeInStart: 0, fadeInEnd: 1, fadeOutStart: 5, fadeOutEnd: 6 });
+    layer.endTime = 9;
+    normalizeFades(layer);
+    expect([layer.fadeOutStart, layer.fadeOutEnd]).toEqual([8, 9]);
+    expect(fadeEnvelope(layer, 7)).toBe(1);
+    layer.startTime = 3;
+    normalizeFades(layer);
+    expect([layer.fadeInStart, layer.fadeInEnd]).toEqual([3, 4]);
+    layer.endTime = 3.5;
+    normalizeFades(layer);
+    expect([layer.fadeInEnd, layer.fadeOutStart]).toEqual([3.5, 3]);
+  });
+  it('arrastar a alça a partir do canto cria rampa, não fade de duração zero (regressão)', () => {
+    const layer = createLayer('text', settings, { startTime: 0, endTime: 10 });
+    normalizeFades(layer);
+    setFadeHandle(layer, 'in', 1.37);
+    expect([layer.fadeInStart, layer.fadeInEnd]).toEqual([0, 1.37]);
+    expect(fadeEnvelope(layer, .685)).toBeCloseTo(.5, 5);
+    setFadeHandle(layer, 'out', 8);
+    expect([layer.fadeOutStart, layer.fadeOutEnd]).toEqual([8, 10]);
+    setFadeHandle(layer, 'in', -5);
+    expect(layer.fadeInEnd).toBe(0);
+    setFadeHandle(layer, 'out', 50);
+    expect(layer.fadeOutStart).toBe(10);
   });
   it('sourceTime mantém trim, velocidade, reverse, loop e último milissegundo', () => {
     const layer = createLayer('video', settings, { startTime: 2, sourceIn: 3, sourceOut: 7 });
