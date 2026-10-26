@@ -1,5 +1,5 @@
 import { strFromU8, unzipSync } from "fflate";
-import type { ImportedAsset, OpenProjectResult, ProjectDocument } from "./types";
+import type { ImportedAsset, OpenProjectResult, ProjectDocument } from "../model/types";
 
 const assetBlobs = new Map<string, Blob>();
 const assetUrls = new Map<string, string>();

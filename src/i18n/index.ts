@@ -1,4 +1,4 @@
-import type { Language } from "./types";
+import type { Language } from "../model/types";
 
 const strings = {
   "pt-BR": {

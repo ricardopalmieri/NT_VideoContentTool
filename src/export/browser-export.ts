@@ -1,6 +1,6 @@
 import { AsyncZipDeflate, Zip, ZipPassThrough } from "fflate";
 import { AudioBufferSource, BufferTarget, CanvasSource, Mp4OutputFormat, Output, Quality } from "mediabunny";
-import { downloadBlob } from "./web-platform";
+import { downloadBlob } from "../io/web-platform";
 
 export interface BrowserExportOptions {
   fileName: string;

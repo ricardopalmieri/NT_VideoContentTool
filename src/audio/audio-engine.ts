@@ -1,5 +1,6 @@
-import type { AudioTrack, ProjectDocument } from "./types";
-import { resolveAssetUrl } from "./web-platform";
+import { fadeEnvelope } from "../timeline/timing";
+import type { AudioTrack, ProjectDocument } from "../model/types";
+import { resolveAssetUrl } from "../io/web-platform";
 
 const decoded = new Map<string, AudioBuffer>();
 const reversed = new Map<string, AudioBuffer>();
@@ -51,12 +52,7 @@ function configureSource(context: BaseAudioContext, track: AudioTrack, original:
   return { source, offset: track.reverse ? original.duration - sourceOut : sourceIn };
 }
 
-function fadeEnvelope(track: AudioTrack, time: number) {
-  let value = 1;
-  if (track.fadeInEnd > track.fadeInStart) value *= time <= track.fadeInStart ? 0 : time < track.fadeInEnd ? (time - track.fadeInStart) / (track.fadeInEnd - track.fadeInStart) : 1;
-  if (track.fadeOutEnd > track.fadeOutStart) value *= time <= track.fadeOutStart ? 1 : time < track.fadeOutEnd ? 1 - (time - track.fadeOutStart) / (track.fadeOutEnd - track.fadeOutStart) : 0;
-  return Math.max(0, Math.min(1, value));
-}
+
 
 function convolverImpulse(context: BaseAudioContext, duration: number, decay: number) {
   const length = Math.max(1, Math.round(context.sampleRate * Math.min(6, duration)));
