@@ -747,6 +747,7 @@ function renderLibrary() {
       <details open><summary><span>${t("inputs")}</span><b>+</b></summary><div class="tool-grid">
         ${inputButtons.map(([kind, label]) => `<button data-add-input="${kind}">${label}</button>`).join("")}
         <button data-add-audio>${language === "pt-BR" ? "Áudio" : "Audio"}</button>
+        <button class="import-many-button" data-import-many title="${language === "pt-BR" ? "Selecione vários vídeos, imagens e áudios de uma vez (ou arraste os arquivos para o editor)" : "Select several videos, images and audio files at once (or drop files on the editor)"}">${language === "pt-BR" ? "Importar vários…" : "Import several…"}</button>
       </div></details>
       <details ${libraryAccordion === "effects" ? "open" : ""} data-library-accordion="effects"><summary><span>${t("effects")}</span><b>+</b></summary><div class="tool-list">
         ${effects.map((kind) => `<button data-add-effect="${kind}"><span>＋</span>${effectLabel(kind)}</button>`).join("")}
@@ -1493,6 +1494,10 @@ function bindEditor() {
   app.querySelector("#redo")?.addEventListener("click", redo);
   app.querySelectorAll<HTMLElement>("[data-add-input]").forEach((button) => button.addEventListener("click", () => void addInput(button.dataset.addInput as InputKind)));
   app.querySelector<HTMLElement>("[data-add-audio]")?.addEventListener("click", () => void addAudioInput());
+  app.querySelector<HTMLElement>("[data-import-many]")?.addEventListener("click", async () => {
+    const files = await chooseFiles("video/*,image/*,audio/*,.mp4,.webm,.mov,.m4v,.png,.jpg,.jpeg,.webp,.bmp,.gif,.mp3,.wav,.m4a,.aac,.ogg,.oga,.flac");
+    if (files.length) void importMediaFiles(files);
+  });
   app.querySelectorAll<HTMLElement>("[data-add-effect]").forEach((button) => button.addEventListener("click", () => addEffect(button.dataset.addEffect as EffectKind, false)));
   app.querySelectorAll<HTMLElement>("[data-add-post]").forEach((button) => button.addEventListener("click", () => addEffect(button.dataset.addPost as EffectKind, true)));
   bindDynamicControls();
@@ -2157,6 +2162,141 @@ function probeMediaDuration(asset: string, kind: "video" | "audio") {
     media.src = resolveAssetUrl(asset);
   });
 }
+
+const IMPORTED_IMAGE_SECONDS = 3;
+const VIDEO_EXTENSIONS = /\.(mp4|webm|mov|m4v)$/i;
+const IMAGE_EXTENSIONS = /\.(png|jpe?g|webp|bmp|gif)$/i;
+const AUDIO_EXTENSIONS = /\.(mp3|wav|m4a|aac|ogg|oga|flac)$/i;
+
+function mediaKindOf(file: File): "video" | "image" | "audio" | null {
+  if (file.type.startsWith("video/") || VIDEO_EXTENSIONS.test(file.name)) return "video";
+  if (file.type.startsWith("image/") || IMAGE_EXTENSIONS.test(file.name)) return "image";
+  if (file.type.startsWith("audio/") || AUDIO_EXTENSIONS.test(file.name)) return "audio";
+  return null;
+}
+
+// Importa vários arquivos de uma vez: vídeos e imagens em sequência numa faixa
+// nova a partir do playhead (imagens com 3 s), áudios em sequência numa faixa de
+// áudio. Tudo vira um único passo de desfazer, pronto para editar à mão ou pelo agente.
+async function importMediaFiles(files: File[]) {
+  if (!project || !files.length) return;
+  const settings = project.settings;
+  const start = Math.round(currentTime * settings.fps) / settings.fps;
+  const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const failures: string[] = [];
+  const prepared: Array<{ kind: "video" | "image" | "audio"; asset: ImportedAsset; duration: number; audioDuration: number }> = [];
+  setStatus(language === "pt-BR" ? `IMPORTANDO ${sorted.length} ARQUIVO(S)…` : `IMPORTING ${sorted.length} FILE(S)…`);
+  for (const file of sorted) {
+    const kind = mediaKindOf(file);
+    if (!kind) {
+      failures.push(file.name);
+      continue;
+    }
+    try {
+      const asset = await importWebAsset(file);
+      let duration = kind === "image" ? IMPORTED_IMAGE_SECONDS : 0;
+      let audioDuration = 0;
+      if (kind === "video") duration = await probeMediaDuration(asset.relativePath, "video");
+      if (kind !== "image") {
+        try {
+          audioDuration = (await probeAudio(asset.relativePath)).duration;
+        } catch {
+          audioDuration = 0;
+        }
+      }
+      if (kind === "audio") duration = audioDuration || await probeMediaDuration(asset.relativePath, "audio");
+      if (!(duration > 0)) throw new Error("sem duração");
+      prepared.push({ kind, asset, duration, audioDuration });
+    } catch {
+      failures.push(file.name);
+    }
+  }
+  if (!prepared.length) {
+    setStatus(language === "pt-BR" ? `NENHUMA MÍDIA IMPORTADA · ${failures.join(", ")}` : `NO MEDIA IMPORTED · ${failures.join(", ")}`);
+    return;
+  }
+  snapshot();
+  const fps = settings.fps;
+  const frame = (seconds: number) => Math.max(1 / fps, Math.round(seconds * fps) / fps);
+  let visualCursor = start;
+  let audioCursor = start;
+  let visualTrack: string | undefined;
+  let linkedLane: string | undefined;
+  let audioLane: string | undefined;
+  const layers: Layer[] = [];
+  for (const item of prepared) {
+    const { asset } = item;
+    rememberAssetSource(asset.relativePath, asset.sourceMetadata);
+    if (item.kind === "audio") {
+      const end = audioCursor + frame(item.duration);
+      const track = createAudioTrack(asset.fileName, asset.relativePath, item.duration, {
+        startTime: audioCursor, endTime: end, laneId: audioLane,
+        fadeInStart: audioCursor, fadeInEnd: audioCursor, fadeOutStart: end, fadeOutEnd: end,
+      });
+      audioLane ||= track.id;
+      project.audioTracks.push(track);
+      audioCursor = end;
+      continue;
+    }
+    const end = visualCursor + frame(item.duration);
+    const layer = createLayer(item.kind, settings, {
+      asset: asset.relativePath, name: asset.fileName, trackId: visualTrack,
+      startTime: visualCursor, endTime: end,
+      fadeInStart: visualCursor, fadeInEnd: visualCursor, fadeOutStart: end, fadeOutEnd: end,
+      ...(item.kind === "video" ? { sourceIn: 0, sourceOut: item.duration, loop: false } : {}),
+    });
+    visualTrack ||= layer.id;
+    layers.push(layer);
+    if (item.kind === "video" && item.audioDuration > 0) {
+      const track = createAudioTrack(`${layer.name} · audio`, asset.relativePath, item.audioDuration, {
+        linkedLayerId: layer.id, linked: true, laneId: linkedLane,
+        startTime: visualCursor, endTime: end, sourceOut: item.audioDuration,
+        fadeInStart: visualCursor, fadeInEnd: visualCursor, fadeOutStart: end, fadeOutEnd: end,
+      });
+      linkedLane ||= track.id;
+      project.audioTracks.push(track);
+    }
+    visualCursor = end;
+  }
+  project.layers.unshift(...layers);
+  extendDurationToContent();
+  selectedClipIds.clear();
+  selectedLayerId = layers[0]?.id || selectedLayerId;
+  selectedAudioTrackId = layers.length ? "" : project.audioTracks[project.audioTracks.length - 1]?.id || "";
+  selectedEffectId = "";
+  selectedKeyRef = "";
+  markProjectModified();
+  renderEditorPreservingCanvas();
+  for (const layer of layers) {
+    renderer?.removeMedia(layer.id);
+    renderer?.preload(layer, true, () => {
+      if (selectedLayerId === layer.id) updateInspector();
+    });
+    if (layer.kind === "video") void generateVideoThumbnails(layer);
+  }
+  for (const asset of new Set(project.audioTracks.map((track) => track.asset))) void generateAudioWaveform(asset);
+  const imported = prepared.length;
+  setStatus(language === "pt-BR"
+    ? `${imported} MÍDIA(S) IMPORTADA(S)${failures.length ? ` · não importadas: ${failures.join(", ")}` : ""}`
+    : `${imported} MEDIA FILE(S) IMPORTED${failures.length ? ` · skipped: ${failures.join(", ")}` : ""}`);
+}
+
+// Arrastar arquivos para o editor importa todos de uma vez.
+window.addEventListener("dragover", (event) => {
+  if (!project || exportInProgress || !event.dataTransfer?.types.includes("Files")) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+  document.body.classList.add("is-dropping-media");
+});
+window.addEventListener("dragleave", (event) => {
+  if (!event.relatedTarget) document.body.classList.remove("is-dropping-media");
+});
+window.addEventListener("drop", (event) => {
+  document.body.classList.remove("is-dropping-media");
+  if (!project || exportInProgress || !event.dataTransfer?.files.length) return;
+  event.preventDefault();
+  void importMediaFiles(Array.from(event.dataTransfer.files));
+});
 
 async function addAudioInput() {
   if (!project) return;

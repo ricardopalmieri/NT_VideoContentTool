@@ -1103,3 +1103,7 @@ button { transition: color 120ms ease, background-color 120ms ease, border-color
 .agent-dialog footer { display: flex; justify-content: flex-end; gap: 8px; }
 .agent-dialog footer button { min-width: 110px; height: 36px; border: 1px solid var(--line); border-radius: var(--radius-control); background: transparent; color: var(--ink); }
 .agent-dialog footer .primary { border-color: var(--red); background: var(--red); }
+
+/* Importar várias mídias. */
+.tool-grid .import-many-button { grid-column: 1 / -1; min-height: 34px; border-style: dashed; color: var(--quiet); }
+body.is-dropping-media .editor-app::after { content: "Solte para importar as mídias"; position: fixed; z-index: 60; inset: 12px; display: grid; place-items: center; border: 2px dashed var(--red); border-radius: var(--radius-panel); background: rgba(8,8,8,.72); color: var(--ink); font-size: 18px; pointer-events: none; }

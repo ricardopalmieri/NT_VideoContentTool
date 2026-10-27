@@ -2,6 +2,12 @@
 
 ## Rodada 6 — edição com IA (MCP)
 
+- **Importar vários arquivos de uma vez:** botão "Importar vários…" (vídeos,
+  imagens e áudios) ou arrastar os arquivos para o editor. Visuais entram em
+  sequência numa faixa nova a partir do playhead (imagens com 3 s, ordem por
+  nome), áudios numa faixa de áudio; um único passo de desfazer. Facilita
+  trazer o material para o agente editar.
+
 - **Comandos de edição no `window.vct`:** criar texto e geometria, mudar texto,
   cortar, mover (inclusive entre faixas), duplicar, remover (com ripple) e
   definir transição. Também `describe`, `getTimeline` (compacta), `dryRun`,

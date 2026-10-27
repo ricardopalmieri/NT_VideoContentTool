@@ -807,3 +807,28 @@ test('modo Sobrepor: arrastar um clipe sobre o anterior cria Dissolver na sobrep
     await context.close();
   }
 });
+
+test('importar vários arquivos põe as mídias em sequência numa faixa, num só passo de desfazer', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await createScene(page);
+    const before = await page.locator('[data-move-layer-clip]').count();
+    const chooser = page.waitForEvent('filechooser');
+    await page.locator('[data-import-many]').click();
+    const png = PNG.sync.write(new PNG({ width: 4, height: 4 }));
+    await (await chooser).setFiles([
+      { name: 'foto-2.png', mimeType: 'image/png', buffer: png },
+      { name: 'foto-1.png', mimeType: 'image/png', buffer: png },
+    ]);
+    await expect(page.locator('[data-move-layer-clip]')).toHaveCount(before + 2);
+    const imported = await page.evaluate(() => (window as unknown as { vct: { getProject(): { layers: Array<{ name: string; startTime: number; endTime: number; trackId?: string; id: string }> } } }).vct
+      .getProject().layers.filter((layer) => layer.name.startsWith('foto-')).map((layer) => ({ name: layer.name, start: layer.startTime, end: layer.endTime, track: layer.trackId || layer.id })));
+    expect(imported.map((item) => item.name)).toEqual(['foto-1.png', 'foto-2.png']);
+    expect(imported[1].start).toBeCloseTo(imported[0].end, 5);
+    expect(imported[1].track).toBe(imported[0].track);
+    await page.locator('body').press('Control+z');
+    await expect(page.locator('[data-move-layer-clip]')).toHaveCount(before);
+  } finally {
+    await context.close();
+  }
+});
