@@ -173,6 +173,27 @@ contratos de domínio necessários e confirmar compatibilidade v2.
 5. **Documentação em inglês** (última).
 - **Rodada 4 — modo pedagógico: em espera.**
 
+## Checkpoint — revisão final da 0.7.0 (26/10/2026)
+
+- Congelamento funcional mantido. Correções listadas antes de implementar:
+  IDs novos nos efeitos de áudio colados; segunda metade de corte sem repetir
+  transição de entrada; corte respeitando áudio com vínculo desligado.
+- Três testes de regressão falharam antes e passaram depois. `npm run check`
+  aprovado: legado íntegro, 92 testes unitários, typecheck/build e 15 cenários
+  Playwright. Execução fora do sandbox para acesso ao servidor de loopback.
+- QA direto no Chrome: projeto Full HD/30 fps/10 s com geometria,
+  reprodução/pausa, corte, sobreposição, copiar/colar e Undo. MP4 gerado pela
+  interface e conferido: AVC, 1920×1080, 10 s, 300 pacotes a 30 fps.
+- O usuário permite abandonar a compatibilidade se trouxer simplificação
+  comprovada. As correções desta revisão não exigiram novo modelo; v2 mantido.
+- **Escopo IA reafirmado:** `window.vct` v1 existe e foi revalidado; comandos
+  de montagem, projeto/mídia e adaptadores MCP/WebMCP ainda pertencem à Rodada 6.
+  A API local inicial não equivale a controle completo por um cliente MCP.
+- Relatório e limites: `docs/RODADA2-RELATORIO.md`, seção de revisão final.
+- Próximo passo: revisar o diff local e empacotar a 0.7.0. Nenhum commit,
+  push, deploy ou pacote foi feito nesta sessão. Não iniciar features da
+  Rodada 6 dentro deste fechamento.
+
 ## Checkpoint — Rodada 2 concluída e validada (26/10/2026)
 
 - `src/model/transitions.ts`: `layer.transition` (dissolve, dip, wipe-right,

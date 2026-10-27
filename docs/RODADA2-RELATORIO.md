@@ -80,3 +80,65 @@ modo Sobrepor.
 A Rodada 2 está funcionalmente fechada. A 0.7.0 entra em congelamento de
 features: os próximos passos são revisão final das mudanças, commits locais
 descritivos e empacotamento somente após essa revisão.
+
+## Revisão final da 0.7.0 — 26/10/2026
+
+Escopo mantido em correções de regressão, apresentadas antes da implementação.
+O usuário dispensou a compatibilidade antiga caso outro modelo fosse mais
+simples; nesta revisão, as correções foram locais e não justificaram trocar
+o formato v2. Nenhuma feature ou integração externa foi adicionada.
+
+### Correções comprovadas
+
+- **Colagem de vídeo com efeitos de áudio:** `pasteClips()` repetia os IDs
+  dos efeitos do áudio vinculado. Duas colagens produziram duas ocorrências
+  de ID duplicado na validação. Agora cada cópia recebe IDs novos; original
+  e clipboard permanecem intactos.
+- **Transição repetida após corte:** a segunda metade herdava a transição
+  de entrada. O teste de corte aos 4 s, após uma entrada de 1 s, encontrou
+  opacidade zero na nova borda. Agora a entrada pertence à primeira metade
+  e a nova borda é um corte seco.
+- **Áudio desvinculado cortado junto:** o corte usava `linkedLayerId` sem
+  verificar `linked`. Agora o áudio com vínculo desligado permanece intacto.
+
+Os três testes em `tests/unit/clip-tracks.test.ts` falharam antes das
+correções e passaram depois. Alteração de produção restrita a
+`src/model/clip-tracks.ts`.
+
+### Validação desta revisão
+
+- `npm run check`: legado íntegro, 13 arquivos/92 testes unitários,
+  TypeScript, build e 15/15 cenários Playwright aprovados (1,4 min).
+- A primeira tentativa no sandbox não avançou na conexão com o servidor
+  de paridade e foi interrompida. A execução completa acima ocorreu fora
+  do sandbox, com servidor restrito ao loopback.
+- QA direto no Chrome em `http://127.0.0.1:4176/`, origem separada para
+  preservar a recuperação existente em 4175: composição 1920×1080, 30 fps,
+  10 s; geometria, reprodução/pausa, corte aos 5,4 s, sobreposição por arrasto,
+  copiar/colar no playhead com nova faixa e Undo restaurando a montagem.
+- Exportação manual MP4 H.264 concluída e salva em
+  `test-results/revisao-070-manual.mp4`. Inspeção do arquivo com Mediabunny:
+  AVC, 1920×1080, 10 s, 300 pacotes de vídeo, taxa média de 30 fps.
+- O teste manual usou geometria; mídia real, seek, relink e sincronização
+  A/V foram exercitados pelos cenários automatizados. Não houve escuta
+  crítica de áudio, teste em iPad físico ou revisão de todos os codecs.
+  A inspeção do MP4 confirma estrutura/timing, não comparação visual de
+  cada frame. Cortar durante uma transição já em andamento não recebeu
+  cobertura específica nesta revisão.
+
+### Automação por IA/MCP: escopo preservado
+
+A base simplificada já entregue é `window.vct` v1: consultas, validação,
+catálogo, propriedades, keyframes, efeitos, lotes atômicos e um Undo por lote.
+O cenário Playwright dessa API passou novamente. O contrato está em
+`docs/AUTOMACAO.md`.
+
+A operação completa por IA/MCP **ainda não está entregue**: faltam comandos
+de montagem (corte, movimento, ripple e colagem), operações de projeto/mídia
+e um adaptador externo. A Rodada 6 continua como próxima prioridade após
+a entrega 0.7.0, reutilizando as operações do domínio por meio da API comum,
+com contratos de permissões e resultados verificáveis. MCP/WebMCP e o
+benchmark de tokens permanecem backlog, não critérios já aprovados.
+
+Revisão encerrada no escopo acima; alterações locais prontas para revisão
+do diff. Empacotamento, commit, push e deploy não foram feitos nesta sessão.

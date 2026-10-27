@@ -148,12 +148,14 @@ export function splitClip(project: ProjectDocument, layerId: string, time: numbe
   const second = structuredClone(first);
   second.id = uid("layer");
   second.trackId = trackIdOf(first);
+  // O corte cria uma borda seca; a entrada pertence à primeira parte.
+  delete second.transition;
   second.effects.forEach((effect) => effect.id = uid("fx"));
   splitTiming(first, second, time, media, first.kind === "video");
   project.layers.splice(index + 1, 0, second);
 
   for (const audio of [...project.audioTracks]) {
-    if (audio.linkedLayerId !== first.id) continue;
+    if (!audio.linked || audio.linkedLayerId !== first.id) continue;
     const audioIndex = project.audioTracks.indexOf(audio);
     const audioSecond = structuredClone(audio);
     audioSecond.id = uid("audio");
@@ -246,6 +248,7 @@ export function pasteClips(project: ProjectDocument, clipboard: ClipboardClips, 
       if (track.linkedLayerId !== originalId) continue;
       pastedAudio.push({ track, lane: laneIdOf(track) });
       track.id = uid("audio");
+      track.effects.forEach((effect) => effect.id = uid("afx"));
       track.linkedLayerId = layer.id;
       project.audioTracks.push(track);
     }

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { clipNeighbors, moveClipToTrack, placeTrack, shiftTrack, splitClip, trackIdOf, visualTracks } from '../../src/model/clip-tracks';
-import { createAudioTrack, createLayer, createProject } from '../../src/model/types';
+import { clipNeighbors, copyClips, pasteClips, moveClipToTrack, placeTrack, shiftTrack, splitClip, trackIdOf, visualTracks } from '../../src/model/clip-tracks';
+import { createAudioEffect, createAudioTrack, createLayer, createProject } from '../../src/model/types';
+import { validateProjectDocument } from '../../src/model/validate-project';
+import { transitionState } from '../../src/model/transitions';
 import { fadeEnvelope } from '../../src/timeline/timing';
 
 const settings = { name: 'Clipes', width: 320, height: 180, fps: 10, duration: 10, background: '#000000', transparent: true };
@@ -21,6 +23,36 @@ function project() {
 }
 
 describe('faixas com vários clipes', () => {
+  it('colar áudio com efeitos mantém IDs únicos e o projeto válido', () => {
+    const doc = project();
+    doc.audioTracks[0].effects.push(createAudioEffect('lowpass'));
+    const original = structuredClone(doc.audioTracks[0].effects[0]);
+    const clipboard = copyClips(doc, ['v']);
+    pasteClips(doc, clipboard, 0);
+    pasteClips(doc, clipboard, 0);
+    expect(validateProjectDocument(doc).issues).toEqual([]);
+    expect(new Set(doc.audioTracks.map(track => track.effects[0].id)).size).toBe(3);
+    expect(doc.audioTracks[0].effects[0]).toEqual(original);
+    expect(clipboard.audio[0].effects[0]).toEqual(original);
+  });
+
+  it('corte seco depois da transição não repete a entrada na segunda metade', () => {
+    const doc = project();
+    doc.layers[1].transition = { type: 'dissolve', duration: 1 };
+    const { first, second } = splitClip(doc, 'v', 4, 30)!;
+    expect(first.transition).toEqual({ type: 'dissolve', duration: 1 });
+    expect(transitionState(doc, second, 4).opacity).toBe(1);
+    expect(second.transition).toBeUndefined();
+  });
+
+  it('corte preserva áudio cujo vínculo foi desligado', () => {
+    const doc = project();
+    doc.audioTracks[0].linked = false;
+    const before = structuredClone(doc.audioTracks);
+    splitClip(doc, 'v', 4, 30);
+    expect(doc.audioTracks).toEqual(before);
+  });
+
   it('projeto sem trackId: cada layer é a própria faixa', () => {
     const doc = project();
     expect(visualTracks(doc).map((track) => track.id)).toEqual(['t', 'v']);
