@@ -1,14 +1,19 @@
 import { clamp } from "../model/math";
 import { normalizeFades, setFadeHandle } from "../timeline/timing";
 import { formatDurationValue, parseDurationValue, type DurationUnit } from "../timeline/timecode";
+import { formatRulerTime, rulerTicks } from "../timeline/ruler";
+import { exportRange } from "../export/export-range";
+import { openShortcutsPanel, openWarningsPanel, renderWarningsButton } from "./info-panels";
 import { sourceTimeFor } from "../renderer/source-time";
 import { installAgentAutomation, openAgentPanel } from "../automation/agent-panel";
-import { audioLanes, clipNeighbors, copyClips, moveClipToTrack, pasteClips, placeTrack, rippleDelete, shiftClip, shiftTrack, splitClip, trackIdOf, visualTracks, type ClipboardClips } from "../model/clip-tracks";
+import { audioLanes, clipNeighbors, copyClips, laneIdOf, overlapsTrack, trackIdOf, trackName, visualTracks, type ClipboardClips } from "../model/clip-tracks";
+import { assetKindOf, listAssets, type BinEntry } from "../model/media-assets";
+import { BIN_DRAG_TYPE, IMPORT_ACCEPT, bindMediaBin, openImportProgress, renderMediaBin, type BinActions, type BinView } from "./media-bin";
+import { binThumbnail, ensureThumbnail, probeMedia } from "./media-probe";
 import { autoTransitionsForOverlap, DEFAULT_TRANSITION_DURATION, isTransitionType, syncTransitionAudioFades, transitionWindow, TRANSITION_TYPES, type TransitionType } from "../model/transitions";
-import { timelineSnapCandidates as collectTimelineSnapCandidates, snapTimelineTime as calculateTimelineSnap } from "../timeline/snapping";
+import { gridTimes, tapTempo, timelineSnapCandidates as collectTimelineSnapCandidates, snapTimelineTime as calculateTimelineSnap } from "../timeline/snapping";
 import { migrateProject } from "../model/migrate-project";
 import { UndoHistory } from "../model/undo-history";
-import { syncLinkedAudioTracks, syncLinkedVideoLayer } from "../model/linked-media";
 import {
   AUDIO_EFFECT_CATALOG,
   AUDIO_EFFECT_PARAMETERS,
@@ -17,13 +22,11 @@ import {
   type EffectParameterDefinition,
 } from "../model/effect-catalog";
 import { createVctApi, type VctApi } from "../automation/window-vct";
-import {
-  keyframeAt as findKeyframeAt,
-  upsertKeyframe as upsertDomainKeyframe,
-} from "../model/keyframes";
+import { runProjectCommands, type VctCommand } from "../model/commands";
+import { keyframeAt as findKeyframeAt } from "../model/keyframes";
 import { translate, type TranslationKey } from "../i18n";
 import { ComposerRenderer } from "../renderer/composer-renderer";
-import { AudioTimelineEngine, mixProjectAudio, probeAudio } from "../audio/audio-engine";
+import { AudioTimelineEngine, mixProjectAudio, probeAudio, sliceAudioBuffer } from "../audio/audio-engine";
 import {
   chooseFile,
   chooseFiles,
@@ -49,10 +52,6 @@ import {
   PngSequenceBrowserExporter,
 } from "../export/browser-export";
 import {
-  createEffect,
-  createAudioTrack,
-  createAudioEffect,
-  createLayer,
   createProject,
   uid,
   type Easing,
@@ -61,7 +60,6 @@ import {
   type AudioTrack,
   type EffectKind,
   type EffectNode,
-  type ImportedAsset,
   type InputKind,
   type Keyframe,
   type Language,
@@ -72,7 +70,7 @@ import {
 } from "../model/types";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
-const APP_VERSION = "0.7.1";
+const APP_VERSION = __APP_VERSION__;
 const COMPOSITION_PRESETS = [
   { group: "Instagram", label: "FEED SQUARE", width: 1080, height: 1080 },
   { group: "Instagram", label: "FEED PORTRAIT", width: 1080, height: 1350 },
@@ -111,6 +109,9 @@ let lastPreviewScaleChangeAt = 0;
 let timelineLoop = false;
 let recordMode = false;
 let timelineZoomX = Number(localStorage.getItem("nt-vct-timeline-zoom-x")) || 1;
+// Tempo em que o último snap travou (guia vertical durante arrastos); null quando não travou.
+let lastSnap: number | null = null;
+let timelineZoomTimer = 0;
 let durationUnit: DurationUnit = localStorage.getItem("nt-vct-duration-unit") === "frames" ? "frames" : "tc";
 // Modo Sobrepor: clipes da mesma faixa podem se sobrepor; a sobreposição vira transição.
 let overlapMode = localStorage.getItem("nt-vct-overlap-mode") === "1";
@@ -128,6 +129,15 @@ let timelineHeight = Number(localStorage.getItem("nt-vct-timeline-height")) || 2
 const expandedTimelineLayers = new Set<string>();
 let timelinePostExpanded = false;
 let libraryAccordion: "effects" | "post" = "effects";
+type LeftTab = "media" | "effects";
+let leftTab: LeftTab = localStorage.getItem("nt-vct-left-tab") === "effects" ? "effects" : "media";
+const binView: BinView = { filter: "all", query: "", selected: "" };
+let binHtml = "";
+let binRefreshTimer = 0;
+let inspectedAsset = "";
+let draggedBinAsset = "";
+const thumbnailRequests = new Set<string>();
+const metadataAttempts = new Set<string>();
 let selectedKeyRef = "";
 const recordedTracks = new Set<string>();
 const recordedRanges = new Map<string, { min: number; max: number }>();
@@ -199,6 +209,7 @@ function selectLayerById(layerId: string, refreshTimeline = true) {
   selectedAudioTrackId = "";
   selectedEffectId = "";
   selectedKeyRef = "";
+  inspectedAsset = "";
   updateLayerStack();
   updateInspector();
   if (refreshTimeline) updateTimeline();
@@ -215,6 +226,7 @@ function selectAudioTrackById(trackId: string, refreshTimeline = true) {
   selectedLayerId = "";
   selectedEffectId = "";
   selectedKeyRef = "";
+  inspectedAsset = "";
   updateLayerStack();
   updateInspector();
   if (refreshTimeline) updateTimeline();
@@ -241,9 +253,169 @@ function escapeHtml(value: unknown) {
   })[character]!);
 }
 
-function snapshot() {
+function snapshot(label = "") {
   if (!project) return;
-  history.checkpoint(JSON.stringify(project));
+  history.checkpoint(JSON.stringify(project), label);
+}
+
+// ---- Edits from the interface run through the VCT command registry, the same
+// path window.vct uses: validation, one undo step per action, named steps.
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+let warningsTimer = 0;
+let warningsRenderedAt = 0;
+
+/** Redraws the status bar warnings button, at most once every 500 ms. */
+function refreshWarnings() {
+  if (warningsTimer) return;
+  warningsTimer = window.setTimeout(() => {
+    warningsTimer = 0;
+    warningsRenderedAt = performance.now();
+    renderWarningsSlot();
+  }, Math.max(0, 500 - (performance.now() - warningsRenderedAt)));
+}
+
+function renderWarningsSlot() {
+  const slot = app.querySelector<HTMLElement>("#warnings-slot");
+  if (!slot || !project) return;
+  const html = renderWarningsButton(project, language);
+  if (slot.innerHTML === html) return;
+  slot.innerHTML = html;
+  slot.querySelector("#open-warnings")?.addEventListener("click", openWarnings);
+}
+
+function openWarnings() {
+  if (!project) return;
+  openWarningsPanel(project, language, (issue) => {
+    const id = issue.ids[0];
+    if (id && project?.layers.some((layer) => layer.id === id)) selectLayerById(id);
+    else if (id && project?.audioTracks.some((track) => track.id === id)) selectAudioTrackById(id);
+    if (issue.start !== undefined) setTime(issue.start);
+  });
+}
+
+function refreshHistoryButtons() {
+  if (!project) return;
+  refreshWarnings();
+  const serialized = JSON.stringify(project);
+  const undoButton = app.querySelector<HTMLButtonElement>("#undo");
+  const redoButton = app.querySelector<HTMLButtonElement>("#redo");
+  undoButton?.toggleAttribute("disabled", !history.canUndo(serialized));
+  redoButton?.toggleAttribute("disabled", !history.canRedo(serialized));
+  const undoLabel = history.undoLabel(serialized);
+  const redoLabel = history.redoLabel(serialized);
+  undoButton?.setAttribute("title", undoLabel ? `${t("undo")}: ${undoLabel}` : t("undo"));
+  redoButton?.setAttribute("title", redoLabel ? `${t("redo")}: ${redoLabel}` : t("redo"));
+}
+
+// A região de trabalho e a grade só mudam a timeline; o resto das configurações recria o editor.
+const settingsLayoutKey = (settings: ProjectDocument["settings"]) => JSON.stringify({ ...settings, workArea: undefined, grid: undefined });
+
+/** Replaces the open document with a command result and refreshes the editor. */
+function commitDocument(next: ProjectDocument, options: { clipEdit?: boolean; panels?: boolean } = {}) {
+  if (!project) return;
+  const structureChanged = project.layers.map(layer => layer.id).join('|') !== next.layers.map(layer => layer.id).join('|')
+    || project.audioTracks.map(track => track.id).join('|') !== next.audioTracks.map(track => track.id).join('|')
+    || settingsLayoutKey(project.settings) !== settingsLayoutKey(next.settings);
+  Object.assign(project, next);
+  for (const id of [...selectedClipIds]) if (!project.layers.some(layer => layer.id === id)) selectedClipIds.delete(id);
+  if (!project.layers.some(layer => layer.id === selectedLayerId)) selectedLayerId = project.layers[0]?.id || '';
+  if (!project.audioTracks.some(track => track.id === selectedAudioTrackId)) selectedAudioTrackId = '';
+  if (options.clipEdit) {
+    if (overlapMode) autoTransitionsForOverlap(project);
+    syncTransitionAudioFades(project);
+  }
+  markProjectModified(project);
+  if (structureChanged) renderEditorPreservingCanvas();
+  else if (options.panels !== false) updatePanels();
+  updateTransformBox();
+  refreshHistoryButtons();
+  void renderFrame();
+}
+
+/**
+ * Runs commands as one named undo step. Returns the command results, or null
+ * when the edit was refused (the reason goes to the status bar).
+ */
+function applyCommands(commands: VctCommand[], label: string, options: { clipEdit?: boolean; panels?: boolean; select?: (results: unknown[]) => void } = {}) {
+  if (!project || !commands.length) return null;
+  endEditSession();
+  if (exportInProgress) {
+    setStatus(language === "pt-BR" ? "AGUARDE A EXPORTAÇÃO" : "WAIT FOR THE EXPORT");
+    return null;
+  }
+  let result: ReturnType<typeof runProjectCommands>;
+  try {
+    result = runProjectCommands(project, commands, keyframeTolerance());
+  } catch (error) {
+    setStatus(`${label.toUpperCase()} · ${errorMessage(error)}`);
+    return null;
+  }
+  if (JSON.stringify(result.project) === JSON.stringify(project)) return result.results;
+  snapshot(label);
+  options.select?.(result.results);
+  commitDocument(result.project, options);
+  return result.results;
+}
+
+interface Gesture {
+  /** Re-runs the commands on the state from when the gesture began. False when refused. */
+  preview(commands: VctCommand[]): boolean;
+  /** Commits the last preview as one undo step. */
+  end(options?: { clipEdit?: boolean }): void;
+  /** Restores the state from when the gesture began. */
+  cancel(): void;
+}
+
+/**
+ * Continuous edits (drags, scrubs, typing): every move previews commands from
+ * the starting state, so handlers never accumulate; end() makes one undo step.
+ * Previews replace project.layers objects, so re-read layers by id after each.
+ */
+function beginGesture(label: string): Gesture {
+  const base = structuredClone(project!);
+  const baseJson = JSON.stringify(base);
+  let changed = false;
+  return {
+    preview(commands) {
+      if (!project || exportInProgress) return false;
+      // Nothing to change (the pointer came back to the start): show the starting state.
+      if (!commands.length) {
+        Object.assign(project, structuredClone(base));
+        changed = true;
+        return true;
+      }
+      try {
+        const result = runProjectCommands(base, commands, keyframeTolerance());
+        Object.assign(project, result.project);
+        changed = true;
+        return true;
+      } catch (error) {
+        setStatus(`${label.toUpperCase()} · ${errorMessage(error)}`);
+        return false;
+      }
+    },
+    end(options = {}) {
+      if (!project || !changed || JSON.stringify(project) === baseJson) return;
+      history.checkpoint(baseJson, label);
+      if (options.clipEdit) {
+        if (overlapMode) autoTransitionsForOverlap(project);
+        syncTransitionAudioFades(project);
+      }
+      markProjectModified(project);
+      refreshHistoryButtons();
+      void renderFrame();
+    },
+    cancel() {
+      if (!project || !changed) return;
+      Object.assign(project, structuredClone(base));
+      changed = false;
+      void renderFrame();
+    },
+  };
 }
 
 function markProjectModified(target: ProjectDocument | null = project) {
@@ -307,6 +479,8 @@ function restore(value: string) {
   renderEditor();
   const canvas = app.querySelector<HTMLCanvasElement>("#composition-canvas")!;
   initializeRenderer(canvas);
+  metadataAttempts.clear();
+  refreshAssetMetadata();
 }
 
 function initializeRenderer(canvas: HTMLCanvasElement) {
@@ -345,14 +519,24 @@ function applyPresetToInputs(select: HTMLSelectElement, width: HTMLInputElement,
 
 function undo() {
   if (!project) return;
+  endEditSession();
+  stopPlayback();
+  const label = history.undoLabel(JSON.stringify(project));
   const previous = history.undo(JSON.stringify(project));
-  if (previous !== null) restore(previous);
+  if (previous === null) return;
+  restore(previous);
+  if (label) setStatus(`${language === "pt-BR" ? "DESFEITO" : "UNDONE"} · ${label}`);
 }
 
 function redo() {
   if (!project) return;
+  endEditSession();
+  stopPlayback();
+  const label = history.redoLabel(JSON.stringify(project));
   const next = history.redo(JSON.stringify(project));
-  if (next !== null) restore(next);
+  if (next === null) return;
+  restore(next);
+  if (label) setStatus(`${language === "pt-BR" ? "REFEITO" : "REDONE"} · ${label}`);
 }
 
 function renderLanguage() {
@@ -570,6 +754,7 @@ function refreshRelinkedMedia() {
   renderEditorPreservingCanvas();
   for (const layer of project.layers) if (layer.kind === "video" && layer.asset && hasWebAsset(layer.asset)) void generateVideoThumbnails(layer);
   for (const track of project.audioTracks) if (hasWebAsset(track.asset)) void generateAudioWaveform(track.asset);
+  refreshAssetMetadata();
 }
 
 function showMissingMediaModal() {
@@ -622,6 +807,10 @@ function loadProject(result: OpenProjectResult, recovering = false) {
   if (!recovering) clearRecoveryForProjectChange();
   videoThumbnailCache.clear();
   audioWaveformCache.clear();
+  thumbnailRequests.clear();
+  metadataAttempts.clear();
+  binView.selected = "";
+  inspectedAsset = "";
   project = result.project;
   migrateProject(project);
   startProjectAutosaveTracking(project);
@@ -639,6 +828,7 @@ function loadProject(result: OpenProjectResult, recovering = false) {
   initializeRenderer(canvas);
   for (const layer of project.layers) if (layer.kind === "video") void generateVideoThumbnails(layer);
   for (const track of project.audioTracks) void generateAudioWaveform(track.asset);
+  refreshAssetMetadata();
 }
 
 
@@ -686,11 +876,11 @@ function renderEditor() {
           <button class="language-mini" id="language" aria-label="${language === "pt-BR" ? "Mudar idioma" : "Change language"}" title="${language === "pt-BR" ? "Mudar idioma" : "Change language"}">${uiIcon("language")}<span>${language === "pt-BR" ? "PT" : "EN"}</span></button>
         </div>
       </header>
-      <aside class="left-panel">
-        ${renderLibrary()}
+      <aside class="left-panel has-tabs">
+        ${renderLeftTop()}
         <section class="stack-section">
           <header><span>${t("layers")}</span><small>${project.layers.length}</small></header>
-          <div class="layer-stack" id="layer-stack">${project.layers.map(renderLayerItem).join("") || `<p class="empty-stack">+ ${t("inputs")}</p>`}</div>
+          <div class="layer-stack" id="layer-stack">${project.layers.map(renderLayerItem).join("") || `<p class="empty-stack">${language === "pt-BR" ? "Sem camadas ainda" : "No layers yet"}</p>`}</div>
         </section>
       </aside>
       <div class="column-resizer left-resizer" data-resize-column="left" title="Resize Layers"></div>
@@ -730,25 +920,32 @@ function renderEditor() {
       <aside class="right-panel"><header class="panel-title">${t("properties")}</header><div id="inspector">${renderInspector()}</div></aside>
       <div class="timeline-resizer" id="timeline-resizer" title="Resize Timeline"></div>
       <section class="timeline-panel">${renderTimeline()}</section>
-      <div class="statusbar"><span id="status-text">READY · BUILD ${APP_VERSION}</span><span>${projectJsonPath}</span></div>
+      <div class="statusbar"><span id="status-text">READY · BUILD ${APP_VERSION}</span><span class="statusbar-end"><span id="warnings-slot">${project ? renderWarningsButton(project, language) : ""}</span><span class="statusbar-path">${projectJsonPath}</span></span></div>
     </div>
     <div id="modal-root"></div>`;
   bindEditor();
 }
 
-function renderLibrary() {
-  const inputButtons: Array<[InputKind, string]> = [
-    ["image", t("image")], ["video", t("video")], ["guide", t("guide")], ["geometry", t("geometry")], ["text", t("text")],
-  ];
+function renderLeftTop() {
+  const tabs: Array<[LeftTab, string]> = [["media", language === "pt-BR" ? "Mídia" : "Media"], ["effects", language === "pt-BR" ? "Efeitos" : "Effects"]];
+  return `<div class="left-top">
+    <div class="left-tabs" role="tablist" aria-label="${language === "pt-BR" ? "Biblioteca" : "Library"}">
+      ${tabs.map(([id, label]) => `<button type="button" role="tab" id="left-tab-${id}" data-left-tab="${id}" aria-controls="left-tabpanel" aria-selected="${leftTab === id}" tabindex="${leftTab === id ? 0 : -1}">${label}</button>`).join("")}
+    </div>
+    <div class="left-tab-body" id="left-tabpanel" role="tabpanel" aria-labelledby="left-tab-${leftTab}">${renderLeftBody()}</div>
+  </div>`;
+}
+
+function renderLeftBody() {
+  if (leftTab === "media" && project) return binHtml = renderMediaBin(project, binView, language);
+  return renderEffectsLibrary();
+}
+
+function renderEffectsLibrary() {
   const effects = (Object.keys(EFFECT_CATALOG) as EffectKind[]).filter((kind) => EFFECT_CATALOG[kind].category === "layer");
   const post = (Object.keys(EFFECT_CATALOG) as EffectKind[]).filter((kind) => EFFECT_CATALOG[kind].category === "post");
   return `
     <section class="library-section">
-      <details open><summary><span>${t("inputs")}</span><b>+</b></summary><div class="tool-grid">
-        ${inputButtons.map(([kind, label]) => `<button data-add-input="${kind}">${label}</button>`).join("")}
-        <button data-add-audio>${language === "pt-BR" ? "Áudio" : "Audio"}</button>
-        <button class="import-many-button" data-import-many title="${language === "pt-BR" ? "Selecione vários vídeos, imagens e áudios de uma vez (ou arraste os arquivos para o editor)" : "Select several videos, images and audio files at once (or drop files on the editor)"}">${language === "pt-BR" ? "Importar vários…" : "Import several…"}</button>
-      </div></details>
       <details ${libraryAccordion === "effects" ? "open" : ""} data-library-accordion="effects"><summary><span>${t("effects")}</span><b>+</b></summary><div class="tool-list">
         ${effects.map((kind) => `<button data-add-effect="${kind}"><span>＋</span>${effectLabel(kind)}</button>`).join("")}
       </div></details>
@@ -811,15 +1008,6 @@ function renderCurveTools() {
   return `<span>CURVE</span><select id="timeline-key-easing">${options.map(([value, label]) => `<option value="${value}" ${keyframe.easing === value ? "selected" : ""}>${label}</option>`).join("")}</select>${keyframe.easing === "bezier" ? `<label class="bezier-strength">TENSION <input id="timeline-bezier-strength" type="range" min="0" max="1" step=".01" value="${keyframe.curve ?? .75}"></label>` : ""}`;
 }
 
-function upsertKeyframe(keys: Keyframe[], value: number) {
-  const keyTime = recordMode && playing && project
-    ? Math.round(currentTime * project.settings.fps) / project.settings.fps
-    : currentTime;
-  const result = upsertDomainKeyframe(keys, keyTime, value, keyframeTolerance(), recordMode && playing ? "linear" : "easeInOut");
-  keys.splice(0, keys.length, ...result.keyframes);
-  return result.created;
-}
-
 function markRecordedTrack(token: string) {
   recordedTracks.add(token);
   const range = recordedRanges.get(token);
@@ -831,42 +1019,222 @@ function markRecordedTrack(token: string) {
   }
 }
 
-function setLayerNumericValue(layer: Layer, property: string, value: number) {
-  (layer as unknown as Record<string, unknown>)[property] = value;
-  let keys = layer.keyframes[property];
-  if (recordMode && playing && !keys) keys = layer.keyframes[property] = [];
-  if (recordMode && playing) markRecordedTrack(`layer:${layer.id}:${property}`);
-  return keys?.length || (recordMode && playing) ? upsertKeyframe(keys!, value) : false;
+// ---- Inspector edits. A control that changes continuously (typing, scrubbing,
+// color picker) keeps one gesture open; its commands live in named slots so
+// each preview is an absolute state rebuilt from where the gesture began.
+
+type EditEntry = [slot: string, command: VctCommand];
+
+interface EditSession {
+  key: string;
+  project: ProjectDocument;
+  gesture: Gesture;
+  slots: Map<string, VctCommand>;
+  memo: Map<string, unknown>;
+  rejected: boolean;
 }
 
-function setEffectNumericValue(effect: EffectNode, property: string, value: number) {
-  effect.params[property] = value;
-  effect.keyframes ||= {};
-  let keys = effect.keyframes[property];
-  if (recordMode && playing && !keys) keys = effect.keyframes[property] = [];
-  if (recordMode && playing) markRecordedTrack(`effect:${effect.id}:${property}`);
-  return keys?.length || (recordMode && playing) ? upsertKeyframe(keys!, value) : false;
+let editSession: EditSession | null = null;
+
+function endEditSession() {
+  const session = editSession;
+  editSession = null;
+  if (!session || session.project !== project) return;
+  session.gesture.end();
+  if (session.rejected) syncInspectorValues();
+}
+
+function openEditSession(key: string, label: string) {
+  if (editSession?.key === key && editSession.project === project) return editSession;
+  endEditSession();
+  editSession = { key, project: project!, gesture: beginGesture(label), slots: new Map(), memo: new Map(), rejected: false };
+  return editSession;
+}
+
+function previewEdit(session: EditSession, entries: EditEntry[]) {
+  const previous = new Map(session.slots);
+  for (const [slot, command] of entries) session.slots.set(slot, command);
+  if (!session.gesture.preview([...session.slots.values()])) {
+    session.slots = previous;
+    session.rejected = true;
+    return false;
+  }
+  session.rejected = false;
+  // A recording that outgrows one command batch continues in a new undo step.
+  if (session.slots.size > 400) endEditSession();
+  return true;
+}
+
+function editLabel(pt: string, en: string) {
+  return language === "pt-BR" ? pt : en;
+}
+
+const PROPERTY_LABELS: Record<string, [pt: string, en: string]> = {
+  x: ["Posição X", "Position X"], y: ["Posição Y", "Position Y"],
+  width: ["Largura", "Width"], height: ["Altura", "Height"],
+  scaleX: ["Escala X", "Scale X"], scaleY: ["Escala Y", "Scale Y"],
+  rotation: ["Rotação", "Rotation"], opacity: ["Opacidade", "Opacity"],
+  fontSize: ["Tamanho da fonte", "Font size"], fontWeight: ["Peso da fonte", "Font weight"],
+  fillOpacity: ["Opacidade do preenchimento", "Fill opacity"], strokeOpacity: ["Opacidade do traço", "Stroke opacity"],
+  strokeWidth: ["Espessura do traço", "Stroke width"],
+  startTime: ["Início", "Start"], endTime: ["Fim", "End"],
+  sourceIn: ["Início da mídia", "Source in"], sourceOut: ["Fim da mídia", "Source out"],
+  playbackRate: ["Velocidade", "Speed"], reverse: ["Reverso", "Reverse"], loop: ["Repetir", "Loop"],
+  fadeInStart: ["Fade in", "Fade in"], fadeInEnd: ["Fade in", "Fade in"],
+  fadeOutStart: ["Fade out", "Fade out"], fadeOutEnd: ["Fade out", "Fade out"],
+  volume: ["Volume", "Volume"], muted: ["Mudo", "Mute"],
+  name: ["Nome", "Name"], text: ["Texto", "Text"], fontFamily: ["Fonte", "Font"],
+  blendMode: ["Mesclagem", "Blend mode"], geometry: ["Forma", "Shape"],
+  fill: ["Cor", "Color"], stroke: ["Cor do traço", "Stroke color"],
+  fillEnabled: ["Preenchimento", "Fill"], strokeEnabled: ["Traço", "Stroke"], exportable: ["Exportar guia", "Export guide"],
+  scaleLocked: ["Proporção da escala", "Scale lock"], sizeLocked: ["Proporção do tamanho", "Size lock"],
+};
+
+function propertyLabel(property: string) {
+  const entry = PROPERTY_LABELS[property];
+  return entry ? editLabel(entry[0], entry[1]) : property;
+}
+
+function keyframeEditTime() {
+  if (!project) return currentTime;
+  const time = recordMode && playing ? Math.round(currentTime * project.settings.fps) / project.settings.fps : currentTime;
+  return Math.min(time, project.settings.duration);
+}
+
+/** Commands that store a layer value: the property itself, plus a keyframe when it is animated or recording. */
+function layerValueCommands(layer: Layer, property: string, value: number, props: Record<string, unknown> = { [property]: value }) {
+  const recording = recordMode && playing && !TIMING_PROPERTIES.has(property);
+  const keyed = Boolean(layer.keyframes[property]?.length) || recording;
+  const entries: EditEntry[] = [[`set:${layer.id}`, { type: "layer.set", layerId: layer.id, props, ...(overlapMode ? { allowOverlap: true } : {}) }]];
+  let created = false;
+  if (keyed) {
+    if (recording) markRecordedTrack(`layer:${layer.id}:${property}`);
+    const time = keyframeEditTime();
+    created = !keyframeAt(layer.keyframes[property], time);
+    entries.push([`key:${layer.id}:${property}:${time}`, {
+      type: "keyframe.upsert", layerId: layer.id, property, time, value, easing: recording ? "linear" : "easeInOut",
+    }]);
+  }
+  return { entries, created };
+}
+
+/** Previews several layer values in one gesture; null when the edit was refused. */
+function previewLayerValues(session: EditSession, layerId: string, values: Record<string, number>) {
+  const layer = project?.layers.find((item) => item.id === layerId);
+  if (!layer) return null;
+  const entries: EditEntry[] = [];
+  let created = false;
+  for (const [property, value] of Object.entries(values)) {
+    const result = layerValueCommands(layer, property, value);
+    created = created || result.created;
+    for (const [slot, command] of result.entries) entries.push([`${property}:${slot}`, command]);
+  }
+  return previewEdit(session, entries) ? { created } : null;
+}
+
+function effectValueCommands(effect: EffectNode, property: string, value: number) {
+  const recording = recordMode && playing;
+  const keyed = Boolean(effect.keyframes?.[property]?.length) || recording;
+  const entries: EditEntry[] = [[`set:${effect.id}:${property}`, { type: "effect.setParam", effectId: effect.id, parameter: property, value }]];
+  let created = false;
+  if (keyed) {
+    if (recording) markRecordedTrack(`effect:${effect.id}:${property}`);
+    const time = keyframeEditTime();
+    created = !keyframeAt(effect.keyframes?.[property], time);
+    entries.push([`key:${effect.id}:${property}:${time}`, {
+      type: "effect.keyframe.upsert", effectId: effect.id, property, time, value, easing: recording ? "linear" : "easeInOut",
+    }]);
+  }
+  return { entries, created };
+}
+
+type KeyTarget = { layerId: string; property: string } | { effectId: string; property: string };
+
+/** Rebuilds a keyframe track with one key changed (change returns null to delete it). */
+function keyTrackCommand(target: KeyTarget, keys: readonly Keyframe[], time: number, change: (key: Keyframe) => Keyframe | null): VctCommand | null {
+  const index = keys.findIndex((key) => Math.abs(key.time - time) <= keyframeTolerance());
+  if (index < 0) return null;
+  const next = keys.flatMap((key, position) => position === index ? change(key) ?? [] : [key]);
+  return "effectId" in target
+    ? { type: "effect.keyframe.set", effectId: target.effectId, property: target.property, keys: next }
+    : { type: "keyframe.set", layerId: target.layerId, property: target.property, keys: next };
+}
+
+/** Resolves a timeline key reference ("layer|property|time" or "owner|fx:effect:parameter|time"). */
+function keyRefTrack(ref: string) {
+  if (!project || !ref) return undefined;
+  const [layerId, property, timeText] = ref.split("|");
+  const time = Number(timeText);
+  if (property.startsWith("fx:")) {
+    const [, effectId, parameter] = property.split(":");
+    const effect = layerId === "__post__"
+      ? project.postEffects.find((item) => item.id === effectId)
+      : project.layers.find((item) => item.id === layerId)?.effects.find((item) => item.id === effectId);
+    return { target: { effectId, property: parameter } as KeyTarget, keys: effect?.keyframes?.[parameter] ?? [], time };
+  }
+  return { target: { layerId, property } as KeyTarget, keys: project.layers.find((item) => item.id === layerId)?.keyframes[property] ?? [], time };
+}
+
+function withEasing(easing: Easing) {
+  return (key: Keyframe): Keyframe => ({ ...key, easing, ...(easing === "bezier" ? { curve: key.curve ?? .75 } : {}) });
 }
 
 
 
-function syncLinkedAudioOrder() {
-  if (!project) return;
-  const layerOrder = new Map(project.layers.map((layer, index) => [layer.id, index]));
-  const slots = project.audioTracks.map((track, index) => track.linked && track.linkedLayerId ? index : -1).filter((index) => index >= 0);
-  const linked = project.audioTracks.filter((track) => track.linked && track.linkedLayerId)
+function syncLinkedAudioOrder(target: ProjectDocument | null = project) {
+  if (!target) return;
+  const layerOrder = new Map(target.layers.map((layer, index) => [layer.id, index]));
+  const slots = target.audioTracks.map((track, index) => track.linked && track.linkedLayerId ? index : -1).filter((index) => index >= 0);
+  const linked = target.audioTracks.filter((track) => track.linked && track.linkedLayerId)
     .sort((a, b) => (layerOrder.get(a.linkedLayerId!) ?? Number.MAX_SAFE_INTEGER) - (layerOrder.get(b.linkedLayerId!) ?? Number.MAX_SAFE_INTEGER));
-  slots.forEach((slot, index) => project!.audioTracks[slot] = linked[index]);
+  slots.forEach((slot, index) => target.audioTracks[slot] = linked[index]);
 }
 
-// O renderer não anima tempo, fades nem trechos de origem; esses campos não mostram ◆.
-const TIMING_PROPERTIES = new Set(["startTime", "endTime", "fadeInStart", "fadeInEnd", "fadeOutStart", "fadeOutEnd", "sourceIn", "sourceOut"]);
+/** audio.reorderLane commands that make linked audio follow its layers' order, as syncLinkedAudioOrder does on a copy of the result. */
+function linkedAudioOrderCommands(commands: VctCommand[]): VctCommand[] {
+  if (!project) return [];
+  let draft: ProjectDocument;
+  try {
+    draft = runProjectCommands(project, commands, keyframeTolerance()).project;
+  } catch {
+    return [];
+  }
+  const laneOrder = (doc: ProjectDocument) => [...new Set(doc.audioTracks.map(laneIdOf))];
+  const current = laneOrder(draft);
+  syncLinkedAudioOrder(draft);
+  const extra: VctCommand[] = [];
+  laneOrder(draft).forEach((laneId, index) => {
+    if (current[index] === laneId) return;
+    extra.push({ type: "audio.reorderLane", laneId, index });
+    current.splice(current.indexOf(laneId), 1);
+    current.splice(index, 0, laneId);
+  });
+  return extra;
+}
+
+/** Index a track takes when dropped before/after another one (for track.reorder). */
+function trackDropIndex(trackId: string, targetTrackId: string, after: boolean) {
+  if (!project || trackId === targetTrackId) return null;
+  const others = visualTracks(project).map((track) => track.id).filter((id) => id !== trackId);
+  const target = others.indexOf(targetTrackId);
+  if (target < 0 || !visualTracks(project).some((track) => track.id === trackId)) return null;
+  return target + (after ? 1 : 0);
+}
+
+function reorderLayerTracks(trackId: string, index: number) {
+  const reorder: VctCommand[] = [{ type: "track.reorder", trackId, index }];
+  return applyCommands([...reorder, ...linkedAudioOrderCommands(reorder)], editLabel("Ordem das camadas", "Layer order"));
+}
+
+// O renderer não anima tempo, fades, trechos de origem nem a sombra do texto; esses campos não mostram ◆.
+const TIMING_PROPERTIES = new Set(["startTime", "endTime", "fadeInStart", "fadeInEnd", "fadeOutStart", "fadeOutEnd", "sourceIn", "sourceOut", "shadowOpacity", "shadowBlur", "shadowX", "shadowY"]);
 
 function numberField(label: string, property: keyof Layer, value: number, min: number, max: number, step: number) {
   const keys = selectedLayer()?.keyframes[String(property)] || [];
   const active = keyframeAt(keys);
   const layer = selectedLayer();
-  const evaluatedValue = layer && renderer ? renderer.layerValue(layer, property, currentTime) : value;
+  const evaluated = layer && renderer ? renderer.layerValue(layer, property, currentTime) : value;
+  const evaluatedValue = Number.isFinite(evaluated) ? evaluated : value;
   const displayedValue = property === "sourceOut" && layer && !layer.sourceOut ? value : evaluatedValue;
   const fill = clamp((displayedValue - min) / Math.max(step, max - min) * 100, 0, 100);
   const neutral = ({ scaleX: 1, scaleY: 1, opacity: 1, fillOpacity: 1, strokeOpacity: 1 } as Record<string, number>)[String(property)] ?? 0;
@@ -888,6 +1256,11 @@ function renderInspector() {
   if (audioTrack) return renderAudioInspector(audioTrack);
   const layer = selectedLayer();
   const effect = selectedEffect();
+  if (inspectedAsset) {
+    const entry = listAssets(project).find((item) => item.id === inspectedAsset);
+    if (entry) return renderAssetInspector(entry);
+    inspectedAsset = "";
+  }
   if (!layer) {
     if (project.postEffects.length) return `<div class="effect-chain global-chain"><h3>${t("post")}</h3>${renderEffectChain(project.postEffects)}</div>`;
     return `<p class="inspector-empty">${t("noSelection")}</p>`;
@@ -972,11 +1345,15 @@ function renderAudioInspector(track: AudioTrack) {
           ${audioNumberField(language === "pt-BR" ? "FADE IN ATÉ" : "FADE IN UNTIL", "fadeInEnd", track.fadeInEnd, 0, project.settings.duration, .01)}
           ${audioNumberField(language === "pt-BR" ? "FADE OUT DESDE" : "FADE OUT FROM", "fadeOutStart", track.fadeOutStart, 0, project.settings.duration, .01)}
         </div>
+        <div class="property-grid audio-fade-lengths">
+          <label class="field"><span>${language === "pt-BR" ? "FADE IN (s)" : "FADE IN (s)"}</span><input type="number" data-audio-fade="in" min="0" max="${Number((track.endTime - track.startTime).toFixed(3))}" step=".05" value="${Number((track.fadeInEnd - track.fadeInStart).toFixed(3))}"></label>
+          <label class="field"><span>${language === "pt-BR" ? "FADE OUT (s)" : "FADE OUT (s)"}</span><input type="number" data-audio-fade="out" min="0" max="${Number((track.endTime - track.startTime).toFixed(3))}" step=".05" value="${Number((track.fadeOutEnd - track.fadeOutStart).toFixed(3))}"></label>
+        </div>
         <div class="video-mode-row audio-mode-row">
           <label class="check-row"><input type="checkbox" data-audio-check="muted" ${track.muted ? "checked" : ""}><span>MUTE</span></label>
           <label class="check-row"><input type="checkbox" data-audio-check="reverse" ${track.reverse ? "checked" : ""}><span>REVERSE</span></label>
           <label class="check-row"><input type="checkbox" data-audio-check="loop" ${track.loop ? "checked" : ""}><span>LOOP</span></label>
-          ${track.linkedLayerId ? `<label class="check-row"><input type="checkbox" data-audio-check="linked" ${track.linked ? "checked" : ""}><span>${language === "pt-BR" ? "VINCULAR AO VÍDEO" : "LINK TO VIDEO"}</span></label>` : ""}
+          ${track.linkedLayerId ? `<button type="button" class="audio-link-button" data-audio-link-toggle aria-pressed="${track.linked}">${track.linked ? (language === "pt-BR" ? "Desvincular do vídeo" : "Unlink from video") : (language === "pt-BR" ? "Vincular ao vídeo" : "Link to video")}</button>` : ""}
         </div>
         <p class="asset-path ${hasWebAsset(track.asset) ? "" : "is-missing"}">${hasWebAsset(track.asset) ? "" : "MISSING MEDIA · "}${escapeHtml(track.asset)}</p>
       </section>
@@ -1019,9 +1396,101 @@ function renderContentProperties(layer: Layer) {
       <p class="text-overflow-warning" data-text-overflow role="status" hidden>${language === "pt-BR" ? "O texto não cabe na caixa. Aumente a altura ou reduza a fonte." : "The text does not fit the box. Increase the height or reduce the font size."}</p>
       <label class="select-field"><span>FONT</span><select data-layer-text="fontFamily">${["IBM Plex Sans", "IBM Plex Mono", "Inter", "Space Grotesk", "Syne"].map((value) => `<option value="${value}" ${layer.fontFamily === value ? "selected" : ""}>${value}</option>`).join("")}</select></label>
       <div class="property-grid">${numberField("FONT SIZE", "fontSize", layer.fontSize || 80, 4, 2000, 1)}${numberField("WEIGHT", "fontWeight", layer.fontWeight || 500, 100, 900, 100)}</div>
+      ${renderAlignButtons(layer)}
       ${renderColorControls(layer)}
-    </section>`;
+    </section>
+    ${renderTextShadow(layer)}
+    ${renderTextStyles()}
+    ${renderTextAnimation()}`;
   return `<section class="property-group"><h3>ASSET</h3><p class="asset-path ${layer.asset && !hasWebAsset(layer.asset) ? "is-missing" : ""}">${layer.asset && !hasWebAsset(layer.asset) ? "MISSING MEDIA · " : ""}${escapeHtml(layer.asset || "")}</p></section>`;
+}
+
+const TEXT_STYLES_KEY = "nt-vct-text-styles";
+const TEXT_STYLE_FIELDS = ["fontFamily", "fontSize", "fontWeight", "align", "fill", "fillOpacity", "fillEnabled", "stroke", "strokeOpacity", "strokeWidth", "strokeEnabled", "shadowColor", "shadowOpacity", "shadowBlur", "shadowX", "shadowY"] as const;
+interface TextStyle { name: string; props: Record<string, unknown> }
+
+function loadTextStyles(): TextStyle[] {
+  try {
+    const stored = JSON.parse(localStorage.getItem(TEXT_STYLES_KEY) || "[]");
+    return Array.isArray(stored) ? stored.filter((item): item is TextStyle => typeof item?.name === "string" && typeof item.props === "object" && item.props !== null) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveTextStyles(styles: TextStyle[]) {
+  try {
+    localStorage.setItem(TEXT_STYLES_KEY, JSON.stringify(styles));
+  } catch {
+    setStatus(language === "pt-BR" ? "ESTILOS: ARMAZENAMENTO INDISPONÍVEL" : "STYLES: STORAGE UNAVAILABLE");
+  }
+}
+
+function textStyleOf(layer: Layer): TextStyle["props"] {
+  const props: Record<string, unknown> = {};
+  for (const field of TEXT_STYLE_FIELDS) if (layer[field] !== undefined) props[field] = layer[field];
+  return props;
+}
+
+function renderAlignButtons(layer: Layer) {
+  const pt = language === "pt-BR";
+  const current = layer.align || "center";
+  const options: Array<[CanvasTextAlign, string, string]> = [
+    ["left", pt ? "Alinhar à esquerda" : "Align left", "M3 5h14M3 9h9M3 13h14M3 17h9"],
+    ["center", pt ? "Centralizar" : "Align center", "M3 5h14M6 9h8M3 13h14M6 17h8"],
+    ["right", pt ? "Alinhar à direita" : "Align right", "M3 5h14M8 9h9M3 13h14M8 17h9"],
+  ];
+  return `<div class="align-row" role="group" aria-label="${pt ? "Alinhamento do texto" : "Text alignment"}">${options.map(([value, label, path]) =>
+    `<button type="button" data-text-align="${value}" aria-pressed="${current === value}" aria-label="${label}" title="${label}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="${path}"/></svg></button>`).join("")}</div>`;
+}
+
+function textShadowOn(layer: Layer) {
+  return Boolean(layer.shadowColor) && (layer.shadowOpacity ?? .6) > 0;
+}
+
+function renderTextShadow(layer: Layer) {
+  const pt = language === "pt-BR";
+  const on = textShadowOn(layer);
+  return `<section class="property-group text-shadow-group"><h3>${pt ? "Sombra" : "Shadow"}</h3>
+    <label class="check-field"><input type="checkbox" data-shadow-toggle ${on ? "checked" : ""}><span>${pt ? "Sombra no texto" : "Text shadow"}</span></label>
+    <div class="shadow-fields" ${on ? "" : "hidden"}>
+      <label class="color-field"><span>${pt ? "COR" : "COLOR"}</span><input type="color" data-shadow-color value="${layer.shadowColor || "#000000"}"></label>
+      <div class="property-grid">${numberField(pt ? "OPACIDADE" : "OPACITY", "shadowOpacity", layer.shadowOpacity ?? .6, 0, 1, .01)}${numberField("BLUR", "shadowBlur", layer.shadowBlur ?? 12, 0, 200, 1)}</div>
+      <div class="property-grid">${numberField("X", "shadowX", layer.shadowX ?? 0, -500, 500, 1)}${numberField("Y", "shadowY", layer.shadowY ?? 4, -500, 500, 1)}</div>
+    </div>
+  </section>`;
+}
+
+function renderTextStyles() {
+  const pt = language === "pt-BR";
+  const styles = loadTextStyles();
+  const options = styles.length ? styles.map((style, index) => `<option value="${index}">${escapeHtml(style.name)}</option>`).join("") : `<option>${pt ? "Nenhum estilo salvo" : "No saved styles"}</option>`;
+  return `<section class="property-group text-styles-group"><h3>${pt ? "Estilo" : "Style"}</h3>
+    <div class="style-row">
+      <label class="select-field"><span>${pt ? "SALVOS" : "SAVED"}</span><select data-text-style-list ${styles.length ? "" : "disabled"}>${options}</select></label>
+      <button type="button" data-text-style-apply ${styles.length ? "" : "disabled"}>${pt ? "Aplicar" : "Apply"}</button>
+      <button type="button" class="danger" data-text-style-delete ${styles.length ? "" : "disabled"}>${pt ? "Excluir" : "Delete"}</button>
+    </div>
+    <div class="style-row">
+      <label class="text-field"><span>${pt ? "NOME" : "NAME"}</span><input type="text" data-text-style-name maxlength="40" autocomplete="off" placeholder="${pt ? "Nome do estilo" : "Style name"}"></label>
+      <button type="button" data-text-style-save>${pt ? "Salvar estilo" : "Save style"}</button>
+    </div>
+  </section>`;
+}
+
+const TEXT_ANIMATIONS: Array<[string, string, string]> = [["fade", "Fade", "Fade"], ["slide-up", "Subir", "Slide up"], ["pop", "Pop", "Pop"], ["none", "Nenhuma", "None"]];
+
+function renderTextAnimation() {
+  const pt = language === "pt-BR";
+  const options = (selected: string) => TEXT_ANIMATIONS.map(([value, ptLabel, enLabel]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${pt ? ptLabel : enLabel}</option>`).join("");
+  return `<section class="property-group text-animation-group"><h3>${pt ? "Animação" : "Animation"}</h3>
+    <div class="property-grid">
+      <label class="select-field"><span>${pt ? "ENTRADA" : "IN"}</span><select data-anim-in>${options("fade")}</select></label>
+      <label class="select-field"><span>${pt ? "SAÍDA" : "OUT"}</span><select data-anim-out>${options("fade")}</select></label>
+    </div>
+    <label class="text-field"><span>${pt ? "DURAÇÃO (s)" : "DURATION (s)"}</span><input type="number" data-anim-duration value="0.4" min="0.05" max="10" step="0.05"></label>
+    <button type="button" class="wide-button" data-anim-apply>${pt ? "Aplicar" : "Apply"}</button>
+  </section>`;
 }
 
 function renderColorControls(layer: Layer) {
@@ -1078,16 +1547,20 @@ function renderEffectInspector(layer: Layer, effect: EffectNode) {
 function renderTimeline() {
   if (!project) return "";
   const duration = project.settings.duration;
-  const tickCount = Math.max(10, Math.round(10 * timelineZoomX));
-  const ticks = Array.from({ length: tickCount + 1 }, (_, index) => index / tickCount * duration);
+  const viewportWidth = app.querySelector<HTMLElement>(".timeline-scroll")?.clientWidth || 800;
+  const ticks = rulerTicks(duration, project.settings.fps, viewportWidth * timelineZoomX);
   const rows = timelineRows();
+  const area = project.settings.workArea;
+  const areaBand = area ? `<i class="work-area-band" style="left:${area.in / duration * 100}%;width:${(area.out - area.in) / duration * 100}%"></i>` : "";
   return `
     <header class="timeline-header">
       <div class="transport">
-        <button id="to-start">|◀</button><button class="play-button" id="play">${playing ? "❚❚" : "▶"}</button><button id="to-end">▶|</button>
-        <button class="loop-button ${timelineLoop ? "is-active" : ""}" id="timeline-loop" title="Loop" aria-pressed="${timelineLoop}">↻</button>
+        <button id="to-start" aria-label="${language === "pt-BR" ? "Ir ao início" : "Go to start"}">|◀</button><button class="play-button" id="play" aria-label="${language === "pt-BR" ? "Tocar / pausar" : "Play / pause"}">${playing ? "❚❚" : "▶"}</button><button id="to-end" aria-label="${language === "pt-BR" ? "Ir ao fim" : "Go to end"}">▶|</button>
+        <button class="loop-button ${timelineLoop ? "is-active" : ""}" id="timeline-loop" title="Loop" aria-label="Loop" aria-pressed="${timelineLoop}">↻</button>
         <button class="record-button ${recordMode ? "is-active" : ""}" id="record-mode" title="Record automation" aria-pressed="${recordMode}"><i></i> REC</button>
         <span class="time-display">${formatTime(currentTime)} <small>/ ${formatTime(duration)}</small></span>
+        <span class="level-meter" id="level-meter" title="${language === "pt-BR" ? "Nível do áudio" : "Audio level"}" role="img" aria-label="${language === "pt-BR" ? "Nível do áudio" : "Audio level"}"><i style="width:0%"></i></span>
+        <button class="add-track-button" id="add-track" title="${language === "pt-BR" ? "Criar faixa de vídeo vazia no topo" : "Create an empty video track on top"}">+ ${language === "pt-BR" ? "faixa" : "track"}</button>
       </div>
       <div class="curve-tools" id="curve-tools">${renderCurveTools()}</div>
       <div class="timeline-zoom-controls">
@@ -1105,17 +1578,47 @@ function renderTimeline() {
       <span id="frame-value">${t("frame").toUpperCase()} ${Math.round(currentTime * project.settings.fps)}</span>
     </header>
     <div class="timeline-body" style="--track-height:${Math.round(25 * timelineZoomY)}px">
+      <div class="timeline-corner area-tools">
+        <button id="area-in" aria-label="${language === "pt-BR" ? "Início da região de trabalho" : "Work area in"}" title="${language === "pt-BR" ? "Início da região de trabalho no playhead (I)" : "Set work area in at playhead (I)"}">[</button>
+        <button id="area-out" aria-label="${language === "pt-BR" ? "Fim da região de trabalho" : "Work area out"}" title="${language === "pt-BR" ? "Fim da região de trabalho no playhead (O)" : "Set work area out at playhead (O)"}">]</button>
+        <button id="area-clear" ${area ? "" : "disabled"} title="${language === "pt-BR" ? "Limpar região de trabalho (Alt+X)" : "Clear work area (Alt+X)"}" aria-label="${language === "pt-BR" ? "Limpar região de trabalho" : "Clear work area"}">[×]</button>
+        <button id="close-gaps" title="${language === "pt-BR" ? "Fechar espaços vazios da faixa selecionada" : "Close gaps on the selected track"}" aria-label="${language === "pt-BR" ? "Fechar espaços" : "Close gaps"}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4v12M17 4v12M6.5 10h2.5M13.5 10H11M8 8l-1.5 2L8 12M12 8l1.5 2-1.5 2"/></svg></button>
+      </div>
       <div class="timeline-labels">${rows.map(renderTimelineLabel).join("")}</div>
       <div class="timeline-scroll">
         <div class="timeline-content" style="width:${timelineZoomX * 100}%">
-          <div class="time-ruler">${ticks.map((time) => `<span style="left:${time / duration * 100}%">${time.toFixed(duration < 10 ? 1 : 0)}s</span>`).join("")}</div>
+          <div class="time-ruler">${areaBand}${ticks.map((tick) => `<span style="left:${tick.time / duration * 100}%">${tick.label}</span>`).join("")}</div>
           <div class="timeline-tracks" id="timeline-tracks">
             ${rows.map((row) => renderTimelineTrack(row, duration)).join("")}
+            ${areaBand}${renderGridLines(viewportWidth * timelineZoomX)}
             <div class="timeline-cursor" id="timeline-cursor" style="left:${currentTime / duration * 100}%"><span></span></div>
           </div>
         </div>
       </div>
+      ${renderMinimap()}
     </div>`;
+}
+
+/** Beat lines of the musical grid; omitted when beats would be closer than 6 px. */
+function renderGridLines(contentPixels: number) {
+  const grid = project?.settings.grid;
+  if (!project || !grid) return "";
+  const beat = 60 / grid.bpm;
+  if (beat / project.settings.duration * contentPixels < 6) return "";
+  const duration = project.settings.duration;
+  return gridTimes(project.settings).map((time) => {
+    const index = Math.round((time - grid.offset) / beat);
+    const bar = ((index % grid.beatsPerBar) + grid.beatsPerBar) % grid.beatsPerBar === 0;
+    return `<i class="grid-line ${bar ? "is-bar" : ""}" style="left:${time / duration * 100}%"></i>`;
+  }).join("");
+}
+
+function renderMinimap() {
+  if (!project) return "";
+  const duration = project.settings.duration;
+  const marks = [...project.layers, ...project.audioTracks].slice(0, 400)
+    .map((item) => `<i style="left:${item.startTime / duration * 100}%;width:${Math.max(.3, (item.endTime - item.startTime) / duration * 100)}%"></i>`).join("");
+  return `<div class="timeline-minimap" id="timeline-minimap" aria-hidden="true">${marks}<b style="left:0;width:${100 / timelineZoomX}%"></b></div>`;
 }
 
 type TimelineRow =
@@ -1125,7 +1628,8 @@ type TimelineRow =
   | { type: "post"; effects: EffectNode[] }
   | { type: "postEffect"; effect: EffectNode }
   | { type: "audioHeader" }
-  | { type: "audio"; track: AudioTrack; clips: AudioTrack[]; laneId: string };
+  | { type: "audio"; track: AudioTrack; clips: AudioTrack[]; laneId: string }
+  | { type: "empty"; kind: "video" | "audio"; trackId: string };
 
 function timelineRows(): TimelineRow[] {
   if (!project) return [];
@@ -1134,6 +1638,10 @@ function timelineRows(): TimelineRow[] {
   // Uma linha por faixa; a faixa mostra todos os seus clipes. O clipe selecionado
   // (ou o primeiro) dá nome à linha.
   for (const track of visualTracks(project)) {
+    if (!track.clips.length) {
+      rows.push({ type: "empty", kind: "video", trackId: track.id });
+      continue;
+    }
     const layer = track.clips.find((clip) => clip.id === selectedLayerId) || track.clips[0];
     rows.push({ type: "layer", layer, clips: track.clips, trackId: track.id });
     for (const clip of track.clips) {
@@ -1147,6 +1655,10 @@ function timelineRows(): TimelineRow[] {
   }
   rows.push({ type: "audioHeader" });
   for (const lane of audioLanes(project)) {
+    if (!lane.clips.length) {
+      rows.push({ type: "empty", kind: "audio", trackId: lane.id });
+      continue;
+    }
     const track = lane.clips.find((clip) => clip.id === selectedAudioTrackId) || lane.clips[0];
     rows.push({ type: "audio", track, clips: lane.clips, laneId: lane.id });
   }
@@ -1285,7 +1797,7 @@ function waveformSvg(track: AudioTrack) {
 
 function timelineRowHeight(row: TimelineRow) {
   if (row.type === "videoHeader" || row.type === "audioHeader") return 25;
-  return Math.round(25 * timelineZoomY * (row.type === "audio" ? audioTrackZoomY : videoTrackZoomY));
+  return Math.round(25 * timelineZoomY * (row.type === "audio" || (row.type === "empty" && row.kind === "audio") ? audioTrackZoomY : videoTrackZoomY));
 }
 
 function layerClipMedia(layer: Layer) {
@@ -1313,12 +1825,20 @@ function fadeOverlayStyle(item: Pick<Layer, "startTime" | "endTime" | "fadeInSta
   return `right:${(item.endTime - item.fadeOutEnd) / duration * 100}%;width:${Math.max(0, item.fadeOutEnd - item.fadeOutStart) / duration * 100}%`;
 }
 
+function renderTrackName(trackId: string) {
+  if (!project) return "";
+  const hint = language === "pt-BR" ? "Clique duas vezes para renomear" : "Double-click to rename";
+  return `<span class="track-name" data-track-name="${trackId}" title="${hint}">${escapeHtml(trackName(project, trackId))}</span>`;
+}
+
 function renderTimelineLabel(row: TimelineRow) {
   const style = `style="--row-height:${timelineRowHeight(row)}px"`;
-  if (row.type === "videoHeader") return `<div class="timeline-label-row media-group-label video-group-label" ${style}><strong>VIDEO</strong><span>${project?.layers.length || 0}</span><span class="group-height-controls"><button data-group-height="video:-1">−</button><button data-group-height="video:1">+</button></span></div>`;
-  if (row.type === "audioHeader") return `<div class="timeline-label-row media-group-label audio-group-label" ${style}><strong>AUDIO</strong><span>${project?.audioTracks.length || 0}</span><span class="group-height-controls"><button data-group-height="audio:-1">−</button><button data-group-height="audio:1">+</button></span></div>`;
+  if (row.type === "videoHeader") return `<div class="timeline-label-row media-group-label video-group-label" ${style}><strong>VIDEO</strong><span>${project?.layers.length || 0}</span><span class="group-height-controls"><button data-group-height="video:-1" aria-label="${language === "pt-BR" ? "Reduzir altura das faixas" : "Shrink track height"}">−</button><button data-group-height="video:1" aria-label="${language === "pt-BR" ? "Aumentar altura das faixas" : "Grow track height"}">+</button></span></div>`;
+  if (row.type === "audioHeader") return `<div class="timeline-label-row media-group-label audio-group-label" ${style}><strong>AUDIO</strong><span>${project?.audioTracks.length || 0}</span><span class="group-height-controls"><button data-group-height="audio:-1" aria-label="${language === "pt-BR" ? "Reduzir altura das faixas" : "Shrink track height"}">−</button><button data-group-height="audio:1" aria-label="${language === "pt-BR" ? "Aumentar altura das faixas" : "Grow track height"}">+</button></span></div>`;
+  if (row.type === "empty") return `<div class="timeline-label-row empty-label is-${row.kind}" ${style} data-track-id="${row.trackId}">${renderTrackName(row.trackId)}<small>${language === "pt-BR" ? "vazia" : "empty"}</small></div>`;
   if (row.type === "audio") return `<div class="timeline-label-row audio-label ${row.clips.some((clip) => clip.id === selectedAudioTrackId) ? "is-selected" : ""}" ${style} draggable="true" data-timeline-order-audio="${row.track.id}" data-select-audio-row="${row.track.id}" data-lane-members="${row.clips.map((clip) => clip.id).join(" ")}">
     <span class="timeline-order"><button data-move-audio-order="${row.track.id}" data-direction="-1">▲</button><button data-move-audio-order="${row.track.id}" data-direction="1">▼</button></span>
+    ${renderTrackName(row.laneId)}
     <button class="audio-kind" data-select-audio="${row.track.id}" title="Audio">AUD</button>
     <button class="timeline-label-name" data-select-audio="${row.track.id}">${escapeHtml(row.track.name)}</button>${row.clips.length > 1 ? `<span class="timeline-clip-count">${row.clips.length}</span>` : ""}
     ${row.track.linkedLayerId ? `<button class="audio-link ${row.track.linked ? "is-linked" : ""}" data-toggle-audio-link="${row.track.id}" title="${row.track.linked ? "Unlock audio" : "Link audio to video"}">${row.track.linked ? "▣" : "□"}</button>` : ""}
@@ -1328,6 +1848,7 @@ function renderTimelineLabel(row: TimelineRow) {
     const open = expandedTimelineLayers.has(row.layer.id);
     return `<div class="timeline-label-row layer-label ${row.clips.some((clip) => clip.id === selectedLayerId) ? "is-selected" : ""}" ${style} data-label-layer="${row.layer.id}" data-select-layer-row="${row.layer.id}" draggable="true" data-timeline-order-layer="${row.layer.id}" data-track-id="${row.trackId}" data-track-members="${row.clips.map((clip) => clip.id).join(" ")}">
       <span class="timeline-order"><button data-move-layer="${row.layer.id}" data-direction="-1">▲</button><button data-move-layer="${row.layer.id}" data-direction="1">▼</button></span>
+      ${renderTrackName(row.trackId)}
       <button class="timeline-disclosure" data-toggle-timeline-layer="${row.layer.id}" ${row.layer.effects.length ? "" : "disabled"} title="Show effects">${row.layer.effects.length ? (open ? "▾" : "▸") : "·"}</button>
       ${timelineThumbnail(row.layer)}
       <button class="timeline-label-name" data-select-layer="${row.layer.id}">${escapeHtml(row.layer.name)}</button>${row.clips.length > 1 ? `<span class="timeline-clip-count" title="${row.clips.length} ${language === "pt-BR" ? "clipes nesta faixa" : "clips on this track"}">${row.clips.length}</span>` : ""}
@@ -1379,6 +1900,9 @@ function renderTimelineTrack(row: TimelineRow, duration: number) {
   const style = `style="--row-height:${timelineRowHeight(row)}px"`;
   if (row.type === "videoHeader") return `<div class="timeline-track media-group-track video-group-track" ${style}></div>`;
   if (row.type === "audioHeader") return `<div class="timeline-track media-group-track audio-group-track" ${style}></div>`;
+  if (row.type === "empty") return row.kind === "audio"
+    ? `<div class="timeline-track audio-track-row empty-track" ${style} data-lane-id="${row.trackId}"></div>`
+    : `<div class="timeline-track empty-track" ${style} data-track-id="${row.trackId}"></div>`;
   if (row.type === "audio") return `<div class="timeline-track audio-track-row ${row.clips.some((clip) => clip.id === selectedAudioTrackId) ? "is-selected" : ""}" ${style} data-audio-track="${row.track.id}" data-lane-id="${row.laneId}" data-lane-members="${row.clips.map((clip) => clip.id).join(" ")}">
     ${row.clips.map((clip) => renderAudioClipSpan(clip, duration)).join("")}
   </div>`;
@@ -1431,13 +1955,8 @@ function uiIcon(name: "library" | "inspector" | "new" | "open" | "save" | "colle
 
 function bindEditor() {
   bindBrandLink();
-  app.querySelectorAll<HTMLDetailsElement>("[data-library-accordion]").forEach((details) => details.addEventListener("toggle", () => {
-    if (!details.open) return;
-    libraryAccordion = details.dataset.libraryAccordion as "effects" | "post";
-    app.querySelectorAll<HTMLDetailsElement>("[data-library-accordion]").forEach((other) => {
-      if (other !== details) other.open = false;
-    });
-  }));
+  app.querySelector("#open-warnings")?.addEventListener("click", openWarnings);
+  bindLeftPanel();
   app.querySelector("#language")?.addEventListener("click", () => {
     language = language === "pt-BR" ? "en" : "pt-BR";
     localStorage.setItem("nt-vct-language", language);
@@ -1492,14 +2011,6 @@ function bindEditor() {
   app.querySelector("#export-project")?.addEventListener("click", showExportModal);
   app.querySelector("#undo")?.addEventListener("click", undo);
   app.querySelector("#redo")?.addEventListener("click", redo);
-  app.querySelectorAll<HTMLElement>("[data-add-input]").forEach((button) => button.addEventListener("click", () => void addInput(button.dataset.addInput as InputKind)));
-  app.querySelector<HTMLElement>("[data-add-audio]")?.addEventListener("click", () => void addAudioInput());
-  app.querySelector<HTMLElement>("[data-import-many]")?.addEventListener("click", async () => {
-    const files = await chooseFiles("video/*,image/*,audio/*,.mp4,.webm,.mov,.m4v,.png,.jpg,.jpeg,.webp,.bmp,.gif,.mp3,.wav,.m4a,.aac,.ogg,.oga,.flac");
-    if (files.length) void importMediaFiles(files);
-  });
-  app.querySelectorAll<HTMLElement>("[data-add-effect]").forEach((button) => button.addEventListener("click", () => addEffect(button.dataset.addEffect as EffectKind, false)));
-  app.querySelectorAll<HTMLElement>("[data-add-post]").forEach((button) => button.addEventListener("click", () => addEffect(button.dataset.addPost as EffectKind, true)));
   bindDynamicControls();
   bindTimeline();
   bindDragAndDrop();
@@ -1527,7 +2038,90 @@ function bindEditor() {
   window.setTimeout(fitCanvas, 0);
 }
 
+function bindTextControls(root: ParentNode) {
+  root.querySelectorAll<HTMLElement>("[data-text-align]").forEach((button) => button.addEventListener("click", () => {
+    const layer = selectedLayer();
+    if (!layer || layer.locked) return;
+    applyCommands([{ type: "layer.set", layerId: layer.id, props: { align: button.dataset.textAlign } }], editLabel("Alinhamento do texto", "Text alignment"));
+  }));
+  root.querySelector<HTMLInputElement>("[data-shadow-toggle]")?.addEventListener("change", (event) => {
+    const layer = selectedLayer();
+    const input = event.target as HTMLInputElement;
+    if (!layer || layer.locked) return;
+    const props = input.checked
+      ? { shadowColor: layer.shadowColor || "#000000", shadowOpacity: (layer.shadowOpacity ?? 0) > 0 ? layer.shadowOpacity : .6, shadowBlur: layer.shadowBlur ?? 12, shadowX: layer.shadowX ?? 0, shadowY: layer.shadowY ?? 4 }
+      : { shadowOpacity: 0 };
+    if (!applyCommands([{ type: "layer.set", layerId: layer.id, props }], editLabel("Sombra do texto", "Text shadow"))) input.checked = !input.checked;
+  });
+  const shadowColor = root.querySelector<HTMLInputElement>("[data-shadow-color]");
+  shadowColor?.addEventListener("blur", endEditSession);
+  shadowColor?.addEventListener("change", endEditSession);
+  shadowColor?.addEventListener("input", () => {
+    const layer = selectedLayer();
+    if (!layer || layer.locked) return;
+    const session = openEditSession(`layer:${layer.id}:shadowColor`, editLabel("Cor da sombra", "Shadow color"));
+    if (previewEdit(session, [["set", { type: "layer.set", layerId: layer.id, props: { shadowColor: shadowColor.value } }]])) void renderFrame();
+  });
+  root.querySelector("[data-text-style-save]")?.addEventListener("click", () => {
+    const layer = selectedLayer();
+    const input = app.querySelector<HTMLInputElement>("[data-text-style-name]");
+    const name = input?.value.trim();
+    if (!layer || layer.kind !== "text") return;
+    if (!name) {
+      setStatus(editLabel("ESTILO · DÊ UM NOME", "STYLE · ENTER A NAME"));
+      input?.focus();
+      return;
+    }
+    const styles = loadTextStyles().filter((style) => style.name !== name);
+    styles.push({ name, props: textStyleOf(layer) });
+    saveTextStyles(styles);
+    setStatus(`${editLabel("ESTILO SALVO", "STYLE SAVED")} · ${name}`);
+    updateInspector();
+  });
+  root.querySelector("[data-text-style-apply]")?.addEventListener("click", () => {
+    const layer = selectedLayer();
+    const select = app.querySelector<HTMLSelectElement>("[data-text-style-list]");
+    const style = loadTextStyles()[Number(select?.value)];
+    if (!layer || layer.locked || !style) return;
+    const props: Record<string, unknown> = { ...style.props };
+    // Um estilo sem sombra tira a sombra atual do texto.
+    if (!props.shadowColor) props.shadowOpacity = 0;
+    const height = fittedTextHeight({ ...layer, ...props } as Layer);
+    if (height !== undefined) props.height = height;
+    applyCommands([{ type: "layer.set", layerId: layer.id, props }], `${editLabel("Aplicar estilo", "Apply style")}: ${style.name}`);
+  });
+  root.querySelector("[data-text-style-delete]")?.addEventListener("click", () => {
+    const select = app.querySelector<HTMLSelectElement>("[data-text-style-list]");
+    const styles = loadTextStyles();
+    const [removed] = styles.splice(Number(select?.value), 1);
+    if (!removed) return;
+    saveTextStyles(styles);
+    setStatus(`${editLabel("ESTILO EXCLUÍDO", "STYLE DELETED")} · ${removed.name}`);
+    updateInspector();
+  });
+  root.querySelector("[data-anim-apply]")?.addEventListener("click", () => {
+    const layer = selectedLayer();
+    if (!layer || layer.locked) return;
+    const read = (selector: string) => app.querySelector<HTMLSelectElement | HTMLInputElement>(selector)?.value || "";
+    const duration = Number(read("[data-anim-duration]"));
+    if (!(duration > 0)) {
+      setStatus(editLabel("ANIMAÇÃO · DURAÇÃO INVÁLIDA", "ANIMATION · INVALID DURATION"));
+      return;
+    }
+    applyCommands([{ type: "text.animate", layerId: layer.id, in: read("[data-anim-in]"), out: read("[data-anim-out]"), duration } as VctCommand],
+      editLabel("Animar texto", "Animate text"));
+  });
+}
+
 function bindDynamicControls(root: ParentNode = app) {
+  root.querySelectorAll<HTMLSelectElement>("[data-asset-fit]").forEach((select) => select.addEventListener("change", () => {
+    try {
+      localStorage.setItem("nt-vct-default-fit", select.value);
+    } catch {
+      // Storage unavailable: the choice only lasts until the next placement.
+    }
+    setStatus(`${language === "pt-BR" ? "ENQUADRAMENTO AO COLOCAR" : "FIT WHEN PLACED"} · ${select.value.toUpperCase()}`);
+  }));
   root.querySelectorAll<HTMLElement>("[data-select-layer]").forEach((button) => button.addEventListener("click", (event) => {
     event.stopPropagation();
     selectLayerById(button.dataset.selectLayer!);
@@ -1548,36 +2142,23 @@ function bindDynamicControls(root: ParentNode = app) {
     event.stopPropagation();
     const track = project?.audioTracks.find((item) => item.id === button.dataset.toggleAudioLink);
     if (!track) return;
-    snapshot();
-    track.linked = !track.linked;
-    if (track.linked && track.linkedLayerId) {
-      const owner = project!.layers.find((layer) => layer.id === track.linkedLayerId);
-      if (owner?.kind === "video") syncLinkedAudio(owner);
-    }
-    project!.modifiedAt = new Date().toISOString();
-    updateTimeline();
-    updateInspector();
+    applyCommands([{ type: track.linked ? "audio.unlink" : "audio.link", trackId: track.id }],
+      track.linked ? editLabel("Desvincular áudio", "Unlink audio") : editLabel("Vincular áudio", "Link audio"));
   }));
   root.querySelectorAll<HTMLElement>("[data-toggle-audio-mute]").forEach((button) => button.addEventListener("click", (event) => {
     event.stopPropagation();
     const track = project?.audioTracks.find((item) => item.id === button.dataset.toggleAudioMute);
     if (!track) return;
-    snapshot();
-    track.muted = !track.muted;
+    if (!applyCommands([{ type: "audio.set", trackId: track.id, props: { muted: !track.muted } }], propertyLabel("muted"))) return;
     if (playing) void audioEngine.play(project!, currentTime);
-    updateTimeline();
   }));
   root.querySelectorAll<HTMLElement>("[data-layer-visible]").forEach((button) => button.addEventListener("click", () => {
-    snapshot();
-    const layer = project!.layers.find((item) => item.id === button.dataset.layerVisible)!;
-    layer.visible = !layer.visible;
-    renderEditorPreservingCanvas();
+    const layer = project?.layers.find((item) => item.id === button.dataset.layerVisible);
+    if (layer) applyCommands([{ type: "layer.set", layerId: layer.id, props: { visible: !layer.visible } }], editLabel("Visibilidade", "Visibility"));
   }));
   root.querySelectorAll<HTMLElement>("[data-layer-lock]").forEach((button) => button.addEventListener("click", () => {
-    snapshot();
-    const layer = project!.layers.find((item) => item.id === button.dataset.layerLock)!;
-    layer.locked = !layer.locked;
-    renderEditorPreservingCanvas();
+    const layer = project?.layers.find((item) => item.id === button.dataset.layerLock);
+    if (layer) applyCommands([{ type: "layer.set", layerId: layer.id, props: { locked: !layer.locked } }], editLabel("Bloqueio", "Lock"));
   }));
   root.querySelectorAll<HTMLElement>("[data-delete-layer]").forEach((button) => button.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -1613,11 +2194,9 @@ function bindDynamicControls(root: ParentNode = app) {
     syncSelectionClasses();
   }));
   root.querySelectorAll<HTMLElement>("[data-toggle-effect]").forEach((button) => button.addEventListener("click", () => {
-    snapshot();
     const effect = findEffect(button.dataset.toggleEffect!);
-    if (effect) effect.enabled = !effect.enabled;
-    updateInspector();
-    void renderFrame();
+    if (!effect) return;
+    applyCommands([{ type: "effect.set", effectId: effect.id, enabled: !effect.enabled }], `${editLabel("Efeito", "Effect")}: ${effect.kind}`);
   }));
   root.querySelectorAll<HTMLElement>("[data-remove-effect]").forEach((button) => button.addEventListener("click", () => removeEffect(button.dataset.removeEffect!)));
   root.querySelectorAll<HTMLElement>("[data-move-effect]").forEach((button) => button.addEventListener("click", (event) => {
@@ -1631,38 +2210,55 @@ function bindDynamicControls(root: ParentNode = app) {
     updateCurveTools();
   });
   root.querySelectorAll<HTMLInputElement>("[data-layer-property]").forEach((input) => {
-    input.addEventListener("focus", snapshot);
+    input.addEventListener("blur", endEditSession);
+    input.addEventListener("change", endEditSession);
     input.addEventListener("input", () => {
       const layer = selectedLayer();
       if (!layer || layer.locked || !Number.isFinite(input.valueAsNumber)) return;
       const property = input.dataset.layerProperty!;
-      const previous = Number((layer as unknown as Record<string, unknown>)[property]) || 0;
-      let createdKeyframe = setLayerNumericValue(layer, property, input.valueAsNumber);
-      const paired = property === "scaleX" && layer.scaleLocked ? "scaleY"
-        : property === "scaleY" && layer.scaleLocked ? "scaleX"
-          : property === "width" && layer.sizeLocked ? "height"
-            : property === "height" && layer.sizeLocked ? "width" : "";
+      const value = input.valueAsNumber;
+      const session = openEditSession(`layer:${layer.id}:${property}`, propertyLabel(property));
+      if (!session.memo.has("layer")) session.memo.set("layer", { ...layer });
+      const base = session.memo.get("layer") as unknown as Record<string, unknown> & Layer;
+      const draft = { ...base } as unknown as Record<string, unknown> & Layer;
+      draft[property] = value;
+      const props: Record<string, unknown> = { [property]: value };
+      const paired = property === "scaleX" && base.scaleLocked ? "scaleY"
+        : property === "scaleY" && base.scaleLocked ? "scaleX"
+          : property === "width" && base.sizeLocked ? "height"
+            : property === "height" && base.sizeLocked ? "width" : "";
       if (paired) {
-        const previousPair = Number((layer as unknown as Record<string, unknown>)[paired]) || 0;
-        const ratio = Math.abs(previous) > .000001 ? input.valueAsNumber / previous : 1;
-        createdKeyframe = setLayerNumericValue(layer, paired, previousPair * ratio) || createdKeyframe;
-        syncInspectorValues();
+        const previous = Number(base[property]) || 0;
+        const ratio = Math.abs(previous) > .000001 ? value / previous : 1;
+        props[paired] = (Number(base[paired]) || 0) * ratio;
       }
       if (["startTime", "endTime", "fadeInStart", "fadeInEnd", "fadeOutStart", "fadeOutEnd"].includes(property)) {
-        layer.endTime = Math.max(layer.startTime + 1 / project!.settings.fps, layer.endTime);
-        normalizeFades(layer);
+        draft.endTime = Math.max(draft.startTime + 1 / project!.settings.fps, draft.endTime);
+        normalizeFades(draft);
       }
-      if (layer.kind === "video" && ["playbackRate", "sourceIn", "sourceOut", "startTime", "endTime", "fadeInStart", "fadeInEnd", "fadeOutStart", "fadeOutEnd"].includes(property)) {
-        const duration = renderer?.mediaDuration(layer.id) || Math.max(layer.sourceOut, project!.settings.duration);
-        layer.sourceIn = clamp(layer.sourceIn, 0, duration);
-        if (layer.sourceOut > 0) layer.sourceOut = clamp(layer.sourceOut, layer.sourceIn + .001, duration);
-        syncLinkedAudio(layer);
-        renderer?.setPlaybackState(playing, currentTime);
+      const videoTiming = layer.kind === "video" && ["playbackRate", "sourceIn", "sourceOut", "startTime", "endTime", "fadeInStart", "fadeInEnd", "fadeOutStart", "fadeOutEnd"].includes(property);
+      if (videoTiming) {
+        const duration = renderer?.mediaDuration(layer.id) || Math.max(draft.sourceOut, project!.settings.duration);
+        draft.sourceIn = clamp(draft.sourceIn, 0, duration);
+        if (draft.sourceOut > 0) draft.sourceOut = clamp(draft.sourceOut, draft.sourceIn + .001, duration);
       }
+      for (const field of ["startTime", "endTime", "fadeInStart", "fadeInEnd", "fadeOutStart", "fadeOutEnd", "sourceIn", "sourceOut"]) {
+        if (draft[field] !== base[field]) props[field] = draft[field];
+      }
+      const main = layerValueCommands(layer, property, value, props);
+      const entries = main.entries;
+      let created = main.created;
+      if (paired) {
+        const pairedEdit = layerValueCommands(layer, paired, props[paired] as number, props);
+        entries.push(...pairedEdit.entries.slice(1));
+        created = pairedEdit.created || created;
+      }
+      if (!previewEdit(session, entries)) return;
+      if (paired) syncInspectorValues();
+      if (videoTiming) renderer?.setPlaybackState(playing, currentTime);
       updateParamScrub(input);
-      project!.modifiedAt = new Date().toISOString();
       void renderFrame();
-      if (createdKeyframe) requestTimelineRefresh();
+      if (created) requestTimelineRefresh();
     });
   });
   root.querySelectorAll<HTMLElement>("[data-param-scrub]").forEach((scrub) => {
@@ -1706,7 +2302,6 @@ function bindDynamicControls(root: ParentNode = app) {
         if (!moved && Math.abs(distance) < 3) return;
         if (!moved) {
           moved = true;
-          snapshot();
           scrub.classList.add("is-scrubbing");
           scrub.setPointerCapture(event.pointerId);
         }
@@ -1722,6 +2317,7 @@ function bindDynamicControls(root: ParentNode = app) {
         scrub.removeEventListener("pointercancel", stop);
         scrub.classList.remove("is-scrubbing");
         if (scrub.hasPointerCapture(event.pointerId)) scrub.releasePointerCapture(event.pointerId);
+        if (moved) endEditSession();
       };
       scrub.addEventListener("pointermove", move);
       scrub.addEventListener("pointerup", stop);
@@ -1729,18 +2325,29 @@ function bindDynamicControls(root: ParentNode = app) {
     });
   });
   root.querySelectorAll<HTMLInputElement>("[data-audio-property]").forEach((input) => {
-    input.addEventListener("focus", snapshot);
+    input.addEventListener("blur", endEditSession);
+    input.addEventListener("change", endEditSession);
     input.addEventListener("input", () => {
       const track = selectedAudioTrack();
       if (!track || !Number.isFinite(input.valueAsNumber)) return;
-      (track as unknown as Record<string, number>)[input.dataset.audioProperty!] = input.valueAsNumber;
-      track.endTime = Math.max(track.startTime + 1 / project!.settings.fps, track.endTime);
-      track.sourceOut = Math.max(track.sourceIn + .001, track.sourceOut);
-      normalizeFades(track);
-      const linkedLayer = track.linked ? syncLinkedLayer(track) : undefined;
+      const property = input.dataset.audioProperty!;
+      const value = input.valueAsNumber;
+      const session = openEditSession(`audio:${track.id}:${property}`, propertyLabel(property));
+      if (!session.memo.has("track")) session.memo.set("track", { ...track });
+      const base = session.memo.get("track") as unknown as Record<string, unknown> & AudioTrack;
+      const props: Record<string, unknown> = { [property]: value };
+      if (["startTime", "endTime", "sourceIn", "sourceOut", "fadeInStart", "fadeInEnd", "fadeOutStart", "fadeOutEnd"].includes(property)) {
+        const draft = { ...base, [property]: value } as unknown as Record<string, unknown> & AudioTrack;
+        draft.endTime = Math.max(draft.startTime + 1 / project!.settings.fps, draft.endTime);
+        draft.sourceOut = Math.max(draft.sourceIn + .001, draft.sourceOut);
+        normalizeFades(draft);
+        for (const field of ["startTime", "endTime", "sourceIn", "sourceOut", "fadeInStart", "fadeInEnd", "fadeOutStart", "fadeOutEnd"]) {
+          if (draft[field] !== base[field]) props[field] = draft[field];
+        }
+      }
+      if (!previewEdit(session, [["set", { type: "audio.set", trackId: track.id, props }]])) return;
       updateParamScrub(input);
-      project!.modifiedAt = new Date().toISOString();
-      if (linkedLayer) {
+      if (base.linked) {
         renderer?.setPlaybackState(playing, currentTime);
         void renderFrame();
       }
@@ -1748,38 +2355,39 @@ function bindDynamicControls(root: ParentNode = app) {
       requestTimelineRefresh();
     });
   });
-  root.querySelectorAll<HTMLInputElement>("[data-audio-effect-param]").forEach((input) => input.addEventListener("input", () => {
-    const track = selectedAudioTrack();
-    const effect = track?.effects.find((item) => item.id === input.dataset.audioEffectId);
-    if (!effect || !Number.isFinite(input.valueAsNumber)) return;
-    effect.params[input.dataset.audioEffectParam!] = input.valueAsNumber;
-    updateParamScrub(input);
-    project!.modifiedAt = new Date().toISOString();
-    if (playing) void audioEngine.play(project!, currentTime);
-  }));
+  root.querySelectorAll<HTMLInputElement>("[data-audio-effect-param]").forEach((input) => {
+    input.addEventListener("blur", endEditSession);
+    input.addEventListener("change", endEditSession);
+    input.addEventListener("input", () => {
+      const track = selectedAudioTrack();
+      const effect = track?.effects.find((item) => item.id === input.dataset.audioEffectId);
+      if (!effect || !Number.isFinite(input.valueAsNumber)) return;
+      const parameter = input.dataset.audioEffectParam!;
+      const session = openEditSession(`audioFx:${effect.id}:${parameter}`, `${editLabel("Efeito de áudio", "Audio effect")}: ${effect.kind}`);
+      if (!previewEdit(session, [["set", { type: "audioEffect.setParam", effectId: effect.id, parameter, value: input.valueAsNumber }]])) return;
+      updateParamScrub(input);
+      if (playing) void audioEngine.play(project!, currentTime);
+    });
+  });
   root.querySelectorAll<HTMLElement>("[data-add-audio-effect]").forEach((button) => button.addEventListener("click", () => {
     const track = selectedAudioTrack();
     if (!track) return;
-    snapshot();
-    track.effects.push(createAudioEffect(button.dataset.addAudioEffect as AudioEffectKind));
-    updateInspector();
+    const kind = button.dataset.addAudioEffect as AudioEffectKind;
+    if (!applyCommands([{ type: "audioEffect.add", trackId: track.id, kind, effectId: uid("afx") }], `${editLabel("Efeito de áudio", "Audio effect")}: ${kind}`)) return;
     if (playing) void audioEngine.play(project!, currentTime);
   }));
   root.querySelectorAll<HTMLElement>("[data-toggle-audio-effect]").forEach((button) => button.addEventListener("click", () => {
     const track = selectedAudioTrack();
     const effect = track?.effects.find((item) => item.id === button.dataset.toggleAudioEffect);
     if (!effect) return;
-    snapshot();
-    effect.enabled = !effect.enabled;
-    updateInspector();
+    if (!applyCommands([{ type: "audioEffect.set", effectId: effect.id, enabled: !effect.enabled }], `${editLabel("Efeito de áudio", "Audio effect")}: ${effect.kind}`)) return;
     if (playing) void audioEngine.play(project!, currentTime);
   }));
   root.querySelectorAll<HTMLElement>("[data-remove-audio-effect]").forEach((button) => button.addEventListener("click", () => {
     const track = selectedAudioTrack();
-    if (!track) return;
-    snapshot();
-    track.effects = track.effects.filter((item) => item.id !== button.dataset.removeAudioEffect);
-    updateInspector();
+    const effect = track?.effects.find((item) => item.id === button.dataset.removeAudioEffect);
+    if (!effect) return;
+    if (!applyCommands([{ type: "audioEffect.remove", effectId: effect.id }], `${editLabel("Remover efeito de áudio", "Remove audio effect")}: ${effect.kind}`)) return;
     if (playing) void audioEngine.play(project!, currentTime);
   }));
   root.querySelectorAll<HTMLElement>("[data-move-audio-effect]").forEach((button) => button.addEventListener("click", () => {
@@ -1788,106 +2396,145 @@ function bindDynamicControls(root: ParentNode = app) {
     const index = track.effects.findIndex((item) => item.id === button.dataset.moveAudioEffect);
     const target = clamp(index + Number(button.dataset.direction), 0, track.effects.length - 1);
     if (index < 0 || index === target) return;
-    snapshot();
-    const [effect] = track.effects.splice(index, 1);
-    track.effects.splice(target, 0, effect);
-    updateInspector();
+    if (!applyCommands([{ type: "audioEffect.reorder", effectId: track.effects[index].id, index: target }], editLabel("Ordem dos efeitos", "Effect order"))) return;
     if (playing) void audioEngine.play(project!, currentTime);
   }));
   root.querySelectorAll<HTMLElement>("[data-axis-lock]").forEach((button) => button.addEventListener("click", () => {
     const layer = selectedLayer();
     if (!layer) return;
-    snapshot();
     const property = button.dataset.axisLock as "scaleLocked" | "sizeLocked";
-    layer[property] = !layer[property];
-    updateInspector();
+    applyCommands([{ type: "layer.set", layerId: layer.id, props: { [property]: !layer[property] } }], propertyLabel(property));
   }));
   root.querySelectorAll<HTMLElement>("[data-copy-section]").forEach((button) => button.addEventListener("click", () => copyParameterSection(button.dataset.copySection as ClipboardSection)));
   root.querySelectorAll<HTMLElement>("[data-paste-section]").forEach((button) => button.addEventListener("click", () => pasteParameterSection(button.dataset.pasteSection as ClipboardSection)));
   root.querySelector<HTMLInputElement>("[data-audio-name]")?.addEventListener("change", (event) => {
     const track = selectedAudioTrack();
     const value = (event.target as HTMLInputElement).value.trim();
-    if (track && value) {
-      snapshot();
-      track.name = value;
-      updateTimeline();
-    }
+    if (track && value) applyCommands([{ type: "audio.set", trackId: track.id, props: { name: value } }], propertyLabel("name"));
   });
   root.querySelectorAll<HTMLInputElement>("[data-audio-check]").forEach((input) => input.addEventListener("change", () => {
     const track = selectedAudioTrack();
     if (!track) return;
-    snapshot();
-    if (input.dataset.audioCheck === "linked") {
-      track.linked = input.checked;
-      if (track.linked && track.linkedLayerId) {
-        const owner = project!.layers.find((layer) => layer.id === track.linkedLayerId);
-        if (owner?.kind === "video") syncLinkedAudio(owner);
-      }
-    } else {
-      (track as unknown as Record<string, boolean>)[input.dataset.audioCheck!] = input.checked;
+    const property = input.dataset.audioCheck!;
+    const command: VctCommand = property === "linked"
+      ? { type: input.checked ? "audio.link" : "audio.unlink", trackId: track.id }
+      : { type: "audio.set", trackId: track.id, props: { [property]: input.checked } };
+    const label = property === "linked" ? (input.checked ? editLabel("Vincular áudio", "Link audio") : editLabel("Desvincular áudio", "Unlink audio")) : propertyLabel(property);
+    if (!applyCommands([command], label)) {
+      input.checked = !input.checked;
+      return;
     }
-    project!.modifiedAt = new Date().toISOString();
     if (playing) void audioEngine.play(project!, currentTime);
-    updateTimeline();
+  }));
+  root.querySelector("[data-audio-link-toggle]")?.addEventListener("click", () => {
+    const track = selectedAudioTrack();
+    if (!track) return;
+    if (!applyCommands([{ type: track.linked ? "audio.unlink" : "audio.link", trackId: track.id }],
+      track.linked ? editLabel("Desvincular áudio", "Unlink audio") : editLabel("Vincular áudio", "Link audio"))) return;
+    if (playing) void audioEngine.play(project!, currentTime);
+  });
+  root.querySelectorAll<HTMLInputElement>("[data-audio-fade]").forEach((input) => input.addEventListener("change", () => {
+    const track = selectedAudioTrack();
+    if (!track || !Number.isFinite(input.valueAsNumber)) return;
+    const length = Math.max(0, track.endTime - track.startTime);
+    const fade = clamp(input.valueAsNumber, 0, length);
+    const draft = { ...track };
+    if (input.dataset.audioFade === "in") {
+      draft.fadeInStart = track.startTime;
+      draft.fadeInEnd = track.startTime + fade;
+    } else {
+      draft.fadeOutEnd = track.endTime;
+      draft.fadeOutStart = track.endTime - fade;
+    }
+    normalizeFades(draft);
+    const props = changedProps(track, draft, FADE_FIELDS);
+    if (!Object.keys(props).length) {
+      input.value = String(Number(fade.toFixed(3)));
+      return;
+    }
+    if (applyCommands([{ type: "audio.set", trackId: track.id, props }], editLabel("Fade de áudio", "Audio fade")) && playing) void audioEngine.play(project!, currentTime);
   }));
   root.querySelector("#delete-audio-track")?.addEventListener("click", () => deleteAudioTrack());
+  bindTextControls(root);
   root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("[data-layer-text]").forEach((input) => {
-    input.addEventListener("focus", snapshot);
+    input.addEventListener("blur", endEditSession);
+    input.addEventListener("change", endEditSession);
     input.addEventListener("input", () => {
       const layer = selectedLayer();
       if (!layer || layer.locked) return;
-      (layer as unknown as Record<string, unknown>)[input.dataset.layerText!] = input.value;
-      if (layer.kind === "text" && ["text", "fontFamily"].includes(input.dataset.layerText!)) {
-        fitTextHeight(layer);
-        updateTextOverflowWarning(layer);
+      const property = input.dataset.layerText!;
+      const value = input.value;
+      if (property === "name" && !value.trim()) return;
+      const session = openEditSession(`layer:${layer.id}:${property}`, propertyLabel(property));
+      if (!session.memo.has("layer")) session.memo.set("layer", { ...layer });
+      const base = session.memo.get("layer") as Layer;
+      const props: Record<string, unknown> = { [property]: value };
+      const fitsText = layer.kind === "text" && ["text", "fontFamily"].includes(property);
+      if (fitsText) {
+        const height = fittedTextHeight({ ...base, [property]: value });
+        if (height !== undefined) props.height = height;
       }
+      const entries: EditEntry[] = [["set", { type: "layer.set", layerId: layer.id, props, ...(overlapMode ? { allowOverlap: true } : {}) }]];
+      let created = false;
       if (input instanceof HTMLInputElement && input.type === "color") {
-        const property = `${input.dataset.layerText}Color`;
-        let keys = layer.keyframes[property];
-        if (recordMode && playing && !keys) keys = layer.keyframes[property] = [];
-        if (recordMode && playing) markRecordedTrack(`color:${layer.id}:${property}`);
-        if ((keys?.length || (recordMode && playing)) && upsertKeyframe(keys!, parseInt(input.value.slice(1), 16))) requestTimelineRefresh();
+        const track = `${property}Color`;
+        const recording = recordMode && playing;
+        if (layer.keyframes[track]?.length || recording) {
+          if (recording) markRecordedTrack(`color:${layer.id}:${track}`);
+          const time = keyframeEditTime();
+          created = !keyframeAt(layer.keyframes[track], time);
+          entries.push([`key:${track}:${time}`, {
+            type: "keyframe.upsert", layerId: layer.id, property: track, time, value: parseInt(value.slice(1), 16), easing: recording ? "linear" : "easeInOut",
+          }]);
+        }
       }
-      project!.modifiedAt = new Date().toISOString();
+      if (!previewEdit(session, entries)) return;
+      if (fitsText) {
+        const updated = selectedLayer();
+        if (updated) {
+          updateTextOverflowWarning(updated);
+          const heightInput = app.querySelector<HTMLInputElement>('[data-layer-property="height"]');
+          if (heightInput && !updated.keyframes.height?.length) {
+            heightInput.value = String(updated.height);
+            updateParamScrub(heightInput);
+          }
+        }
+      }
       void renderFrame();
-      if (input.dataset.layerText === "name") updateLayerStack();
+      if (created) requestTimelineRefresh();
+      if (property === "name") updateLayerStack();
     });
   });
   root.querySelector<HTMLSelectElement>("[data-transition-type]")?.addEventListener("change", (event) => {
     const layer = selectedLayer();
     if (!layer || !project) return;
-    snapshot();
     const value = (event.target as HTMLSelectElement).value;
-    if (isTransitionType(value)) layer.transition = { type: value, duration: layer.transition?.duration || DEFAULT_TRANSITION_DURATION };
-    else delete layer.transition;
-    afterClipEdit();
-    updateInspector();
-    updateTimeline();
+    const transition = isTransitionType(value) ? { type: value, duration: layer.transition?.duration || DEFAULT_TRANSITION_DURATION } : null;
+    applyCommands([{ type: "clip.setTransition", layerId: layer.id, transition }], editLabel("Transição", "Transition"), { clipEdit: true });
   });
   root.querySelector<HTMLInputElement>("[data-transition-duration]")?.addEventListener("change", (event) => {
     const layer = selectedLayer();
     const value = Number((event.target as HTMLInputElement).value);
     if (!layer?.transition || !Number.isFinite(value)) return;
-    snapshot();
-    layer.transition.duration = clamp(value, 1 / project!.settings.fps, Math.max(.05, layer.endTime - layer.startTime));
-    afterClipEdit();
-    updateTimeline();
+    const duration = clamp(value, 1 / project!.settings.fps, Math.max(.05, layer.endTime - layer.startTime));
+    applyCommands([{ type: "clip.setTransition", layerId: layer.id, transition: { type: layer.transition.type, duration } }], editLabel("Transição", "Transition"), { clipEdit: true });
   });
   root.querySelectorAll<HTMLInputElement>("[data-layer-check]").forEach((input) => input.addEventListener("change", () => {
     const layer = selectedLayer();
     if (!layer || layer.locked) return;
-    snapshot();
-    (layer as unknown as Record<string, unknown>)[input.dataset.layerCheck!] = input.checked;
+    const property = input.dataset.layerCheck!;
+    if (!applyCommands([{ type: "layer.set", layerId: layer.id, props: { [property]: input.checked } }], propertyLabel(property), { panels: false })) {
+      input.checked = !input.checked;
+      return;
+    }
     if (layer.kind === "video") {
-      syncLinkedAudio(layer);
       renderer?.setPlaybackState(playing, currentTime);
       if (playing) void audioEngine.play(project!, currentTime);
     }
-    project!.modifiedAt = new Date().toISOString();
-    void renderFrame();
   }));
   root.querySelectorAll<HTMLInputElement>("[data-effect-param]").forEach((input) => {
-    input.addEventListener("focus", snapshot);
+    input.addEventListener("blur", endEditSession);
+    input.addEventListener("change", endEditSession);
     input.addEventListener("input", () => {
       const effect = selectedEffect();
       if (!effect || !Number.isFinite(input.valueAsNumber)) return;
@@ -1901,33 +2548,32 @@ function bindDynamicControls(root: ParentNode = app) {
           input.value = String(center);
         }
       }
-      const createdKeyframe = setEffectNumericValue(effect, property, value);
+      const session = openEditSession(`effect:${effect.id}:${property}`, `${editLabel("Efeito", "Effect")}: ${effect.kind}`);
+      const edit = effectValueCommands(effect, property, value);
+      if (!previewEdit(session, edit.entries)) return;
       updateParamScrub(input);
-      project!.modifiedAt = new Date().toISOString();
       void renderFrame();
-      if (createdKeyframe) requestTimelineRefresh();
+      if (edit.created) requestTimelineRefresh();
     });
   });
   root.querySelectorAll<HTMLElement>("[data-keyframe]").forEach((button) => button.addEventListener("click", () => toggleKeyframe(button.dataset.keyframe!)));
   root.querySelectorAll<HTMLElement>("[data-color-keyframe]").forEach((button) => button.addEventListener("click", () => toggleColorKeyframe(button.dataset.colorKeyframe as "fill" | "stroke")));
   root.querySelectorAll<HTMLElement>("[data-effect-keyframe]").forEach((button) => button.addEventListener("click", () => toggleEffectKeyframe(button.dataset.effectKeyframe!)));
   root.querySelectorAll<HTMLSelectElement>("[data-layer-easing]").forEach((select) => select.addEventListener("change", () => {
-    const keyframe = keyframeAt(selectedLayer()?.keyframes[select.dataset.layerEasing!]);
-    if (!keyframe) return;
-    snapshot();
-    keyframe.easing = select.value as Easing;
-    if (keyframe.easing === "bezier") keyframe.curve ??= .75;
-    updateCurveTools();
-    void renderFrame();
+    const layer = selectedLayer();
+    const property = select.dataset.layerEasing!;
+    const keyframe = keyframeAt(layer?.keyframes[property]);
+    if (!layer || !keyframe) return;
+    const command = keyTrackCommand({ layerId: layer.id, property }, layer.keyframes[property], keyframe.time, withEasing(select.value as Easing));
+    if (command && applyCommands([command], editLabel("Curva", "Easing"), { panels: false })) updateCurveTools();
   }));
   root.querySelectorAll<HTMLSelectElement>("[data-effect-easing]").forEach((select) => select.addEventListener("change", () => {
-    const keyframe = keyframeAt(selectedEffect()?.keyframes[select.dataset.effectEasing!]);
-    if (!keyframe) return;
-    snapshot();
-    keyframe.easing = select.value as Easing;
-    if (keyframe.easing === "bezier") keyframe.curve ??= .75;
-    updateCurveTools();
-    void renderFrame();
+    const effect = selectedEffect();
+    const property = select.dataset.effectEasing!;
+    const keyframe = keyframeAt(effect?.keyframes[property]);
+    if (!effect || !keyframe) return;
+    const command = keyTrackCommand({ effectId: effect.id, property }, effect.keyframes[property], keyframe.time, withEasing(select.value as Easing));
+    if (command && applyCommands([command], editLabel("Curva", "Easing"), { panels: false })) updateCurveTools();
   }));
   root.querySelector("#delete-layer")?.addEventListener("click", () => deleteLayer());
   root.querySelector("#duplicate-layer")?.addEventListener("click", duplicateLayer);
@@ -1944,11 +2590,7 @@ function beginLayerRename(button: HTMLElement, layerId: string) {
   input.maxLength = 80;
   const commit = () => {
     const value = input.value.trim();
-    if (value && value !== layer.name) {
-      snapshot();
-      layer.name = value;
-      project!.modifiedAt = new Date().toISOString();
-    }
+    if (value && value !== layer.name) applyCommands([{ type: "layer.setName", layerId, name: value }], propertyLabel("name"), { panels: false });
     updateLayerStack();
     updateInspector();
     updateTimeline();
@@ -1984,6 +2626,7 @@ function renderEditorPreservingCanvas() {
 }
 
 function updatePanels() {
+  updateBin();
   updateLayerStack();
   updateInspector();
   updateTimeline();
@@ -1992,7 +2635,7 @@ function updatePanels() {
 function updateLayerStack() {
   const target = app.querySelector("#layer-stack");
   if (!target || !project) return;
-  target.innerHTML = project.layers.map(renderLayerItem).join("") || `<p class="empty-stack">+ ${t("inputs")}</p>`;
+  target.innerHTML = project.layers.map(renderLayerItem).join("") || `<p class="empty-stack">${language === "pt-BR" ? "Sem camadas ainda" : "No layers yet"}</p>`;
   bindDynamicControls(target);
   bindDragAndDrop(target);
 }
@@ -2017,15 +2660,11 @@ function updateInspector() {
 }
 
 // Cresce a caixa de texto para caber todas as linhas; com altura animada, só avisa.
-function fitTextHeight(layer: Layer) {
+/** Height a text layer needs to show all of its text, or undefined when it already fits (or its height is animated). */
+function fittedTextHeight(layer: Layer) {
   const layout = renderer?.measureText(layer, currentTime);
-  if (!layout || layout.lines.length <= layout.maxLines || layer.keyframes.height?.length) return;
-  layer.height = Math.ceil(layout.requiredHeight);
-  const input = app.querySelector<HTMLInputElement>('[data-layer-property="height"]');
-  if (input) {
-    input.value = String(layer.height);
-    updateParamScrub(input);
-  }
+  if (!layout || layout.lines.length <= layout.maxLines || layer.keyframes.height?.length) return undefined;
+  return Math.ceil(layout.requiredHeight);
 }
 
 function updateTextOverflowWarning(layer: Layer) {
@@ -2048,6 +2687,7 @@ function updateTimeline() {
     nextScroll.scrollLeft = scrollLeft;
     nextScroll.scrollTop = scrollTop;
   }
+  syncMinimap();
 }
 
 function requestTimelineRefresh() {
@@ -2068,84 +2708,484 @@ function updateParamScrub(input: HTMLInputElement) {
   scrub.style.setProperty("--value-ratio", String(fill / 100));
 }
 
-async function addInput(kind: InputKind) {
+function addGeneratedLayer(kind: "text" | "geometry") {
   if (!project) return;
-  let asset: ImportedAsset | null = null;
-  if (["image", "video", "guide"].includes(kind)) {
-    const accept = kind === "video"
-      ? ".mp4,.webm,.mov,.m4v,video/*"
-      : ".png,.jpg,.jpeg,.webp,.bmp,.gif,image/*";
-    const source = await chooseFile(accept);
-    if (!source) return;
-    try {
-      asset = await importWebAsset(source);
-    } catch (error) {
-      window.alert(String(error));
-      return;
-    }
-  }
-  snapshot();
-  const layer = createLayer(kind, project.settings, {
-    asset: asset?.relativePath,
-    name: asset?.fileName || (kind === "text" ? "Text" : kind === "geometry" ? (language === "pt-BR" ? "Quadrado" : "Square") : kind),
+  const fps = project.settings.fps;
+  // Entra no playhead (em 0 ocupa a composição); passando do fim, a composição cresce.
+  const at = currentTime > 0 ? Math.round(currentTime * fps) / fps : 0;
+  const wanted = Math.max(project.settings.duration, at > 0 ? at + 3 : 0);
+  const end = Math.min(MAX_TIMELINE_SECONDS, Math.ceil(wanted * fps - 1e-6) / fps);
+  const layerId = uid("layer");
+  const commands: VctCommand[] = [];
+  if (end > project.settings.duration + 1e-6) commands.push({ type: "composition.set", props: { duration: end } });
+  commands.push({
+    type: "layer.create", layerId, kind, startTime: at, endTime: end,
+    name: kind === "text" ? "Text" : language === "pt-BR" ? "Quadrado" : "Square",
   });
-  if (kind === "video" && layer.asset) {
-    const duration = await probeMediaDuration(layer.asset, "video");
-    if (duration > 0) {
-      layer.sourceOut = duration;
-      layer.endTime = duration;
-      layer.loop = false;
-      layer.fadeOutStart = duration;
-      layer.fadeOutEnd = duration;
-      if (duration > project.settings.duration) project.settings.duration = duration;
-    }
-    try {
-      const audio = await probeAudio(layer.asset);
-      const audioDuration = audio.duration || duration;
-      if (audioDuration > 0) {
-        project.audioTracks.push(createAudioTrack(`${layer.name} · audio`, layer.asset, audioDuration, {
-          linkedLayerId: layer.id,
-          linked: true,
-          endTime: layer.endTime,
-          sourceOut: audioDuration,
-          fadeOutStart: layer.endTime,
-          fadeOutEnd: layer.endTime,
-        }));
-      }
-    } catch {
-      // Video sem faixa de áudio ou codec de áudio não suportado pelo navegador.
-    }
-  }
-  project.layers.unshift(layer);
-  // Mídia nova entra no playhead (em 0 continua igual: ocupa a composição).
-  if (currentTime > 0 && kind !== "guide") {
-    const at = Math.round(currentTime * project.settings.fps) / project.settings.fps;
-    if (kind === "video") shiftClip(project, layer, at);
-    else {
-      layer.startTime = at;
-      layer.endTime = Math.max(project.settings.duration, at + 3);
-      layer.fadeInStart = layer.fadeInEnd = at;
-      layer.fadeOutStart = layer.fadeOutEnd = layer.endTime;
-    }
-    extendDurationToContent();
-  }
-  if (asset) rememberAssetSource(asset.relativePath, asset.sourceMetadata);
-  selectedLayerId = layer.id;
-  selectedAudioTrackId = "";
-  selectedEffectId = "";
-  selectedKeyRef = "";
-  renderEditorPreservingCanvas();
-  if (layer.asset) {
-    renderer?.removeMedia(layer.id);
-    renderer?.preload(layer, true, () => {
-      if (selectedLayerId === layer.id) updateInspector();
+  applyCommands(commands, kind === "text" ? editLabel("Adicionar texto", "Add text") : editLabel("Adicionar forma", "Add shape"), {
+    select() {
+      selectedLayerId = layerId;
+      selectedAudioTrackId = "";
+      selectedEffectId = "";
+      selectedKeyRef = "";
+    },
+  });
+}
+
+// ---- Left panel: Mídia | Efeitos tabs and the media bin.
+
+function bindLeftPanel() {
+  const tabs = [...app.querySelectorAll<HTMLElement>("[data-left-tab]")];
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("click", () => setLeftTab(tab.dataset.leftTab as LeftTab));
+    tab.addEventListener("keydown", (event) => {
+      const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+      const target = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : step ? (index + step + tabs.length) % tabs.length : -1;
+      if (target < 0) return;
+      event.preventDefault();
+      setLeftTab(tabs[target].dataset.leftTab as LeftTab, true);
     });
+  });
+  bindLeftBody();
+}
+
+function setLeftTab(tab: LeftTab, focus = false) {
+  const changed = tab !== leftTab;
+  leftTab = tab;
+  try {
+    localStorage.setItem("nt-vct-left-tab", tab);
+  } catch {
+    // Storage unavailable: the tab just is not remembered.
   }
-  if (layer.kind === "video") {
+  const top = app.querySelector<HTMLElement>(".left-top");
+  if (top && changed) {
+    top.outerHTML = renderLeftTop();
+    bindLeftPanel();
+    const body = app.querySelector<HTMLElement>(".left-tab-body");
+    if (body && leftTab === "effects") bindDynamicControls(body);
+    if (leftTab === "media") requestMissingThumbnails();
+  }
+  if (focus) app.querySelector<HTMLElement>(`#left-tab-${tab}`)?.focus();
+}
+
+function bindLeftBody() {
+  const body = app.querySelector<HTMLElement>(".left-tab-body");
+  if (!body) return;
+  body.querySelectorAll<HTMLDetailsElement>("[data-library-accordion]").forEach((details) => details.addEventListener("toggle", () => {
+    if (!details.open) return;
+    libraryAccordion = details.dataset.libraryAccordion as "effects" | "post";
+    body.querySelectorAll<HTMLDetailsElement>("[data-library-accordion]").forEach((other) => {
+      if (other !== details) other.open = false;
+    });
+  }));
+  body.querySelectorAll<HTMLElement>("[data-add-input]").forEach((button) => button.addEventListener("click", () => void addInput(button.dataset.addInput as "text" | "geometry" | "guide")));
+  body.querySelector("[data-import-srt]")?.addEventListener("click", () => void importSubtitles());
+  body.querySelectorAll<HTMLElement>("[data-add-effect]").forEach((button) => button.addEventListener("click", () => addEffect(button.dataset.addEffect as EffectKind, false)));
+  body.querySelectorAll<HTMLElement>("[data-add-post]").forEach((button) => button.addEventListener("click", () => addEffect(button.dataset.addPost as EffectKind, true)));
+  if (leftTab !== "media") return;
+  bindMediaBin(body, binActions);
+  body.querySelectorAll<HTMLElement>("[data-bin-asset]").forEach((card) => {
+    card.addEventListener("dragstart", () => { draggedBinAsset = card.dataset.binAsset!; });
+    card.addEventListener("dragend", () => {
+      draggedBinAsset = "";
+      clearBinDropRows();
+    });
+  });
+}
+
+const binActions: BinActions = {
+  importMedia: () => void chooseAndImportMedia(),
+  select: selectBinAsset,
+  place: (asset, where) => placeAsset(asset, where === "playhead" ? { preferSelected: true } : {}),
+  remove: removeBinAsset,
+  changeView(change) {
+    Object.assign(binView, change);
+    updateBin();
+  },
+};
+
+function updateBin() {
+  if (leftTab !== "media" || !project) return;
+  const body = app.querySelector<HTMLElement>(".left-tab-body");
+  if (!body) return;
+  if (binView.selected && !listAssets(project).some((entry) => entry.id === binView.selected)) binView.selected = "";
+  const html = renderMediaBin(project, binView, language);
+  if (html === binHtml) return;
+  const active = document.activeElement as HTMLElement | null;
+  const card = active?.closest<HTMLElement>("[data-bin-asset]");
+  const focus = !active || !body.contains(active) ? ""
+    : active.matches("[data-bin-search]") ? "[data-bin-search]"
+    : active.matches("[data-bin-filter]") ? "[data-bin-filter]"
+    : card ? `[data-bin-asset="${CSS.escape(card.dataset.binAsset!)}"]` : "";
+  const caret = active instanceof HTMLInputElement ? active.selectionStart : null;
+  const scroll = body.scrollTop;
+  binHtml = html;
+  body.innerHTML = html;
+  bindLeftBody();
+  body.scrollTop = scroll;
+  const next = focus ? body.querySelector<HTMLElement>(focus) : null;
+  next?.focus();
+  if (next instanceof HTMLInputElement && caret !== null) next.setSelectionRange(caret, caret);
+  requestMissingThumbnails();
+}
+
+function scheduleBinRefresh() {
+  if (binRefreshTimer) return;
+  binRefreshTimer = window.setTimeout(() => {
+    binRefreshTimer = 0;
+    if (draggedBinAsset) scheduleBinRefresh();
+    else updateBin();
+  }, 120);
+}
+
+// Projects opened from disk have metadata but no thumbnails yet.
+function requestMissingThumbnails() {
+  if (!project) return;
+  for (const entry of listAssets(project)) {
+    if ((entry.kind !== "image" && entry.kind !== "video") || binThumbnail(entry.id) || thumbnailRequests.has(entry.id) || !hasWebAsset(entry.id)) continue;
+    thumbnailRequests.add(entry.id);
+    void ensureThumbnail(entry.id, entry.kind).then((thumbnail) => { if (thumbnail) scheduleBinRefresh(); });
+  }
+}
+
+function assetNeedsMetadata(metadata: NonNullable<ProjectDocument["assetMetadata"]>[string] | undefined) {
+  if (!metadata?.kind) return true;
+  return metadata.kind === "audio" ? !metadata.duration : !metadata.width;
+}
+
+let metadataRefresh: Promise<void> = Promise.resolve();
+
+/**
+ * Projects saved before the bin have no technical metadata. Once their files are
+ * available it is read in the background; this is a metadata refresh, not an
+ * edit, so it makes no undo step.
+ */
+function refreshAssetMetadata() {
+  const target = project;
+  if (!target) return;
+  const pending = listAssets(target).filter((entry) => hasWebAsset(entry.id) && !metadataAttempts.has(entry.id) && assetNeedsMetadata(target.assetMetadata?.[entry.id]));
+  if (!pending.length) return;
+  for (const entry of pending) metadataAttempts.add(entry.id);
+  metadataRefresh = metadataRefresh.then(async () => {
+    let changed = false;
+    for (const entry of pending) {
+      if (project !== target) return;
+      try {
+        const blob = await (await fetch(resolveAssetUrl(entry.id))).blob();
+        const known = target.assetMetadata?.[entry.id];
+        const name = known?.originalName || entry.name;
+        const file = new File([blob], name, { type: blob.type || known?.mimeType || "" });
+        const source = known ?? { originalName: name, size: blob.size, lastModified: 0, mimeType: file.type };
+        const probed = await probeMedia(entry.id, file, source);
+        if (project !== target) return;
+        target.assetMetadata ||= {};
+        target.assetMetadata[entry.id] = probed;
+        changed = true;
+      } catch {
+        // Unreadable file: the clip keeps working, the card just shows less.
+      }
+    }
+    if (!changed || project !== target) return;
+    markProjectModified(target);
+    updateBin();
+    if (inspectedAsset) updateInspector();
+  });
+}
+
+function selectBinAsset(asset: string) {
+  if (!project) return;
+  binView.selected = asset;
+  inspectedAsset = asset;
+  updateBin();
+  updateInspector();
+  setStatus(`SELECT · ${listAssets(project).find((entry) => entry.id === asset)?.name ?? asset}`);
+}
+
+function removeBinAsset(asset: string) {
+  if (!project) return;
+  if (!applyCommands([{ type: "asset.remove", asset }], editLabel("Tirar mídia do painel", "Remove media from panel"))) return;
+  if (binView.selected === asset) binView.selected = "";
+  if (inspectedAsset === asset) inspectedAsset = "";
+  updateBin();
+  updateInspector();
+}
+
+/** Default framing for a source placed on the timeline (the inspector can change it). */
+function defaultFit(entry?: Pick<BinEntry, "width" | "height">): "contain" | "cover" {
+  let stored: string | null = null;
+  try {
+    stored = localStorage.getItem("nt-vct-default-fit");
+  } catch {
+    stored = null;
+  }
+  if (stored === "contain" || stored === "cover") return stored;
+  const settings = project?.settings;
+  return entry?.width && entry.height && entry.height > entry.width && settings && settings.height > settings.width ? "cover" : "contain";
+}
+
+function renderAssetInspector(entry: BinEntry) {
+  const pt = language === "pt-BR";
+  const kinds = { video: pt ? "Vídeo" : "Video", image: pt ? "Imagem" : "Image", audio: pt ? "Áudio" : "Audio" };
+  const orientations: Record<string, string> = { vertical: "vertical", horizontal: "horizontal", quadrado: pt ? "quadrado" : "square" };
+  const names = entry.usedBy.map((id) => project?.layers.find((layer) => layer.id === id)?.name || project?.audioTracks.find((track) => track.id === id)?.name || id);
+  const audio = entry.kind === "audio" ? (pt ? "sim" : "yes")
+    : entry.kind === "video" ? (entry.hasAudio === undefined ? "—" : entry.hasAudio ? (pt ? "sim" : "yes") : (pt ? "mudo" : "silent")) : "";
+  const rows: Array<[string, string]> = [
+    [pt ? "Tipo" : "Type", entry.kind ? kinds[entry.kind] : "—"],
+    ...(entry.duration ? [[pt ? "Duração" : "Duration", `${entry.duration.toFixed(2)} s`] as [string, string]] : []),
+    ...(entry.width && entry.height ? [[pt ? "Resolução" : "Resolution", `${entry.width}×${entry.height}`] as [string, string]] : []),
+    ...(entry.orientation ? [[pt ? "Orientação" : "Orientation", orientations[entry.orientation] || entry.orientation] as [string, string]] : []),
+    ...(audio ? [[pt ? "Áudio" : "Audio", audio] as [string, string]] : []),
+    ...(entry.size ? [[pt ? "Tamanho" : "Size", `${(entry.size / 1048576).toFixed(entry.size > 10485760 ? 0 : 1)} MB`] as [string, string]] : []),
+    [pt ? "Em uso" : "Used by", names.length ? names.join(", ") : (pt ? "livre" : "unused")],
+  ];
+  const fit = defaultFit(entry);
+  return `<div class="inspector-header"><strong class="asset-title" title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</strong><span>${entry.kind ? kinds[entry.kind].toUpperCase() : "—"}</span></div>
+    <div class="inspector-scroll">
+      <section class="property-group asset-details"><h3>${pt ? "MÍDIA" : "MEDIA"}</h3>
+        <dl>${rows.map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>
+      </section>
+      ${entry.kind === "video" || entry.kind === "image" ? `<section class="property-group"><label class="select-field"><span>${pt ? "ENQUADRAR AO COLOCAR" : "FIT WHEN PLACED"}</span>
+        <select data-asset-fit><option value="contain" ${fit === "contain" ? "selected" : ""}>${pt ? "Inteiro (contain)" : "Whole (contain)"}</option><option value="cover" ${fit === "cover" ? "selected" : ""}>${pt ? "Preencher (cover)" : "Fill (cover)"}</option></select></label></section>` : ""}
+    </div>`;
+}
+
+// ---- Import: files go to the bin only; nothing lands on the timeline.
+
+async function importIntoBin(file: File) {
+  if (!assetKindOf(file.name, { mimeType: file.type, originalName: file.name })) {
+    throw new Error(language === "pt-BR" ? "tipo de arquivo não suportado" : "unsupported file type");
+  }
+  const imported = await importWebAsset(file);
+  const metadata = await probeMedia(imported.relativePath, file, imported.sourceMetadata);
+  return { asset: imported.relativePath, metadata: { ...metadata } as Record<string, unknown> };
+}
+
+async function importSubtitles() {
+  if (!project || exportInProgress) return;
+  const [file] = await chooseFiles(".srt,application/x-subrip,text/plain");
+  const target = project;
+  if (!file || project !== target) return;
+  let srt: string;
+  try {
+    srt = await file.text();
+  } catch (error) {
+    setStatus(`${editLabel("LEGENDAS", "SUBTITLES")} · ${errorMessage(error)}`);
+    return;
+  }
+  let prefix = "legenda";
+  for (let n = 2; target.layers.some((layer) => layer.id.startsWith(prefix)) || target.tracks?.some((track) => track.id.startsWith(prefix)); n++) prefix = `legenda${n}_`;
+  const before = target.layers.length;
+  const cues = (srt.match(/-->/g) || []).length;
+  if (!applyCommands([{ type: "text.fromSrt", srt, idPrefix: prefix }], editLabel("Importar legendas", "Import subtitles"))) return;
+  const created = project ? project.layers.length - before : 0;
+  const skipped = cues - created;
+  setStatus(language === "pt-BR"
+    ? `LEGENDAS · ${created} IMPORTADA${created === 1 ? "" : "S"}${skipped > 0 ? ` · ${skipped} FORA DA COMPOSIÇÃO OU VAZIA${skipped === 1 ? "" : "S"}` : ""}`
+    : `SUBTITLES · ${created} IMPORTED${skipped > 0 ? ` · ${skipped} OUTSIDE THE COMPOSITION OR EMPTY` : ""}`);
+}
+
+async function chooseAndImportMedia() {
+  if (!project) return;
+  const files = await chooseFiles(IMPORT_ACCEPT);
+  if (files.length) await importMediaFiles(files);
+}
+
+async function importMediaFiles(files: File[]) {
+  const target = project;
+  if (!target || !files.length || exportInProgress) return;
+  const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const progress = openImportProgress(language, sorted.length);
+  const commands: VctCommand[] = [];
+  const failures: string[] = [];
+  try {
+    for (const [index, file] of sorted.entries()) {
+      progress.update(index, file.name);
+      try {
+        const item = await importIntoBin(file);
+        commands.push({ type: "asset.add", asset: item.asset, metadata: item.metadata });
+      } catch {
+        failures.push(file.name);
+      }
+    }
+  } finally {
+    progress.close();
+  }
+  if (project !== target) return;
+  const skipped = failures.length ? ` · ${language === "pt-BR" ? "não importadas" : "skipped"}: ${failures.join(", ")}` : "";
+  if (!commands.length) {
+    setStatus(language === "pt-BR" ? `NENHUMA MÍDIA IMPORTADA${skipped}` : `NO MEDIA IMPORTED${skipped}`);
+    return;
+  }
+  if (!applyCommands(commands, editLabel("Importar mídia", "Import media"))) return;
+  setStatus(language === "pt-BR" ? `${commands.length} MÍDIA(S) IMPORTADA(S)${skipped}` : `${commands.length} MEDIA FILE(S) IMPORTED${skipped}`);
+}
+
+// ---- Placing bin media on the timeline.
+
+interface PlaceOptions {
+  /** Start in seconds; the playhead when omitted. */
+  time?: number;
+  /** Track (video) the clip must go to. */
+  trackId?: string;
+  /** Use the selected clip's track when it is free at that time; otherwise a new top track. */
+  preferSelected?: boolean;
+}
+
+const IMPORTED_IMAGE_SECONDS = 3;
+
+function placeAsset(asset: string, options: PlaceOptions = {}) {
+  if (!project) return;
+  const entry = listAssets(project).find((item) => item.id === asset);
+  if (!entry?.kind) {
+    setStatus(language === "pt-BR" ? "MÍDIA NÃO ENCONTRADA NO PAINEL" : "MEDIA NOT FOUND IN THE PANEL");
+    return;
+  }
+  const fps = project.settings.fps;
+  const start = clamp(Math.round((options.time ?? currentTime) * fps) / fps, 0, MAX_TIMELINE_SECONDS);
+  const length = entry.kind === "image" || !entry.duration ? IMPORTED_IMAGE_SECONDS : Math.max(1 / fps, Math.floor(entry.duration * fps + 1e-6) / fps);
+  const end = Math.min(MAX_TIMELINE_SECONDS, start + length);
+  if (end <= start + 1e-6) {
+    setStatus(language === "pt-BR" ? "SEM ESPAÇO NA TIMELINE" : "NO ROOM ON THE TIMELINE");
+    return;
+  }
+  const commands: VctCommand[] = [];
+  const needed = Math.ceil(end * fps - 1e-6) / fps;
+  if (needed > project.settings.duration + 1e-6) commands.push({ type: "composition.set", props: { duration: needed } });
+  const label = editLabel("Colocar na timeline", "Place on timeline");
+  if (entry.kind === "audio") {
+    const trackId = uid("audio");
+    const selected = selectedAudioTrack();
+    const lane = options.preferSelected && selected ? laneIdOf(selected) : "";
+    const free = lane && !project.audioTracks.some((track) => laneIdOf(track) === lane && track.startTime < end - 1e-6 && track.endTime > start + 1e-6);
+    commands.push({ type: "audio.create", trackId, asset, name: entry.name, startTime: start, endTime: end, ...(free ? { laneId: lane } : {}) });
+    const placed = applyCommands(commands, label, { select() { inspectedAsset = ""; } });
+    if (!placed) return;
+    selectAudioTrackById(trackId);
+    void generateAudioWaveform(asset);
+    return;
+  }
+  const layerId = uid("layer");
+  let trackId = options.trackId;
+  const selected = selectedLayer();
+  if (!trackId && options.preferSelected && selected && !overlapsTrack(project, trackIdOf(selected), start, end)) trackId = trackIdOf(selected);
+  commands.push({
+    type: "clip.place", layerId, asset, startTime: start, endTime: end,
+    ...(entry.width ? { fit: defaultFit(entry) } : {}),
+    ...(trackId ? { trackId } : {}),
+  });
+  const placed = applyCommands(commands, label, {
+    select() {
+      inspectedAsset = "";
+      selectedLayerId = layerId;
+      selectedAudioTrackId = "";
+      selectedEffectId = "";
+      selectedKeyRef = "";
+    },
+  });
+  if (!placed) return;
+  const layer = project.layers.find((item) => item.id === layerId);
+  if (layer?.kind === "video") {
     void generateVideoThumbnails(layer);
-    const linkedAudio = project.audioTracks.find((track) => track.linkedLayerId === layer.id);
-    if (linkedAudio) void generateAudioWaveform(linkedAudio.asset);
+    const linked = project.audioTracks.find((track) => track.linkedLayerId === layer.id);
+    if (linked) void generateAudioWaveform(linked.asset);
   }
+  setStatus(`${language === "pt-BR" ? "COLOCADO NA TIMELINE" : "PLACED ON THE TIMELINE"} · ${entry.name}`);
+}
+
+async function addInput(kind: "text" | "geometry" | "guide") {
+  if (!project) return;
+  if (kind !== "guide") return addGeneratedLayer(kind);
+  const source = await chooseFile("image/*,.png,.jpg,.jpeg,.webp,.bmp,.gif");
+  if (!source || !project) return;
+  try {
+    const item = await importIntoBin(source);
+    const layerId = uid("layer");
+    applyCommands([
+      { type: "asset.add", asset: item.asset, metadata: item.metadata },
+      { type: "layer.create", layerId, kind: "guide", name: source.name, asset: item.asset, startTime: 0, endTime: project.settings.duration },
+      { type: "layer.fit", layerId, fit: "contain" },
+    ], editLabel("Adicionar guia", "Add guide"), {
+      select() {
+        inspectedAsset = "";
+        selectedLayerId = layerId;
+        selectedAudioTrackId = "";
+        selectedEffectId = "";
+        selectedKeyRef = "";
+      },
+    });
+  } catch (error) {
+    window.alert(errorMessage(error));
+  }
+}
+
+// ---- Dragging bin cards onto the timeline.
+
+function clearBinDropRows() {
+  app.querySelectorAll(".is-bin-drop-row").forEach((item) => item.classList.remove("is-bin-drop-row"));
+}
+
+function bindBinDrop(scrubArea: HTMLElement) {
+  const draggedKind = () => project && listAssets(project).find((entry) => entry.id === draggedBinAsset)?.kind;
+  const rowAt = (event: DragEvent) => (event.target instanceof Element ? event.target : null)?.closest<HTMLElement>(".timeline-track[data-track-id]") ?? null;
+  const accepts = (event: DragEvent) => Boolean(project && !exportInProgress && event.dataTransfer?.types.includes(BIN_DRAG_TYPE));
+  scrubArea.addEventListener("dragover", (event) => {
+    if (!accepts(event)) return;
+    event.preventDefault();
+    event.dataTransfer!.dropEffect = "copy";
+    clearBinDropRows();
+    const mark = draggedKind() === "audio" ? app.querySelector(".audio-group-track") : rowAt(event) ?? app.querySelector(".video-group-track");
+    mark?.classList.add("is-bin-drop-row");
+  });
+  scrubArea.addEventListener("dragleave", (event) => {
+    if (!(event.relatedTarget instanceof Node) || !scrubArea.contains(event.relatedTarget)) clearBinDropRows();
+  });
+  scrubArea.addEventListener("drop", (event) => {
+    clearBinDropRows();
+    const asset = event.dataTransfer?.getData(BIN_DRAG_TYPE);
+    if (!asset || !accepts(event)) return;
+    event.preventDefault();
+    const time = snapTimelineTime(timelineTimeFromPointer(event, scrubArea), scrubArea, "", "", event.altKey);
+    const audio = draggedKind() === "audio";
+    placeAsset(asset, { time, ...(audio ? {} : { trackId: rowAt(event)?.dataset.trackId }) });
+  });
+}
+
+// ---- Track names and the empty track button.
+
+function addEmptyTrack() {
+  applyCommands([{ type: "track.create", trackId: uid("track"), kind: "video" }], editLabel("Nova faixa", "New track"));
+}
+
+function beginTrackRename(element: HTMLElement) {
+  if (!project || element.isContentEditable) return;
+  const trackId = element.dataset.trackName!;
+  const original = element.textContent || "";
+  const row = element.closest<HTMLElement>("[draggable='true']");
+  if (row) row.draggable = false;
+  element.contentEditable = "true";
+  element.focus();
+  window.getSelection()?.selectAllChildren(element);
+  let finished = false;
+  const finish = (commit: boolean) => {
+    if (finished) return;
+    finished = true;
+    element.contentEditable = "false";
+    if (row) row.draggable = true;
+    const name = (element.textContent || "").replace(/\s+/g, " ").trim();
+    element.textContent = original;
+    if (commit && name && name !== original) applyCommands([{ type: "track.rename", trackId, name }], editLabel("Renomear faixa", "Rename track"));
+  };
+  element.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  element.addEventListener("blur", () => finish(true), { once: true });
 }
 
 function probeMediaDuration(asset: string, kind: "video" | "audio") {
@@ -2161,124 +3201,6 @@ function probeMediaDuration(asset: string, kind: "video" | "audio") {
     media.addEventListener("error", () => resolve(0), { once: true });
     media.src = resolveAssetUrl(asset);
   });
-}
-
-const IMPORTED_IMAGE_SECONDS = 3;
-const VIDEO_EXTENSIONS = /\.(mp4|webm|mov|m4v)$/i;
-const IMAGE_EXTENSIONS = /\.(png|jpe?g|webp|bmp|gif)$/i;
-const AUDIO_EXTENSIONS = /\.(mp3|wav|m4a|aac|ogg|oga|flac)$/i;
-
-function mediaKindOf(file: File): "video" | "image" | "audio" | null {
-  if (file.type.startsWith("video/") || VIDEO_EXTENSIONS.test(file.name)) return "video";
-  if (file.type.startsWith("image/") || IMAGE_EXTENSIONS.test(file.name)) return "image";
-  if (file.type.startsWith("audio/") || AUDIO_EXTENSIONS.test(file.name)) return "audio";
-  return null;
-}
-
-// Importa vários arquivos de uma vez: vídeos e imagens em sequência numa faixa
-// nova a partir do playhead (imagens com 3 s), áudios em sequência numa faixa de
-// áudio. Tudo vira um único passo de desfazer, pronto para editar à mão ou pelo agente.
-async function importMediaFiles(files: File[]) {
-  if (!project || !files.length) return;
-  const settings = project.settings;
-  const start = Math.round(currentTime * settings.fps) / settings.fps;
-  const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  const failures: string[] = [];
-  const prepared: Array<{ kind: "video" | "image" | "audio"; asset: ImportedAsset; duration: number; audioDuration: number }> = [];
-  setStatus(language === "pt-BR" ? `IMPORTANDO ${sorted.length} ARQUIVO(S)…` : `IMPORTING ${sorted.length} FILE(S)…`);
-  for (const file of sorted) {
-    const kind = mediaKindOf(file);
-    if (!kind) {
-      failures.push(file.name);
-      continue;
-    }
-    try {
-      const asset = await importWebAsset(file);
-      let duration = kind === "image" ? IMPORTED_IMAGE_SECONDS : 0;
-      let audioDuration = 0;
-      if (kind === "video") duration = await probeMediaDuration(asset.relativePath, "video");
-      if (kind !== "image") {
-        try {
-          audioDuration = (await probeAudio(asset.relativePath)).duration;
-        } catch {
-          audioDuration = 0;
-        }
-      }
-      if (kind === "audio") duration = audioDuration || await probeMediaDuration(asset.relativePath, "audio");
-      if (!(duration > 0)) throw new Error("sem duração");
-      prepared.push({ kind, asset, duration, audioDuration });
-    } catch {
-      failures.push(file.name);
-    }
-  }
-  if (!prepared.length) {
-    setStatus(language === "pt-BR" ? `NENHUMA MÍDIA IMPORTADA · ${failures.join(", ")}` : `NO MEDIA IMPORTED · ${failures.join(", ")}`);
-    return;
-  }
-  snapshot();
-  const fps = settings.fps;
-  const frame = (seconds: number) => Math.max(1 / fps, Math.round(seconds * fps) / fps);
-  let visualCursor = start;
-  let audioCursor = start;
-  let visualTrack: string | undefined;
-  let linkedLane: string | undefined;
-  let audioLane: string | undefined;
-  const layers: Layer[] = [];
-  for (const item of prepared) {
-    const { asset } = item;
-    rememberAssetSource(asset.relativePath, asset.sourceMetadata);
-    if (item.kind === "audio") {
-      const end = audioCursor + frame(item.duration);
-      const track = createAudioTrack(asset.fileName, asset.relativePath, item.duration, {
-        startTime: audioCursor, endTime: end, laneId: audioLane,
-        fadeInStart: audioCursor, fadeInEnd: audioCursor, fadeOutStart: end, fadeOutEnd: end,
-      });
-      audioLane ||= track.id;
-      project.audioTracks.push(track);
-      audioCursor = end;
-      continue;
-    }
-    const end = visualCursor + frame(item.duration);
-    const layer = createLayer(item.kind, settings, {
-      asset: asset.relativePath, name: asset.fileName, trackId: visualTrack,
-      startTime: visualCursor, endTime: end,
-      fadeInStart: visualCursor, fadeInEnd: visualCursor, fadeOutStart: end, fadeOutEnd: end,
-      ...(item.kind === "video" ? { sourceIn: 0, sourceOut: item.duration, loop: false } : {}),
-    });
-    visualTrack ||= layer.id;
-    layers.push(layer);
-    if (item.kind === "video" && item.audioDuration > 0) {
-      const track = createAudioTrack(`${layer.name} · audio`, asset.relativePath, item.audioDuration, {
-        linkedLayerId: layer.id, linked: true, laneId: linkedLane,
-        startTime: visualCursor, endTime: end, sourceOut: item.audioDuration,
-        fadeInStart: visualCursor, fadeInEnd: visualCursor, fadeOutStart: end, fadeOutEnd: end,
-      });
-      linkedLane ||= track.id;
-      project.audioTracks.push(track);
-    }
-    visualCursor = end;
-  }
-  project.layers.unshift(...layers);
-  extendDurationToContent();
-  selectedClipIds.clear();
-  selectedLayerId = layers[0]?.id || selectedLayerId;
-  selectedAudioTrackId = layers.length ? "" : project.audioTracks[project.audioTracks.length - 1]?.id || "";
-  selectedEffectId = "";
-  selectedKeyRef = "";
-  markProjectModified();
-  renderEditorPreservingCanvas();
-  for (const layer of layers) {
-    renderer?.removeMedia(layer.id);
-    renderer?.preload(layer, true, () => {
-      if (selectedLayerId === layer.id) updateInspector();
-    });
-    if (layer.kind === "video") void generateVideoThumbnails(layer);
-  }
-  for (const asset of new Set(project.audioTracks.map((track) => track.asset))) void generateAudioWaveform(asset);
-  const imported = prepared.length;
-  setStatus(language === "pt-BR"
-    ? `${imported} MÍDIA(S) IMPORTADA(S)${failures.length ? ` · não importadas: ${failures.join(", ")}` : ""}`
-    : `${imported} MEDIA FILE(S) IMPORTED${failures.length ? ` · skipped: ${failures.join(", ")}` : ""}`);
 }
 
 // Arrastar arquivos para o editor importa todos de uma vez.
@@ -2297,31 +3219,6 @@ window.addEventListener("drop", (event) => {
   event.preventDefault();
   void importMediaFiles(Array.from(event.dataTransfer.files));
 });
-
-async function addAudioInput() {
-  if (!project) return;
-  const source = await chooseFile(".mp3,.wav,.m4a,.aac,.ogg,.oga,.flac,audio/*");
-  if (!source) return;
-  try {
-    const asset = await importWebAsset(source);
-    const decoded = await probeAudio(asset.relativePath);
-    const duration = decoded.duration || await probeMediaDuration(asset.relativePath, "audio");
-    if (!duration) throw new Error(language === "pt-BR" ? "Não foi possível ler este arquivo de áudio." : "Could not read this audio file.");
-    snapshot();
-    if (duration > project.settings.duration) project.settings.duration = duration;
-    const track = createAudioTrack(asset.fileName, asset.relativePath, duration);
-    project.audioTracks.push(track);
-    rememberAssetSource(asset.relativePath, asset.sourceMetadata);
-    selectedAudioTrackId = track.id;
-    selectedLayerId = "";
-    selectedEffectId = "";
-    selectedKeyRef = "";
-    renderEditorPreservingCanvas();
-    void generateAudioWaveform(track.asset);
-  } catch (error) {
-    window.alert(String(error));
-  }
-}
 
 async function replaceLayerMedia(layerId: string) {
   if (!project) return;
@@ -2344,48 +3241,37 @@ async function replaceLayerMedia(layerId: string) {
         embeddedAudioDuration = 0;
       }
     }
-    snapshot();
-    layer.asset = asset.relativePath;
-    rememberAssetSource(asset.relativePath, asset.sourceMetadata);
-    renderer?.removeMedia(layer.id);
+    const props: Record<string, unknown> = { asset: asset.relativePath };
+    const commands: VctCommand[] = [];
+    const linkedTracks = project.audioTracks.filter((track) => track.linked && track.linkedLayerId === layer.id);
     if (layer.kind === "video") {
-      layer.sourceIn = 0;
-      layer.sourceOut = mediaDuration;
-      layer.loop = mediaDuration > 0 && clipDuration * Math.max(.05, Math.abs(layer.playbackRate)) > mediaDuration;
-      const linkedTracks = project.audioTracks.filter((track) => track.linked && track.linkedLayerId === layer.id);
+      props.sourceIn = 0;
+      props.sourceOut = mediaDuration;
+      props.loop = mediaDuration > 0 && clipDuration * Math.max(.05, Math.abs(layer.playbackRate)) > mediaDuration;
       if (embeddedAudioDuration > 0) {
-        if (!linkedTracks.length) {
-          project.audioTracks.push(createAudioTrack(`${layer.name} · audio`, asset.relativePath, embeddedAudioDuration, {
-            linkedLayerId: layer.id,
-            linked: true,
-            startTime: layer.startTime,
-            endTime: layer.endTime,
-            sourceIn: 0,
-            sourceOut: embeddedAudioDuration,
-            loop: layer.loop,
-            fadeInStart: layer.fadeInStart,
-            fadeInEnd: layer.fadeInEnd,
-            fadeOutStart: layer.fadeOutStart,
-            fadeOutEnd: layer.fadeOutEnd,
-          }));
-        } else {
-          for (const track of linkedTracks) {
-            audioWaveformCache.delete(track.asset);
-            track.asset = asset.relativePath;
-            track.sourceIn = 0;
-            track.sourceOut = embeddedAudioDuration;
-          }
-          syncLinkedAudio(layer);
-        }
-      } else if (linkedTracks.length) {
-        project.audioTracks = project.audioTracks.filter((track) => !linkedTracks.includes(track));
+        for (const track of linkedTracks) commands.push({ type: "audio.set", trackId: track.id, props: { asset: asset.relativePath } });
+      } else {
+        for (const track of linkedTracks) commands.push({ type: "audio.remove", trackId: track.id });
       }
     }
-    project.modifiedAt = new Date().toISOString();
+    // The video's timing is applied last: it also syncs the linked audio clips.
+    commands.push({ type: "layer.set", layerId: layer.id, props, ...(overlapMode ? { allowOverlap: true } : {}) });
+    if (layer.kind === "video" && embeddedAudioDuration > 0 && !linkedTracks.length) {
+      const trackId = uid("audio");
+      commands.push({ type: "audio.create", trackId, asset: asset.relativePath, name: `${layer.name} · audio`, startTime: layer.startTime, endTime: layer.endTime });
+      commands.push({ type: "audio.link", trackId, layerId: layer.id });
+    }
+    const audioCount = project.audioTracks.length;
+    rememberAssetSource(asset.relativePath, asset.sourceMetadata);
+    renderer?.removeMedia(layer.id);
+    if (!applyCommands(commands, editLabel("Substituir mídia", "Replace media"), { panels: false })) return;
+    for (const track of linkedTracks) audioWaveformCache.delete(track.asset);
     audioEngine.stop();
-    renderEditorPreservingCanvas();
-    if (layer.kind === "video") {
-      void generateVideoThumbnails(layer);
+    if (project.audioTracks.length === audioCount) renderEditorPreservingCanvas();
+    refreshHistoryButtons();
+    const replaced = project.layers.find((item) => item.id === layerId);
+    if (replaced?.kind === "video") {
+      void generateVideoThumbnails(replaced);
       const linked = project.audioTracks.find((track) => track.linked && track.linkedLayerId === layer.id);
       if (linked) void generateAudioWaveform(linked.asset);
     }
@@ -2411,18 +3297,16 @@ async function replaceAudioMedia(trackId: string) {
     const decoded = await probeAudio(asset.relativePath);
     const duration = decoded.duration || await probeMediaDuration(asset.relativePath, "audio");
     if (!duration) throw new Error(language === "pt-BR" ? "Não foi possível ler este arquivo de áudio." : "Could not read this audio file.");
-    snapshot();
     const clipDuration = track.endTime - track.startTime;
-    audioWaveformCache.delete(track.asset);
-    track.asset = asset.relativePath;
+    const previousAsset = track.asset;
     rememberAssetSource(asset.relativePath, asset.sourceMetadata);
-    track.sourceIn = 0;
-    track.sourceOut = duration;
-    track.loop = clipDuration * Math.max(.05, Math.abs(track.playbackRate)) > duration;
-    project.modifiedAt = new Date().toISOString();
+    const loop = clipDuration * Math.max(.05, Math.abs(track.playbackRate)) > duration;
+    if (!applyCommands([{ type: "audio.set", trackId: track.id, props: { asset: asset.relativePath, sourceIn: 0, sourceOut: duration, loop } }], editLabel("Substituir áudio", "Replace audio"), { panels: false })) return;
+    audioWaveformCache.delete(previousAsset);
     audioEngine.stop();
     renderEditorPreservingCanvas();
-    void generateAudioWaveform(track.asset);
+    refreshHistoryButtons();
+    void generateAudioWaveform(asset.relativePath);
     setStatus(`${language === "pt-BR" ? "ÁUDIO SUBSTITUÍDO" : "AUDIO REPLACED"} · ${source.name}`);
   } catch (error) {
     window.alert(String(error));
@@ -2431,22 +3315,15 @@ async function replaceAudioMedia(trackId: string) {
 
 function deleteAudioTrack(id = selectedAudioTrackId) {
   if (!project || !id) return;
-  snapshot();
-  project.audioTracks = project.audioTracks.filter((track) => track.id !== id);
+  const applied = applyCommands([{ type: "audio.remove", trackId: id }], editLabel("Apagar áudio", "Delete audio"), { select: clearSelectionAfterDelete });
+  if (applied) audioEngine.stop();
+}
+
+function clearSelectionAfterDelete() {
   selectedAudioTrackId = "";
-  selectedLayerId = project.layers[0]?.id || "";
+  selectedLayerId = project?.layers[0]?.id || "";
   selectedEffectId = "";
   selectedKeyRef = "";
-  audioEngine.stop();
-  renderEditorPreservingCanvas();
-}
-
-function syncLinkedAudio(layer: Layer) {
-  if (project) syncLinkedAudioTracks(layer, project.audioTracks);
-}
-
-function syncLinkedLayer(track: AudioTrack) {
-  return project ? syncLinkedVideoLayer(track, project.layers, project.audioTracks) : undefined;
 }
 
 function copyParameterSection(section: ClipboardSection) {
@@ -2479,39 +3356,63 @@ function pasteParameterSection(section: ClipboardSection) {
   if (!project || !parameterClipboard || parameterClipboard.section !== section) return;
   const layer = selectedLayer();
   const audio = selectedAudioTrack();
-  snapshot();
+  const commands: VctCommand[] = [];
   if (section === "audio" && audio) {
     const data = structuredClone(parameterClipboard.data) as Record<string, unknown> & { effects: AudioEffectNode[] };
     const start = audio.startTime;
-    audio.volume = Number(data.volume);
-    audio.playbackRate = Number(data.playbackRate);
-    audio.reverse = Boolean(data.reverse);
-    audio.loop = Boolean(data.loop);
-    audio.fadeInStart = start + Number(data.fadeInStart);
-    audio.fadeInEnd = start + Number(data.fadeInEnd);
-    audio.fadeOutStart = start + Number(data.fadeOutStart);
-    audio.fadeOutEnd = start + Number(data.fadeOutEnd);
-    audio.effects = (data.effects || []).map((effect) => ({ ...effect, id: uid("afx") }));
+    commands.push({
+      type: "audio.set",
+      trackId: audio.id,
+      props: {
+        volume: Number(data.volume),
+        playbackRate: Number(data.playbackRate),
+        reverse: Boolean(data.reverse),
+        loop: Boolean(data.loop),
+        fadeInStart: start + Number(data.fadeInStart),
+        fadeInEnd: start + Number(data.fadeInEnd),
+        fadeOutStart: start + Number(data.fadeOutStart),
+        fadeOutEnd: start + Number(data.fadeOutEnd),
+      },
+    });
+    for (const effect of audio.effects) commands.push({ type: "audioEffect.remove", effectId: effect.id });
+    for (const effect of data.effects || []) {
+      const effectId = uid("afx");
+      commands.push({ type: "audioEffect.add", trackId: audio.id, kind: effect.kind, effectId });
+      for (const [parameter, value] of Object.entries(effect.params)) commands.push({ type: "audioEffect.setParam", effectId, parameter, value });
+      if (!effect.enabled) commands.push({ type: "audioEffect.set", effectId, enabled: false });
+    }
   } else if (section === "transform" && layer) {
-    Object.assign(layer, structuredClone(parameterClipboard.data));
+    commands.push({ type: "layer.set", layerId: layer.id, props: structuredClone(parameterClipboard.data) as Record<string, unknown> });
   } else if (section === "timing" && layer) {
     const data = structuredClone(parameterClipboard.data) as Record<string, unknown>;
     const start = layer.startTime;
-    layer.playbackRate = Number(data.playbackRate);
-    layer.reverse = Boolean(data.reverse);
-    layer.loop = Boolean(data.loop);
-    layer.fadeInStart = start + Number(data.fadeInStart);
-    layer.fadeInEnd = start + Number(data.fadeInEnd);
-    layer.fadeOutStart = start + Number(data.fadeOutStart);
-    layer.fadeOutEnd = start + Number(data.fadeOutEnd);
-    syncLinkedAudio(layer);
+    commands.push({
+      type: "layer.set",
+      layerId: layer.id,
+      props: {
+        playbackRate: Number(data.playbackRate),
+        reverse: Boolean(data.reverse),
+        loop: Boolean(data.loop),
+        fadeInStart: start + Number(data.fadeInStart),
+        fadeInEnd: start + Number(data.fadeInEnd),
+        fadeOutStart: start + Number(data.fadeOutStart),
+        fadeOutEnd: start + Number(data.fadeOutEnd),
+      },
+    });
   } else if (section === "effects" && layer) {
-    layer.effects = (structuredClone(parameterClipboard.data) as EffectNode[]).map((effect) => ({ ...effect, id: uid("fx") }));
+    for (const effect of layer.effects) commands.push({ type: "effect.remove", effectId: effect.id });
+    for (const effect of structuredClone(parameterClipboard.data) as EffectNode[]) {
+      const effectId = uid("fx");
+      commands.push({ type: "effect.add", kind: effect.kind, ownerId: layer.id, effectId });
+      for (const [parameter, value] of Object.entries(effect.params)) commands.push({ type: "effect.setParam", effectId, parameter, value });
+      for (const [property, keys] of Object.entries(effect.keyframes || {})) {
+        if (keys.length) commands.push({ type: "effect.keyframe.set", effectId, property, keys });
+      }
+      if (!effect.enabled || effect.name !== effect.kind) commands.push({ type: "effect.set", effectId, enabled: effect.enabled, name: effect.name });
+    }
   } else return;
-  project.modifiedAt = new Date().toISOString();
-  updatePanels();
+  if (!commands.length || !applyCommands(commands, `${editLabel("Colar", "Paste")}: ${section}`)) return;
   if (playing) void audioEngine.play(project, currentTime);
-  void renderFrame();
   setStatus(`PASTED · ${section.toUpperCase()}`);
 }
 
@@ -2521,61 +3422,51 @@ function addEffect(kind: EffectKind, post: boolean) {
     setStatus(language === "pt-BR" ? "SELECIONE UM INPUT PRIMEIRO" : "SELECT AN INPUT FIRST");
     return;
   }
-  snapshot();
-  const effect = createEffect(kind);
-  if (post) project.postEffects.push(effect);
-  else selectedLayer()!.effects.push(effect);
+  const effectId = uid("fx");
+  const label = `${editLabel("Efeito", "Effect")}: ${kind}`;
+  if (!applyCommands([{ type: "effect.add", kind, ownerId: post ? "__post__" : selectedLayer()!.id, effectId }], label, { panels: false })) return;
   selectedAudioTrackId = "";
-  selectedEffectId = effect.id;
+  selectedEffectId = effectId;
   selectedKeyRef = "";
   renderEditorPreservingCanvas();
+  refreshHistoryButtons();
 }
 
 function removeEffect(id: string) {
-  if (!project) return;
-  snapshot();
-  for (const layer of project.layers) layer.effects = layer.effects.filter((effect) => effect.id !== id);
-  project.postEffects = project.postEffects.filter((effect) => effect.id !== id);
+  const effect = findEffect(id);
+  if (!project || !effect) return;
+  if (!applyCommands([{ type: "effect.remove", effectId: id }], `${editLabel("Remover efeito", "Remove effect")}: ${effect.kind}`, { panels: false })) return;
   if (selectedEffectId === id) selectedEffectId = "";
   renderEditorPreservingCanvas();
+  refreshHistoryButtons();
 }
 
 function deleteLayer(layerId = selectedLayerId) {
   const layer = project?.layers.find((item) => item.id === layerId);
   if (!project || !layer) return;
-  snapshot();
-  renderer?.removeMedia(layer.id);
-  project.layers = project.layers.filter((item) => item.id !== layer.id);
-  project.audioTracks = project.audioTracks.filter((track) => track.linkedLayerId !== layer.id || !track.linked);
-  selectedLayerId = project.layers[0]?.id || "";
-  selectedAudioTrackId = "";
-  selectedEffectId = "";
-  selectedKeyRef = "";
-  renderEditorPreservingCanvas();
+  applyCommands([{ type: "clip.remove", layerId: layer.id }], `${editLabel("Apagar", "Delete")}: ${layer.name}`, { select: clearSelectionAfterDelete });
 }
 
 function moveLayer(layerId: string, direction: number) {
   if (!project) return;
   const layer = project.layers.find((item) => item.id === layerId);
   if (!layer) return;
-  // O undo ignora checkpoints sem alteração, então o snapshot antes é seguro.
-  snapshot();
-  if (!shiftTrack(project, trackIdOf(layer), direction)) return;
-  syncLinkedAudioOrder();
-  project.modifiedAt = new Date().toISOString();
-  renderEditorPreservingCanvas();
+  const tracks = visualTracks(project);
+  const index = tracks.findIndex((track) => track.id === trackIdOf(layer));
+  const target = clamp(index + direction, 0, tracks.length - 1);
+  if (index < 0 || target === index) return;
+  reorderLayerTracks(tracks[index].id, target);
 }
 
 function moveAudioTrack(trackId: string, direction: number) {
   if (!project) return;
-  const index = project.audioTracks.findIndex((track) => track.id === trackId);
-  const target = clamp(index + direction, 0, project.audioTracks.length - 1);
+  const track = project.audioTracks.find((item) => item.id === trackId);
+  if (!track) return;
+  const lanes = [...new Set(project.audioTracks.map(laneIdOf))];
+  const index = lanes.indexOf(laneIdOf(track));
+  const target = clamp(index + direction, 0, lanes.length - 1);
   if (index < 0 || index === target) return;
-  snapshot();
-  const [moved] = project.audioTracks.splice(index, 1);
-  project.audioTracks.splice(target, 0, moved);
-  project.modifiedAt = new Date().toISOString();
-  updateTimeline();
+  applyCommands([{ type: "audio.reorderLane", laneId: lanes[index], index: target }], editLabel("Ordem do áudio", "Audio order"));
 }
 
 function moveEffect(effectId: string, direction: number) {
@@ -2586,11 +3477,9 @@ function moveEffect(effectId: string, direction: number) {
   const index = list.findIndex((effect) => effect.id === effectId);
   const target = clamp(index + direction, 0, list.length - 1);
   if (index === target) return;
-  snapshot();
-  const [moved] = list.splice(index, 1);
-  list.splice(target, 0, moved);
-  project.modifiedAt = new Date().toISOString();
+  if (!applyCommands([{ type: "effect.reorder", effectId, index: target }], editLabel("Ordem dos efeitos", "Effect order"), { panels: false })) return;
   renderEditorPreservingCanvas();
+  refreshHistoryButtons();
 }
 
 function transitionLabel(type: TransitionType) {
@@ -2622,16 +3511,6 @@ function renderTransitionControls(layer: Layer) {
     <div class="transition-controls"><label class="select-field"><select data-transition-type aria-label="${language === "pt-BR" ? "Transição de entrada" : "Transition in"}">${options}</select></label>${duration}</div>`;
 }
 
-// Depois de mover/aparar: no modo Sobrepor, sobreposições ganham Dissolver; o
-// áudio vinculado segue o crossfade das transições com sobreposição.
-function afterClipEdit() {
-  if (!project) return;
-  if (overlapMode) autoTransitionsForOverlap(project);
-  syncTransitionAudioFades(project);
-  markProjectModified();
-  void renderFrame();
-}
-
 function selectionIds() {
   if (!project) return [];
   const ids = selectedClipIds.size ? [...selectedClipIds] : selectedLayerId ? [selectedLayerId] : [];
@@ -2642,42 +3521,42 @@ function deleteSelection() {
   const ids = selectionIds();
   if (!project || !ids.length) return;
   if (ids.length === 1) return deleteLayer(ids[0]);
-  snapshot();
-  for (const id of ids) renderer?.removeMedia(id);
-  project.layers = project.layers.filter((layer) => !ids.includes(layer.id));
-  project.audioTracks = project.audioTracks.filter((track) => !(track.linked && ids.includes(track.linkedLayerId || "")));
-  selectedClipIds.clear();
-  selectedLayerId = project.layers[0]?.id || "";
-  markProjectModified();
-  renderEditorPreservingCanvas();
+  applyCommands(ids.map((layerId): VctCommand => ({ type: "clip.remove", layerId })), editLabel("Apagar clipes", "Delete clips"), { select: clearSelectionAfterDelete });
 }
 
 function rippleDeleteSelection() {
   const ids = selectionIds();
   if (!project || !ids.length) return;
-  snapshot();
-  for (const id of ids) renderer?.removeMedia(id);
-  rippleDelete(project, ids);
-  selectedClipIds.clear();
-  selectedLayerId = project.layers[0]?.id || "";
-  afterClipEdit();
-  renderEditorPreservingCanvas();
+  const starts = new Map(project.layers.map((layer) => [layer.id, layer.startTime]));
+  const commands = [...ids].sort((a, b) => (starts.get(b) ?? 0) - (starts.get(a) ?? 0))
+    .map((layerId): VctCommand => ({ type: "clip.remove", layerId, ripple: true }));
+  if (!applyCommands(commands, editLabel("Apagar com ripple", "Ripple delete"), { clipEdit: true, select: clearSelectionAfterDelete })) return;
   setStatus(language === "pt-BR" ? "APAGADO COM RIPPLE · espaço fechado" : "RIPPLE DELETE · gap closed");
 }
 
 function pasteClipboard() {
   if (!project || !clipClipboard) return;
-  snapshot();
-  const pasted = pasteClips(project, clipClipboard, Math.round(currentTime * project.settings.fps) / project.settings.fps);
-  if (!pasted.length) return;
-  extendDurationToContent();
-  syncLinkedAudioOrder();
-  selectedClipIds.clear();
-  pasted.forEach((layer) => selectedClipIds.add(layer.id));
-  selectedLayerId = pasted[0].id;
-  afterClipEdit();
-  renderEditorPreservingCanvas();
-  setStatus(language === "pt-BR" ? `${pasted.length} CLIPE(S) COLADO(S) NO PLAYHEAD` : `${pasted.length} CLIP(S) PASTED AT PLAYHEAD`);
+  const fps = project.settings.fps;
+  const at = Math.round(currentTime * fps) / fps;
+  const first = Math.min(...clipClipboard.layers.map((layer) => layer.startTime));
+  const contentEnd = at - first + Math.max(...clipClipboard.layers.map((layer) => layer.endTime), ...clipClipboard.audio.map((track) => track.endTime));
+  const commands: VctCommand[] = [];
+  if (contentEnd > project.settings.duration + 1e-6) {
+    commands.push({ type: "composition.set", props: { duration: Math.min(MAX_TIMELINE_SECONDS, Math.ceil(contentEnd * fps - 1e-6) / fps) } });
+  }
+  commands.push({ type: "clip.paste", clipboard: clipClipboard, startTime: at });
+  const results = applyCommands([...commands, ...linkedAudioOrderCommands(commands)], editLabel("Colar", "Paste"), {
+    clipEdit: true,
+    select(done) {
+      const pasted = (done[commands.length - 1] as { layerIds: string[] }).layerIds;
+      selectedClipIds.clear();
+      pasted.forEach((id) => selectedClipIds.add(id));
+      selectedLayerId = pasted[0];
+    },
+  });
+  if (!results) return;
+  const count = (results[commands.length - 1] as { layerIds: string[] }).layerIds.length;
+  setStatus(language === "pt-BR" ? `${count} CLIPE(S) COLADO(S) NO PLAYHEAD` : `${count} CLIP(S) PASTED AT PLAYHEAD`);
 }
 
 // Corta no playhead: o clipe selecionado, ou o clipe da faixa selecionada sob o
@@ -2697,100 +3576,95 @@ function splitAtPlayhead() {
     return;
   }
   stopPlayback();
-  snapshot();
   const mediaDuration = renderer?.mediaDuration(target.id) || 0;
-  const result = splitClip(project, target.id, time, mediaDuration, .5 / fps);
-  if (!result) return;
-  selectedLayerId = result.second.id;
-  selectedAudioTrackId = "";
-  selectedEffectId = "";
-  selectedKeyRef = "";
-  markProjectModified();
-  renderEditorPreservingCanvas();
-  setStatus(language === "pt-BR" ? "CLIPE CORTADO" : "CLIP SPLIT");
+  const newLayerId = uid("layer");
+  const applied = applyCommands([{
+    type: "clip.split", layerId: target.id, time, newLayerId, ...(mediaDuration > 0 ? { sourceDuration: mediaDuration } : {}),
+  }], editLabel("Cortar clipe", "Split clip"), {
+    select(done) {
+      selectedLayerId = (done[0] as { newLayerId: string }).newLayerId;
+      selectedAudioTrackId = "";
+      selectedEffectId = "";
+      selectedKeyRef = "";
+    },
+  });
+  if (applied) setStatus(language === "pt-BR" ? "CLIPE CORTADO" : "CLIP SPLIT");
 }
 
 function duplicateLayer() {
   const layer = selectedLayer();
   if (!project || !layer) return;
-  snapshot();
-  const clone = structuredClone(layer);
-  clone.id = uid("layer");
-  clone.name += " copy";
-  clone.x += 24;
-  clone.y += 24;
-  clone.effects.forEach((effect) => effect.id = uid("fx"));
-  const linkedAudio = project.audioTracks.filter((track) => track.linkedLayerId === layer.id);
-  for (const track of linkedAudio) {
-    const audioClone = structuredClone(track);
-    audioClone.id = uid("audio");
-    audioClone.name += " copy";
-    audioClone.linkedLayerId = clone.id;
-    project.audioTracks.push(audioClone);
-  }
-  const index = project.layers.findIndex((item) => item.id === layer.id);
-  project.layers.splice(index, 0, clone);
-  selectedLayerId = clone.id;
-  selectedAudioTrackId = "";
-  selectedEffectId = "";
-  selectedKeyRef = "";
-  renderEditorPreservingCanvas();
+  // Cola uma cópia no mesmo instante: vai para a faixa original se livre, senão para uma faixa nova no topo.
+  const clipboard = copyClips(project, [layer.id]);
+  const [copy] = clipboard.layers;
+  copy.name = `${copy.name} copy`.slice(0, 200);
+  copy.x += 24;
+  copy.y += 24;
+  clipboard.audio.forEach((track) => track.name = `${track.name} copy`.slice(0, 200));
+  applyCommands([{ type: "clip.paste", clipboard, startTime: layer.startTime }], editLabel("Duplicar camada", "Duplicate layer"), {
+    select(done) {
+      selectedLayerId = (done[0] as { layerIds: string[] }).layerIds[0];
+      selectedAudioTrackId = "";
+      selectedEffectId = "";
+      selectedKeyRef = "";
+    },
+  });
 }
 
 function toggleKeyframe(property: string) {
   const layer = selectedLayer();
   if (!layer) return;
-  automationApi.dispatch({
+  const applied = applyCommands([{
     type: "keyframe.toggle",
     layerId: layer.id,
     property,
     time: currentTime,
     value: renderer?.layerValue(layer, property as keyof Layer, currentTime)
       ?? Number((layer as unknown as Record<string, unknown>)[property]),
-  });
-  const keyframe = keyframeAt(layer.keyframes[property]);
+  }], "Keyframe", { panels: false });
+  if (!applied) return;
+  const keyframe = keyframeAt(selectedLayer()?.keyframes[property]);
   selectedKeyRef = keyframe ? `${layer.id}|${property}|${keyframe.time}` : "";
   updateInspector();
   updateTimeline();
-  void renderFrame();
 }
 
 function toggleEffectKeyframe(property: string) {
   const effect = selectedEffect();
   if (!effect) return;
-  automationApi.dispatch({
+  const applied = applyCommands([{
     type: "effect.keyframe.toggle",
     effectId: effect.id,
     property,
     time: currentTime,
     value: renderer?.effectValue(effect, property, currentTime) ?? effect.params[property],
-  });
+  }], "Keyframe", { panels: false });
+  if (!applied) return;
   const owner = project!.postEffects.some((item) => item.id === effect.id)
     ? "__post__"
     : project!.layers.find((layer) => layer.effects.some((item) => item.id === effect.id))?.id || "__post__";
-  const keyframe = keyframeAt(effect.keyframes[property]);
+  const keyframe = keyframeAt(findEffect(effect.id)?.keyframes[property]);
   selectedKeyRef = keyframe ? `${owner}|fx:${effect.id}:${property}|${keyframe.time}` : "";
   updateInspector();
   updateTimeline();
-  void renderFrame();
 }
 
 function toggleColorKeyframe(property: "fill" | "stroke") {
   const layer = selectedLayer();
   if (!layer) return;
   const key = `${property}Color`;
-  automationApi.dispatch({
+  const applied = applyCommands([{
     type: "keyframe.toggle",
     layerId: layer.id,
     property: key,
     time: currentTime,
     value: parseInt((renderer?.layerColor(layer, property, currentTime) || layer[property]).slice(1), 16),
-  });
-  const keyframe = keyframeAt(layer.keyframes[key]);
+  }], "Keyframe", { panels: false });
+  if (!applied) return;
+  const keyframe = keyframeAt(selectedLayer()?.keyframes[key]);
   selectedKeyRef = keyframe ? `${layer.id}|${key}|${keyframe.time}` : "";
   updateInspector();
   updateTimeline();
-  void renderFrame();
 }
 
 function updateTimelineClipStyles(id: string, start: number, end: number, audio = false) {
@@ -2803,15 +3677,6 @@ function updateTimelineClipStyles(id: string, start: number, end: number, audio 
 }
 
 const MAX_TIMELINE_SECONDS = 7200;
-
-// Estende a duração da composição até o fim do último clipe (arrastar além do fim).
-function extendDurationToContent() {
-  if (!project) return;
-  const fps = project.settings.fps;
-  const contentEnd = Math.max(0, ...project.layers.map((layer) => layer.endTime), ...project.audioTracks.map((track) => track.endTime));
-  if (contentEnd <= project.settings.duration + 1e-6) return;
-  project.settings.duration = Math.min(MAX_TIMELINE_SECONDS, Math.ceil(contentEnd * fps - 1e-6) / fps);
-}
 
 function updateFadeClipVisuals(clip: HTMLElement, item: Pick<Layer, "startTime" | "endTime" | "fadeInStart" | "fadeInEnd" | "fadeOutStart" | "fadeOutEnd">) {
   const duration = Math.max(.001, item.endTime - item.startTime);
@@ -2837,7 +3702,7 @@ function timelineContentRect(scrubArea: HTMLElement) {
   return (scrubArea.querySelector<HTMLElement>(".timeline-content") || scrubArea).getBoundingClientRect();
 }
 
-function timelineTimeFromPointer(event: PointerEvent, scrubArea: HTMLElement) {
+function timelineTimeFromPointer(event: Pick<MouseEvent, "clientX">, scrubArea: HTMLElement) {
   const rect = timelineContentRect(scrubArea);
   return clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1) * (project?.settings.duration || 0);
 }
@@ -2850,20 +3715,386 @@ function snapTimelineTime(
   bypass = false,
   excludePlayhead = false,
 ) {
-  return calculateTimelineSnap(value, project, timelineSnap,
+  let candidates: number[] = [];
+  const result = calculateTimelineSnap(value, project, timelineSnap,
     () => timelineContentRect(scrubArea).width,
-    () => timelineSnapCandidates(excludeLayerId, excludeAudioId, excludePlayhead), bypass);
+    () => candidates = timelineSnapCandidates(excludeLayerId, excludeAudioId, excludePlayhead), bypass);
+  lastSnap = candidates.some((candidate) => Math.abs(candidate - result) < 1e-6) ? result : null;
+  return result;
 }
 
 function snapClipStart(value: number, length: number, scrubArea: HTMLElement, excludeLayerId = "", excludeAudioId = "", bypass = false) {
   const start = snapTimelineTime(value, scrubArea, excludeLayerId, excludeAudioId, bypass);
+  const startHit = lastSnap;
   const end = snapTimelineTime(value + length, scrubArea, excludeLayerId, excludeAudioId, bypass) - length;
-  return Math.abs(start - value) <= Math.abs(end - value) ? start : end;
+  const useStart = Math.abs(start - value) <= Math.abs(end - value);
+  // O guia fica na borda do clipe que travou: início ou fim.
+  if (useStart) lastSnap = startHit;
+  return useStart ? start : end;
+}
+
+/** Vertical guide on the timeline at the time a drag just snapped to; null removes it. */
+function showSnapGuide(time: number | null) {
+  const tracks = app.querySelector<HTMLElement>("#timeline-tracks");
+  if (!tracks || !project) return;
+  let line = tracks.querySelector<HTMLElement>(".snap-guide-line");
+  if (time === null) {
+    line?.remove();
+    return;
+  }
+  if (!line) {
+    line = document.createElement("i");
+    line.className = "snap-guide-line";
+    tracks.append(line);
+  }
+  line.style.left = `${time / project.settings.duration * 100}%`;
+}
+
+const TRIM_FIELDS = ["startTime", "endTime", "sourceIn", "sourceOut", "loop", "fadeInStart", "fadeInEnd", "fadeOutStart", "fadeOutEnd"] as const;
+const FADE_FIELDS = ["fadeInStart", "fadeInEnd", "fadeOutStart", "fadeOutEnd"] as const;
+
+/** The fields of after that differ from before, as layer.set / audio.set props. */
+function changedProps<T extends object>(before: T, after: T, fields: readonly string[]) {
+  const props: Record<string, unknown> = {};
+  for (const field of fields) {
+    const next = (after as Record<string, unknown>)[field];
+    if (next !== (before as Record<string, unknown>)[field]) props[field] = next;
+  }
+  return props;
+}
+
+// ---- Régua, zoom, região de trabalho e atalhos de transporte.
+
+function syncMinimap() {
+  const scroll = app.querySelector<HTMLElement>(".timeline-scroll");
+  const view = app.querySelector<HTMLElement>("#timeline-minimap b");
+  if (!scroll || !view || !scroll.scrollWidth) return;
+  view.style.left = `${scroll.scrollLeft / scroll.scrollWidth * 100}%`;
+  view.style.width = `${Math.min(100, scroll.clientWidth / scroll.scrollWidth * 100)}%`;
+}
+
+function bindMinimap(scroll: HTMLElement) {
+  const minimap = app.querySelector<HTMLElement>("#timeline-minimap");
+  if (!minimap) return;
+  const scrollTo = (event: PointerEvent) => {
+    const rect = minimap.getBoundingClientRect();
+    const ratio = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+    scroll.scrollLeft = ratio * scroll.scrollWidth - scroll.clientWidth / 2;
+  };
+  minimap.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    minimap.setPointerCapture(event.pointerId);
+    scrollTo(event);
+    const move = (moveEvent: PointerEvent) => scrollTo(moveEvent);
+    const stop = (upEvent: PointerEvent) => {
+      minimap.removeEventListener("pointermove", move);
+      minimap.removeEventListener("pointerup", stop);
+      minimap.removeEventListener("pointercancel", stop);
+      if (minimap.hasPointerCapture(upEvent.pointerId)) minimap.releasePointerCapture(upEvent.pointerId);
+    };
+    minimap.addEventListener("pointermove", move);
+    minimap.addEventListener("pointerup", stop);
+    minimap.addEventListener("pointercancel", stop);
+  });
+  syncMinimap();
+}
+
+/** Scrolls the timeline so the playhead stays visible while playing. */
+function followPlayhead() {
+  const scroll = app.querySelector<HTMLElement>(".timeline-scroll");
+  if (!scroll || !project || scroll.scrollWidth <= scroll.clientWidth + 1) return;
+  const x = currentTime / project.settings.duration * scroll.scrollWidth;
+  if (x < scroll.scrollLeft || x > scroll.scrollLeft + scroll.clientWidth - 24) scroll.scrollLeft = x - scroll.clientWidth * .15;
+}
+
+function updateLevelMeter() {
+  const meter = app.querySelector<HTMLElement>("#level-meter");
+  const bar = meter?.firstElementChild as HTMLElement | null;
+  if (!meter || !bar) return;
+  const level = playing ? audioEngine.level() : 0;
+  bar.style.width = `${Math.min(100, level * 100)}%`;
+  meter.classList.toggle("is-hot", level > .95);
+}
+
+/**
+ * Horizontal zoom anchored on a screen x (pointer or pinch centre). The content
+ * width changes in place; the ruler labels are rebuilt once the zoom settles.
+ */
+function applyTimelineZoom(next: number, clientX: number) {
+  const scroll = app.querySelector<HTMLElement>(".timeline-scroll");
+  const content = scroll?.querySelector<HTMLElement>(".timeline-content");
+  if (!scroll || !content) return;
+  const value = clamp(next, 1, 10);
+  if (Math.abs(value - timelineZoomX) < 1e-4) return;
+  const rect = content.getBoundingClientRect();
+  const anchor = clientX - scroll.getBoundingClientRect().left;
+  const ratio = (clientX - rect.left) / Math.max(1, rect.width);
+  timelineZoomX = value;
+  localStorage.setItem("nt-vct-timeline-zoom-x", String(timelineZoomX));
+  content.style.width = `${value * 100}%`;
+  scroll.scrollLeft = ratio * content.offsetWidth - anchor;
+  syncMinimap();
+  window.clearTimeout(timelineZoomTimer);
+  timelineZoomTimer = window.setTimeout(updateTimeline, 160);
+}
+
+// Pinça com dois dedos sobre a timeline; o estado vive fora da timeline porque ela é recriada.
+const pinchPointers = new Map<number, { x: number; y: number }>();
+let pinchStart: { distance: number; zoom: number } | null = null;
+const pinchDistance = () => {
+  const [a, b] = [...pinchPointers.values()];
+  return Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+};
+window.addEventListener("pointerdown", (event) => {
+  if (event.pointerType !== "touch" || !(event.target as Element | null)?.closest?.(".timeline-scroll")) return;
+  pinchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (pinchPointers.size === 2) pinchStart = { distance: pinchDistance(), zoom: timelineZoomX };
+}, true);
+window.addEventListener("pointermove", (event) => {
+  const point = pinchPointers.get(event.pointerId);
+  if (!point) return;
+  point.x = event.clientX;
+  point.y = event.clientY;
+  if (pinchPointers.size !== 2 || !pinchStart) return;
+  const [a, b] = [...pinchPointers.values()];
+  applyTimelineZoom(pinchStart.zoom * pinchDistance() / pinchStart.distance, (a.x + b.x) / 2);
+}, true);
+const endPinchPointer = (event: PointerEvent) => {
+  pinchPointers.delete(event.pointerId);
+  if (pinchPointers.size < 2) pinchStart = null;
+};
+window.addEventListener("pointerup", endPinchPointer, true);
+window.addEventListener("pointercancel", endPinchPointer, true);
+
+function snapFrame(time: number) {
+  const fps = project?.settings.fps || 30;
+  return Math.round(time * fps) / fps;
+}
+
+/** I / O: moves one edge of the work area to the playhead; the missing edge defaults to 0 or the end. */
+function setWorkAreaEdge(edge: "in" | "out") {
+  if (!project || exportInProgress) return;
+  const duration = project.settings.duration;
+  const time = clamp(snapFrame(currentTime), 0, duration);
+  const area = project.settings.workArea;
+  let start = edge === "in" ? time : area?.in ?? 0;
+  let end = edge === "out" ? time : area?.out ?? duration;
+  if (edge === "in" && end <= start) end = duration;
+  if (edge === "out" && start >= end) start = 0;
+  if (end <= start) {
+    setStatus(language === "pt-BR" ? "REGIÃO DE TRABALHO · posicione o playhead dentro da composição" : "WORK AREA · place the playhead inside the composition");
+    return;
+  }
+  if (area && area.in === start && area.out === end) return;
+  const label = edge === "in" ? editLabel("Início da região de trabalho", "Work area in") : editLabel("Fim da região de trabalho", "Work area out");
+  if (applyCommands([{ type: "composition.set", props: { workArea: { in: start, out: end } } }], label, { panels: false })) {
+    updateTimeline();
+    setStatus(`${language === "pt-BR" ? "REGIÃO DE TRABALHO" : "WORK AREA"} · ${formatRulerTime(start, project.settings.fps)} – ${formatRulerTime(end, project.settings.fps)}`);
+  }
+}
+
+function clearWorkArea() {
+  if (!project || !project.settings.workArea) return;
+  if (applyCommands([{ type: "composition.set", props: { workArea: null } }], editLabel("Limpar região de trabalho", "Clear work area"), { panels: false })) {
+    updateTimeline();
+    setStatus(language === "pt-BR" ? "REGIÃO DE TRABALHO LIMPA" : "WORK AREA CLEARED");
+  }
+}
+
+/** Moves the later clips of the selected track left so no gap remains between them. */
+function closeGaps() {
+  if (!project || exportInProgress) return;
+  const fps = project.settings.fps;
+  const commands: VctCommand[] = [];
+  const audio = selectedAudioTrack();
+  const selected = selectedLayer();
+  let clips: Array<Layer | AudioTrack> = [];
+  if (audio) clips = (audioLanes(project).find((lane) => lane.clips.some((clip) => clip.id === audio.id))?.clips || []).filter((clip) => !clip.linked);
+  else if (selected) clips = project.layers.filter((layer) => trackIdOf(layer) === trackIdOf(selected));
+  else {
+    setStatus(language === "pt-BR" ? "FECHAR ESPAÇOS · selecione um clipe da faixa" : "CLOSE GAPS · select a clip on the track");
+    return;
+  }
+  clips = [...clips].sort((a, b) => a.startTime - b.startTime);
+  let end = clips[0]?.endTime ?? 0;
+  for (const clip of clips.slice(1)) {
+    const start = Math.round(end * fps) / fps;
+    if (clip.startTime > end + 1e-6 && start < clip.startTime - 1e-6) {
+      commands.push(audio
+        ? { type: "audio.move", trackId: clip.id, startTime: start }
+        : { type: "clip.move", layerId: clip.id, startTime: start });
+      end = start + (clip.endTime - clip.startTime);
+    } else end = Math.max(end, clip.endTime);
+  }
+  if (!commands.length) {
+    setStatus(language === "pt-BR" ? "SEM ESPAÇOS PARA FECHAR" : "NO GAPS TO CLOSE");
+    return;
+  }
+  stopPlayback();
+  if (applyCommands(commands, editLabel("Fechar espaços", "Close gaps"), { clipEdit: true })) {
+    setStatus(language === "pt-BR" ? `${commands.length} CLIPE(S) MOVIDO(S) · espaços fechados` : `${commands.length} CLIP(S) MOVED · gaps closed`);
+  }
+}
+
+/** Ctrl+X: copies the selected clips to the clip clipboard and removes them in one undo step. */
+function cutSelection() {
+  const ids = selectionIds();
+  if (!project || !ids.length) return;
+  const previous = clipClipboard;
+  clipClipboard = copyClips(project, ids);
+  const removed = applyCommands(ids.map((layerId): VctCommand => ({ type: "clip.remove", layerId })),
+    editLabel("Recortar clipes", "Cut clips"), { select: clearSelectionAfterDelete });
+  if (!removed) {
+    clipClipboard = previous;
+    return;
+  }
+  setStatus(language === "pt-BR" ? `${ids.length} CLIPE(S) RECORTADO(S)` : `${ids.length} CLIP(S) CUT`);
+}
+
+/** Deletes the keyframe selected on the timeline; false when none is selected. */
+function deleteSelectedKeyframe() {
+  const track = keyRefTrack(selectedKeyRef);
+  const command = track && keyTrackCommand(track.target, track.keys, track.time, () => null);
+  if (!command) return false;
+  const ref = selectedKeyRef;
+  selectedKeyRef = "";
+  if (applyCommands([command], editLabel("Excluir keyframe", "Delete keyframe"))) return true;
+  selectedKeyRef = ref;
+  return false;
+}
+
+function stepTime(frames: number) {
+  if (!project) return;
+  stopPlayback();
+  setTime(snapFrame(currentTime) + frames / project.settings.fps);
+}
+
+/** Transport shortcuts (not while typing). Returns true when the key was used. */
+function handleTransportKey(event: KeyboardEvent) {
+  if (!project || event.ctrlKey || event.metaKey) return false;
+  if (event.altKey) {
+    if (event.code !== "KeyX") return false;
+    clearWorkArea();
+    return true;
+  }
+  const key = event.key.toLowerCase();
+  if (event.repeat && event.code !== "Comma" && event.code !== "Period" && key !== "j" && !event.shiftKey) return true;
+  if (event.code === "Comma" || event.code === "Period") {
+    stepTime((event.code === "Comma" ? -1 : 1) * (event.shiftKey ? 10 : 1));
+    return true;
+  }
+  if (event.key === "?") {
+    openShortcutsPanel(language);
+    return true;
+  }
+  if (event.shiftKey) return false;
+  if (key === "k") togglePlayback();
+  else if (key === "l") {
+    if (!playing) togglePlayback();
+  } else if (key === "j") {
+    stopPlayback();
+    setTime(currentTime - 1);
+  } else if (event.key === "Home") {
+    stopPlayback();
+    setTime(0);
+  } else if (event.key === "End") {
+    stopPlayback();
+    setTime(project.settings.duration);
+  } else if (key === "i") setWorkAreaEdge("in");
+  else if (key === "o") setWorkAreaEdge("out");
+  else return false;
+  return true;
+}
+
+let suppressKeyClick = false;
+
+/** Dragging a keyframe diamond moves it in time (one undo step); a plain tap still selects it. */
+function bindKeyframeDrag(scrubArea: HTMLElement) {
+  scrubArea.querySelectorAll<HTMLElement>("[data-key-ref]").forEach((dot) => dot.addEventListener("pointerdown", (event) => {
+    if (!project || event.button !== 0) return;
+    const info = keyRefTrack(dot.dataset.keyRef!);
+    if (!info) return;
+    const parts = dot.dataset.keyRef!.split("|");
+    const startX = event.clientX;
+    let gesture: Gesture | null = null;
+    let ref = dot.dataset.keyRef!;
+    dot.setPointerCapture(event.pointerId);
+    const move = (moveEvent: PointerEvent) => {
+      if (!project) return;
+      if (!gesture) {
+        if (Math.abs(moveEvent.clientX - startX) < 4) return;
+        stopPlayback();
+        endEditSession();
+        gesture = beginGesture(editLabel("Mover keyframe", "Move keyframe"));
+      }
+      const time = clamp(snapTimelineTime(timelineTimeFromPointer(moveEvent, scrubArea), scrubArea, "", "", moveEvent.altKey), 0, project.settings.duration);
+      showSnapGuide(lastSnap);
+      const clash = info.keys.some((key) => Math.abs(key.time - info.time) > keyframeTolerance() && Math.abs(key.time - time) <= keyframeTolerance());
+      const command = clash ? null : keyTrackCommand(info.target, info.keys, info.time, (key) => ({ ...key, time }));
+      if (!command || !gesture.preview([command])) return;
+      parts[2] = String(time);
+      ref = parts.join("|");
+      dot.style.left = `${time / project.settings.duration * 100}%`;
+      dot.dataset.keyRef = ref;
+      void renderFrame();
+    };
+    const stop = (upEvent: PointerEvent) => {
+      dot.removeEventListener("pointermove", move);
+      dot.removeEventListener("pointerup", stop);
+      dot.removeEventListener("pointercancel", stop);
+      if (dot.hasPointerCapture(upEvent.pointerId)) dot.releasePointerCapture(upEvent.pointerId);
+      showSnapGuide(null);
+      if (!gesture) return;
+      suppressKeyClick = true;
+      window.setTimeout(() => { suppressKeyClick = false; }, 0);
+      (gesture as Gesture).end();
+      selectedKeyRef = ref;
+      if (parts[0] !== "__post__") selectedLayerId = parts[0];
+      selectedAudioTrackId = "";
+      selectedEffectId = parts[1].startsWith("fx:") ? parts[1].split(":")[1] : "";
+      updateLayerStack();
+      updateInspector();
+      updateTimeline();
+    };
+    dot.addEventListener("pointermove", move);
+    dot.addEventListener("pointerup", stop);
+    dot.addEventListener("pointercancel", stop);
+  }));
+}
+
+/** Alt+drag: copies the clip (with its linked audio) so it starts at the given time. */
+function duplicateClipAt(layerId: string, startTime: number, length: number, trackId = "") {
+  if (!project) return;
+  const fps = project.settings.fps;
+  const newLayerId = uid("layer");
+  const end = startTime + length;
+  const prefix: VctCommand[] = end > project.settings.duration + 1e-6
+    ? [{ type: "composition.set", props: { duration: Math.min(MAX_TIMELINE_SECONDS, Math.ceil(end * fps - 1e-6) / fps) } }]
+    : [];
+  const duplicate: VctCommand = { type: "clip.duplicate", layerId, startTime, newLayerId };
+  const label = editLabel("Duplicar clipe", "Duplicate clip");
+  const select = () => {
+    selectedClipIds.clear();
+    selectedLayerId = newLayerId;
+    selectedAudioTrackId = "";
+    selectedEffectId = "";
+    selectedKeyRef = "";
+  };
+  const withTrack: VctCommand[] = trackId ? [duplicate, { type: "clip.move", layerId: newLayerId, startTime, trackId }] : [duplicate];
+  if (trackId && applyCommands([...prefix, ...withTrack], label, { clipEdit: true, select })) return;
+  if (applyCommands([...prefix, duplicate], label, { clipEdit: true, select })) {
+    setStatus(language === "pt-BR" ? "CLIPE DUPLICADO" : "CLIP DUPLICATED");
+  }
 }
 
 function bindTimeline() {
   app.querySelector("#play")?.addEventListener("click", togglePlayback);
   app.querySelector("#split-clip")?.addEventListener("click", splitAtPlayhead);
+  app.querySelector("#area-in")?.addEventListener("click", () => setWorkAreaEdge("in"));
+  app.querySelector("#area-out")?.addEventListener("click", () => setWorkAreaEdge("out"));
+  app.querySelector("#area-clear")?.addEventListener("click", clearWorkArea);
+  app.querySelector("#close-gaps")?.addEventListener("click", closeGaps);
   app.querySelector("#overlap-mode")?.addEventListener("click", () => {
     overlapMode = !overlapMode;
     localStorage.setItem("nt-vct-overlap-mode", overlapMode ? "1" : "0");
@@ -2893,7 +4124,6 @@ function bindTimeline() {
   });
   app.querySelector("#record-mode")?.addEventListener("click", () => {
     if (recordMode) finalizeRecordedAutomation();
-    else snapshot();
     recordMode = !recordMode;
     const button = app.querySelector<HTMLButtonElement>("#record-mode");
     button?.classList.toggle("is-active", recordMode);
@@ -2936,6 +4166,11 @@ function bindTimeline() {
     }
     updateTimeline();
   }));
+  app.querySelector("#add-track")?.addEventListener("click", addEmptyTrack);
+  app.querySelectorAll<HTMLElement>("[data-track-name]").forEach((element) => element.addEventListener("dblclick", (event) => {
+    event.stopPropagation();
+    beginTrackRename(element);
+  }));
   bindTimelineOrderDrag();
   bindCurveTools();
   app.querySelector<HTMLSelectElement>("#duration-unit")?.addEventListener("change", (event) => {
@@ -2949,7 +4184,6 @@ function bindTimeline() {
   });
   app.querySelector<HTMLInputElement>("#duration-input")?.addEventListener("change", (event) => {
     if (!project) return;
-    snapshot();
     const input = event.target as HTMLInputElement;
     const parsed = parseDurationValue(input.value, project.settings.fps, durationUnit);
     if (parsed === null || parsed <= 0) {
@@ -2961,22 +4195,32 @@ function bindTimeline() {
     }
     const previous = project.settings.duration;
     const value = clamp(parsed, 1 / project.settings.fps, MAX_TIMELINE_SECONDS);
-    project.settings.duration = value;
-    for (const layer of project.layers) if (Math.abs(layer.endTime - previous) < .001) {
-      const shift = value - previous;
-      layer.endTime = value;
-      layer.fadeOutStart += shift;
-      layer.fadeOutEnd += shift;
-      normalizeFades(layer);
-      if (layer.kind === "video") syncLinkedAudio(layer);
+    // Clipes que terminam no fim antigo acompanham o novo fim (o áudio vinculado segue o vídeo).
+    const followEnd = (item: Layer | AudioTrack) => {
+      const moved = { ...item, endTime: value, fadeOutStart: item.fadeOutStart + value - previous, fadeOutEnd: item.fadeOutEnd + value - previous };
+      normalizeFades(moved);
+      return { endTime: moved.endTime, fadeInStart: moved.fadeInStart, fadeInEnd: moved.fadeInEnd, fadeOutStart: moved.fadeOutStart, fadeOutEnd: moved.fadeOutEnd };
+    };
+    const atEnd = (item: Layer | AudioTrack) => Math.abs(item.endTime - previous) < .001;
+    const follow: VctCommand[] = [
+      ...project.layers.filter(atEnd).map((layer): VctCommand => ({ type: "layer.set", layerId: layer.id, props: followEnd(layer) })),
+      ...project.audioTracks.filter((track) => atEnd(track) && !(track.linked && project!.layers.some((layer) => layer.id === track.linkedLayerId)))
+        .map((track): VctCommand => ({ type: "audio.set", trackId: track.id, props: followEnd(track) })),
+    ];
+    const resize: VctCommand = { type: "composition.set", props: { duration: value } };
+    const applied = applyCommands(value < previous ? [...follow, resize] : [resize, ...follow], editLabel("Duração da composição", "Composition duration"), {
+      select() { currentTime = clamp(currentTime, 0, value); },
+    });
+    if (!applied) {
+      input.value = formatDurationValue(project.settings.duration, project.settings.fps, durationUnit);
+      return;
     }
-    currentTime = clamp(currentTime, 0, value);
-    updateTimeline();
     setTime(currentTime);
   });
   app.querySelectorAll<HTMLElement>("[data-key-ref]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
+      if (suppressKeyClick) return;
       const [layerId, property, time] = button.dataset.keyRef!.split("|");
       app.querySelectorAll(".key-dot.is-selected").forEach((item) => item.classList.remove("is-selected"));
       button.classList.add("is-selected");
@@ -2994,31 +4238,32 @@ function bindTimeline() {
     });
     button.addEventListener("dblclick", (event) => {
       event.stopPropagation();
-      const [layerId, property, time] = button.dataset.keyRef!.split("|");
-      const layer = layerId === "__post__" ? undefined : project!.layers.find((item) => item.id === layerId);
-      snapshot();
-      if (property.startsWith("fx:")) {
-        const [, effectId, parameter] = property.split(":");
-        const effect = layerId === "__post__"
-          ? project!.postEffects.find((item) => item.id === effectId)
-          : layer?.effects.find((item) => item.id === effectId);
-        if (effect) effect.keyframes[parameter] = effect.keyframes[parameter].filter((key) => Math.abs(key.time - Number(time)) > keyframeTolerance());
-      } else if (layer) {
-        layer.keyframes[property] = layer.keyframes[property].filter((key) => Math.abs(key.time - Number(time)) > keyframeTolerance());
+      const track = keyRefTrack(button.dataset.keyRef!);
+      const command = track && keyTrackCommand(track.target, track.keys, track.time, () => null);
+      if (!command) return;
+      const wasSelected = selectedKeyRef === button.dataset.keyRef;
+      if (wasSelected) selectedKeyRef = "";
+      if (!applyCommands([command], editLabel("Excluir keyframe", "Delete keyframe"))) {
+        if (wasSelected) selectedKeyRef = button.dataset.keyRef!;
       }
-      if (selectedKeyRef === button.dataset.keyRef) selectedKeyRef = "";
-      updateTimeline();
-      updateInspector();
-      void renderFrame();
     });
   });
 
   const scrubArea = app.querySelector<HTMLElement>(".timeline-scroll");
   if (!scrubArea) return;
   const labels = app.querySelector<HTMLElement>(".timeline-labels");
+  bindBinDrop(scrubArea);
   scrubArea.addEventListener("scroll", () => {
     if (labels && Math.abs(labels.scrollTop - scrubArea.scrollTop) > 1) labels.scrollTop = scrubArea.scrollTop;
+    syncMinimap();
   });
+  scrubArea.addEventListener("wheel", (event) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    applyTimelineZoom(timelineZoomX * Math.exp(-event.deltaY * (event.deltaMode === 1 ? .05 : .0025)), event.clientX);
+  }, { passive: false });
+  bindMinimap(scrubArea);
+  bindKeyframeDrag(scrubArea);
   labels?.addEventListener("scroll", () => {
     if (Math.abs(scrubArea.scrollTop - labels.scrollTop) > 1) scrubArea.scrollTop = labels.scrollTop;
   });
@@ -3027,10 +4272,12 @@ function bindTimeline() {
     event.preventDefault();
     event.stopPropagation();
     stopPlayback();
-    const layer = project.layers.find((item) => item.id === handle.dataset.trimClip);
-    if (!layer) return;
-    selectLayerById(layer.id, false);
-    snapshot();
+    const found = project.layers.find((item) => item.id === handle.dataset.trimClip);
+    if (!found) return;
+    selectLayerById(found.id, false);
+    endEditSession();
+    const layer = structuredClone(found);
+    const gesture = beginGesture(editLabel("Aparar clipe", "Trim clip"));
     const edge = handle.dataset.trimEdge as "start" | "end";
     const initialStart = layer.startTime;
     const initialEnd = layer.endTime;
@@ -3043,30 +4290,34 @@ function bindTimeline() {
     const neighbors = overlapMode ? { previousEnd: 0, nextStart: Number.POSITIVE_INFINITY } : clipNeighbors(project, layer.id);
     handle.setPointerCapture(event.pointerId);
     const pointerTime = (moveEvent: PointerEvent) => {
-      return snapTimelineTime(timelineTimeFromPointer(moveEvent, scrubArea), scrubArea, layer.id, "", moveEvent.altKey);
+      const snapped = snapTimelineTime(timelineTimeFromPointer(moveEvent, scrubArea), scrubArea, layer.id, "", moveEvent.altKey);
+      showSnapGuide(lastSnap);
+      return snapped;
     };
     const move = (moveEvent: PointerEvent) => {
       const time = pointerTime(moveEvent);
+      const draft = { ...layer };
       if (edge === "start") {
         const nextStart = clamp(time, neighbors.previousEnd, initialEnd - minLength);
         const delta = nextStart - initialStart;
-        layer.startTime = nextStart;
+        draft.startTime = nextStart;
         if (layer.kind === "video") {
-          if (layer.reverse) layer.sourceOut = clamp(initialSourceOut - delta * speed, initialSourceIn + .001, mediaDuration);
-          else layer.sourceIn = clamp(initialSourceIn + delta * speed, 0, initialSourceOut - .001);
+          if (layer.reverse) draft.sourceOut = clamp(initialSourceOut - delta * speed, initialSourceIn + .001, mediaDuration);
+          else draft.sourceIn = clamp(initialSourceIn + delta * speed, 0, initialSourceOut - .001);
         }
       } else {
-        layer.endTime = clamp(time, initialStart + minLength, Math.min(project!.settings.duration, neighbors.nextStart));
+        draft.endTime = clamp(time, initialStart + minLength, Math.min(project!.settings.duration, neighbors.nextStart));
         if (layer.kind === "video") {
-          const naturalTimelineDuration = (initialSourceOut - layer.sourceIn) / speed;
-          layer.loop = layer.endTime - layer.startTime > naturalTimelineDuration + minLength / 2;
+          const naturalTimelineDuration = (initialSourceOut - draft.sourceIn) / speed;
+          draft.loop = draft.endTime - draft.startTime > naturalTimelineDuration + minLength / 2;
         }
       }
-      normalizeFades(layer);
-      if (layer.kind === "video") syncLinkedAudio(layer);
+      normalizeFades(draft);
+      const props = changedProps(layer, draft, TRIM_FIELDS);
+      if (!gesture.preview(Object.keys(props).length ? [{ type: "layer.set", layerId: layer.id, props, ...(overlapMode ? { allowOverlap: true } : {}) }] : [])) return;
       if (clip) {
-        clip.style.left = `${layer.startTime / project!.settings.duration * 100}%`;
-        clip.style.width = `${(layer.endTime - layer.startTime) / project!.settings.duration * 100}%`;
+        clip.style.left = `${draft.startTime / project!.settings.duration * 100}%`;
+        clip.style.width = `${(draft.endTime - draft.startTime) / project!.settings.duration * 100}%`;
       }
       if (layer.kind === "video") for (const track of project!.audioTracks) {
         if (track.linked && track.linkedLayerId === layer.id) updateTimelineClipStyles(track.id, track.startTime, track.endTime, true);
@@ -3079,8 +4330,8 @@ function bindTimeline() {
       handle.removeEventListener("pointerup", stop);
       handle.removeEventListener("pointercancel", stop);
       if (handle.hasPointerCapture(upEvent.pointerId)) handle.releasePointerCapture(upEvent.pointerId);
-      project!.modifiedAt = new Date().toISOString();
-      afterClipEdit();
+      showSnapGuide(null);
+      gesture.end({ clipEdit: true });
       updateInspector();
       updateTimeline();
     };
@@ -3112,88 +4363,92 @@ function bindTimeline() {
       : undefined;
     if (layer) selectLayerById(layer.id, false);
     else if (track) selectAudioTrackById(track.id, false);
-    snapshot();
+    endEditSession();
+    const gesture = beginGesture(editLabel("Mover clipe", "Move clip"));
+    // O áudio vinculado anda pelo vídeo, que leva junto fades e keyframes.
+    const movingLayerId = (layer || linkedLayer)?.id;
+    // Alt + arrastar um clipe visual duplica-o (com o áudio vinculado) no ponto solto; o original fica.
+    // Em clipes de áudio o Alt continua só ignorando o snap.
+    const duplicating = Boolean(layer) && event.altKey;
+    let ghost: HTMLElement | null = null;
+    const layerId = layer?.id || "";
+    const audioTrackId = track?.id || "";
+    const sourceTrackId = layer ? trackIdOf(layer) : "";
+    const fps = project.settings.fps;
+    const baseDuration = project.settings.duration;
     const initialStart = (layer || track)!.startTime;
     const initialEnd = (layer || track)!.endTime;
     const length = initialEnd - initialStart;
-    const initialFades = {
-      fadeInStart: (layer || track)!.fadeInStart,
-      fadeInEnd: (layer || track)!.fadeInEnd,
-      fadeOutStart: (layer || track)!.fadeOutStart,
-      fadeOutEnd: (layer || track)!.fadeOutEnd,
-    };
-    const animatedLayer = layer || linkedLayer;
-    const layerKeyTimes = animatedLayer ? new Map<string, number[]>(Object.entries(animatedLayer.keyframes).map(([property, keys]) => [property, keys.map((key) => key.time)])) : null;
-    const effectKeyTimes = animatedLayer ? new Map<string, Map<string, number[]>>(animatedLayer.effects.map((effect) => [effect.id, new Map(Object.entries(effect.keyframes).map(([property, keys]) => [property, keys.map((key) => key.time)]))])) : null;
     const startX = event.clientX;
     const timelinePixelWidth = timelineContentRect(scrubArea).width;
     clip.setPointerCapture(event.pointerId);
     // Na própria faixa, o clipe só anda no espaço livre entre os vizinhos.
-    const neighbors = layer && !overlapMode ? clipNeighbors(project, layer.id) : { previousEnd: 0, nextStart: Number.POSITIVE_INFINITY };
+    const neighbors = layer && !overlapMode && !duplicating ? clipNeighbors(project, layer.id) : { previousEnd: 0, nextStart: Number.POSITIVE_INFINITY };
     const minStart = neighbors.previousEnd;
     const maxStart = Math.min(MAX_TIMELINE_SECONDS, neighbors.nextStart) - length;
+    // clip.move exige início num frame; os limites também caem na grade.
+    const onFrames = Boolean(movingLayerId);
+    const lowStart = onFrames ? Math.ceil(minStart * fps - 1e-6) / fps : minStart;
+    const highStart = onFrames ? Math.floor(maxStart * fps + 1e-6) / fps : maxStart;
+    // Durante o arrasto o clipe fica dentro da composição; a duração cresce ao soltar.
+    const fitStart = Math.max(0, onFrames ? Math.floor((baseDuration - length) * fps + 1e-6) / fps : baseDuration - length);
     // Arrastar na vertical sobre outra faixa visual muda o clipe de faixa ao soltar.
     let dropTrackId = "";
+    let wantedStart = initialStart;
     const markDropTarget = (moveEvent: PointerEvent) => {
       if (!layer) return;
       const row = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest<HTMLElement>(".timeline-track[data-track-id]");
       const candidate = row?.dataset.trackId || "";
-      dropTrackId = candidate && candidate !== trackIdOf(layer) ? candidate : "";
+      dropTrackId = candidate && candidate !== sourceTrackId ? candidate : "";
       app.querySelectorAll(".timeline-track.is-drop-target").forEach((item) => item.classList.remove("is-drop-target"));
       if (dropTrackId) row!.classList.add("is-drop-target");
     };
+    const moveCommands = (start: number, options: { extend?: boolean; trackId?: string } = {}) => {
+      const commands: VctCommand[] = [];
+      const end = start + length;
+      if (options.extend && end > baseDuration + 1e-6) {
+        commands.push({ type: "composition.set", props: { duration: Math.min(MAX_TIMELINE_SECONDS, Math.ceil(end * fps - 1e-6) / fps) } });
+      }
+      if (movingLayerId) {
+        commands.push({
+          type: "clip.move", layerId: movingLayerId, startTime: start,
+          ...(options.trackId ? { trackId: options.trackId } : {}), ...(overlapMode ? { allowOverlap: true } : {}),
+        });
+      } else commands.push({ type: "audio.move", trackId: audioTrackId, startTime: start });
+      return commands;
+    };
     const move = (moveEvent: PointerEvent) => {
       markDropTarget(moveEvent);
-      const delta = (moveEvent.clientX - startX) / Math.max(1, timelinePixelWidth) * project!.settings.duration;
+      const delta = (moveEvent.clientX - startX) / Math.max(1, timelinePixelWidth) * baseDuration;
       // O clipe pode passar do fim da composição; a duração é estendida ao soltar.
       const nextStart = clamp(initialStart + delta, minStart, maxStart);
-      const snapped = clamp(snapClipStart(nextStart, length, scrubArea, layer?.id || "", track?.id || "", moveEvent.altKey), minStart, maxStart);
-      if (layer) {
-        layer.startTime = snapped;
-        layer.endTime = snapped + length;
-        const shift = snapped - initialStart;
-        layer.fadeInStart = initialFades.fadeInStart + shift;
-        layer.fadeInEnd = initialFades.fadeInEnd + shift;
-        layer.fadeOutStart = initialFades.fadeOutStart + shift;
-        layer.fadeOutEnd = initialFades.fadeOutEnd + shift;
-        for (const [property, times] of layerKeyTimes || []) layer.keyframes[property].forEach((key, index) => key.time = clamp(times[index] + shift, 0, MAX_TIMELINE_SECONDS));
-        for (const effect of layer.effects) {
-          const sourceTimes = effectKeyTimes?.get(effect.id);
-          if (!sourceTimes) continue;
-          for (const [property, times] of sourceTimes) effect.keyframes[property].forEach((key, index) => key.time = clamp(times[index] + shift, 0, MAX_TIMELINE_SECONDS));
+      const snapped = clamp(snapClipStart(nextStart, length, scrubArea, layerId, audioTrackId, moveEvent.altKey), minStart, maxStart);
+      if (lowStart > highStart + 1e-9) return;
+      wantedStart = clamp(onFrames ? Math.round(snapped * fps) / fps : snapped, lowStart, highStart);
+      showSnapGuide(lastSnap);
+      if (duplicating) {
+        if (!ghost) {
+          ghost = document.createElement("span");
+          ghost.className = "clip-range clip-ghost";
+          ghost.style.width = clip.style.width || `${length / baseDuration * 100}%`;
+          clip.parentElement?.append(ghost);
         }
+        ghost.style.left = `${wantedStart / baseDuration * 100}%`;
+        return;
+      }
+      const previewStart = Math.min(wantedStart, fitStart);
+      if (previewStart < lowStart - 1e-9 || !gesture.preview(moveCommands(previewStart))) return;
+      if (layer) {
         if (layer.kind === "video") {
-          syncLinkedAudio(layer);
           for (const linked of project!.audioTracks) {
             if (linked.linked && linked.linkedLayerId === layer.id) updateTimelineClipStyles(linked.id, linked.startTime, linked.endTime, true);
           }
         }
-      } else if (track) {
-        track.startTime = snapped;
-        track.endTime = snapped + length;
-        const shift = snapped - initialStart;
-        track.fadeInStart = initialFades.fadeInStart + shift;
-        track.fadeInEnd = initialFades.fadeInEnd + shift;
-        track.fadeOutStart = initialFades.fadeOutStart + shift;
-        track.fadeOutEnd = initialFades.fadeOutEnd + shift;
-        if (linkedLayer) {
-          linkedLayer.startTime = track.startTime;
-          linkedLayer.endTime = track.endTime;
-          linkedLayer.fadeInStart = track.fadeInStart;
-          linkedLayer.fadeInEnd = track.fadeInEnd;
-          linkedLayer.fadeOutStart = track.fadeOutStart;
-          linkedLayer.fadeOutEnd = track.fadeOutEnd;
-          for (const [property, times] of layerKeyTimes || []) linkedLayer.keyframes[property].forEach((key, index) => key.time = clamp(times[index] + shift, 0, MAX_TIMELINE_SECONDS));
-          for (const effect of linkedLayer.effects) {
-            const sourceTimes = effectKeyTimes?.get(effect.id);
-            if (!sourceTimes) continue;
-            for (const [property, times] of sourceTimes) effect.keyframes[property].forEach((key, index) => key.time = clamp(times[index] + shift, 0, MAX_TIMELINE_SECONDS));
-          }
-          syncLinkedAudio(linkedLayer);
-          updateTimelineClipStyles(linkedLayer.id, linkedLayer.startTime, linkedLayer.endTime);
-        }
+      } else if (linkedLayer) {
+        const owner = project!.layers.find((item) => item.id === linkedLayer.id);
+        if (owner) updateTimelineClipStyles(owner.id, owner.startTime, owner.endTime);
       }
-      clip.style.left = `${snapped / project!.settings.duration * 100}%`;
+      clip.style.left = `${wantedStart / baseDuration * 100}%`;
       void renderFrame();
     };
     const stop = (upEvent: PointerEvent) => {
@@ -3201,14 +4456,25 @@ function bindTimeline() {
       clip.removeEventListener("pointerup", stop);
       clip.removeEventListener("pointercancel", stop);
       if (clip.hasPointerCapture(upEvent.pointerId)) clip.releasePointerCapture(upEvent.pointerId);
-      project!.modifiedAt = new Date().toISOString();
-      extendDurationToContent();
-      if (layer && dropTrackId) {
-        if (moveClipToTrack(project!, layer.id, dropTrackId, overlapMode)) syncLinkedAudioOrder();
-        else setStatus(language === "pt-BR" ? "FAIXA OCUPADA NESSE TRECHO" : "TRACK IS OCCUPIED AT THAT TIME");
+      showSnapGuide(null);
+      ghost?.remove();
+      if (duplicating) {
+        app.querySelectorAll(".timeline-track.is-drop-target").forEach((item) => item.classList.remove("is-drop-target"));
+        if (Math.abs(wantedStart - initialStart) > 1e-6 || dropTrackId) duplicateClipAt(movingLayerId!, wantedStart, length, dropTrackId);
+        updateTimeline();
+        return;
+      }
+      if (wantedStart !== initialStart || dropTrackId) {
+        let committed = false;
+        if (layer && dropTrackId) {
+          const withTrack = moveCommands(wantedStart, { extend: true, trackId: dropTrackId });
+          committed = gesture.preview([...withTrack, ...linkedAudioOrderCommands(withTrack)]);
+          if (!committed) setStatus(language === "pt-BR" ? "FAIXA OCUPADA NESSE TRECHO" : "TRACK IS OCCUPIED AT THAT TIME");
+        }
+        if (!committed) gesture.preview(moveCommands(wantedStart, { extend: true }));
       }
       app.querySelectorAll(".timeline-track.is-drop-target").forEach((item) => item.classList.remove("is-drop-target"));
-      afterClipEdit();
+      gesture.end({ clipEdit: true });
       updateLayerStack();
       updateInspector();
       updateTimeline();
@@ -3223,10 +4489,12 @@ function bindTimeline() {
     event.preventDefault();
     event.stopPropagation();
     stopPlayback();
-    const track = project.audioTracks.find((item) => item.id === handle.dataset.trimAudio);
-    if (!track) return;
-    selectAudioTrackById(track.id, false);
-    snapshot();
+    const found = project.audioTracks.find((item) => item.id === handle.dataset.trimAudio);
+    if (!found) return;
+    selectAudioTrackById(found.id, false);
+    endEditSession();
+    const track = structuredClone(found);
+    const gesture = beginGesture(editLabel("Aparar áudio", "Trim audio"));
     const edge = handle.dataset.trimEdge as "start" | "end";
     const initialStart = track.startTime;
     const initialEnd = track.endTime;
@@ -3237,18 +4505,21 @@ function bindTimeline() {
     handle.setPointerCapture(event.pointerId);
     const move = (moveEvent: PointerEvent) => {
       const time = snapTimelineTime(timelineTimeFromPointer(moveEvent, scrubArea), scrubArea, "", track.id, moveEvent.altKey);
+      showSnapGuide(lastSnap);
+      const draft = { ...track };
       if (edge === "start") {
         const next = clamp(time, 0, initialEnd - minLength);
         const delta = next - initialStart;
-        track.startTime = next;
-        track.sourceIn = clamp(initialSourceIn + delta * speed, 0, initialSourceOut - .001);
+        draft.startTime = next;
+        draft.sourceIn = clamp(initialSourceIn + delta * speed, 0, initialSourceOut - .001);
       } else {
-        track.endTime = clamp(time, initialStart + minLength, project!.settings.duration);
-        track.loop = track.endTime - track.startTime > (initialSourceOut - track.sourceIn) / speed + minLength / 2;
+        draft.endTime = clamp(time, initialStart + minLength, project!.settings.duration);
+        draft.loop = draft.endTime - draft.startTime > (initialSourceOut - draft.sourceIn) / speed + minLength / 2;
       }
-      normalizeFades(track);
+      normalizeFades(draft);
+      const props = changedProps(track, draft, TRIM_FIELDS);
+      if (!gesture.preview(Object.keys(props).length ? [{ type: "audio.set", trackId: track.id, props }] : [])) return;
       if (track.linked && track.linkedLayerId) {
-        syncLinkedLayer(track);
         const owner = project!.layers.find((item) => item.id === track.linkedLayerId);
         if (owner) {
           updateTimelineClipStyles(owner.id, owner.startTime, owner.endTime);
@@ -3256,14 +4527,15 @@ function bindTimeline() {
           void renderFrame();
         }
       }
-      updateTimelineClipStyles(track.id, track.startTime, track.endTime, true);
+      updateTimelineClipStyles(track.id, draft.startTime, draft.endTime, true);
     };
     const stop = (upEvent: PointerEvent) => {
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", stop);
       handle.removeEventListener("pointercancel", stop);
       if (handle.hasPointerCapture(upEvent.pointerId)) handle.releasePointerCapture(upEvent.pointerId);
-      project!.modifiedAt = new Date().toISOString();
+      showSnapGuide(null);
+      gesture.end({ clipEdit: true });
       updateInspector();
       updateTimeline();
     };
@@ -3281,12 +4553,14 @@ function bindTimeline() {
     const property = handle.dataset.fadeProperty as "fadeInStart" | "fadeInEnd" | "fadeOutStart" | "fadeOutEnd";
     const layerItem = scope === "layer" ? project.layers.find((layer) => layer.id === id) : undefined;
     const audioItem = scope === "audio" ? project.audioTracks.find((track) => track.id === id) : undefined;
-    const item = layerItem || audioItem;
+    const found = layerItem || audioItem;
     const clip = handle.closest<HTMLElement>(".clip-range");
-    if (!item || !clip) return;
+    if (!found || !clip) return;
     if (layerItem) selectLayerById(layerItem.id, false);
     else if (audioItem) selectAudioTrackById(audioItem.id, false);
-    snapshot();
+    endEditSession();
+    const item = structuredClone(found);
+    const gesture = beginGesture(editLabel("Ajustar fade", "Adjust fade"));
     handle.setPointerCapture(event.pointerId);
     const move = (moveEvent: PointerEvent) => {
       const time = snapTimelineTime(
@@ -3296,24 +4570,20 @@ function bindTimeline() {
         audioItem?.id || "",
         moveEvent.altKey,
       );
-      setFadeHandle(item, property.startsWith("fadeIn") ? "in" : "out", time);
-      updateFadeClipVisuals(clip, item);
-      if (layerItem?.kind === "video") syncLinkedAudio(layerItem);
-      if (audioItem?.linked && audioItem.linkedLayerId) {
-        const owner = project!.layers.find((layer) => layer.id === audioItem.linkedLayerId);
-        if (owner) {
-          owner.fadeInStart = audioItem.fadeInStart;
-          owner.fadeInEnd = audioItem.fadeInEnd;
-          owner.fadeOutStart = audioItem.fadeOutStart;
-          owner.fadeOutEnd = audioItem.fadeOutEnd;
-        }
-      }
+      showSnapGuide(lastSnap);
+      const draft = { ...item };
+      setFadeHandle(draft, property.startsWith("fadeIn") ? "in" : "out", time);
+      const props = changedProps(item, draft, FADE_FIELDS);
+      const command: VctCommand = scope === "layer"
+        ? { type: "layer.set", layerId: id, props }
+        : { type: "audio.set", trackId: id, props };
+      if (!gesture.preview(Object.keys(props).length ? [command] : [])) return;
+      updateFadeClipVisuals(clip, draft);
       const inspectorInput = app.querySelector<HTMLInputElement>(scope === "layer" ? `[data-layer-property="${property}"]` : `[data-audio-property="${property}"]`);
       if (inspectorInput) {
-        inspectorInput.value = String(Number(item[property].toFixed(4)));
+        inspectorInput.value = String(Number(draft[property].toFixed(4)));
         updateParamScrub(inspectorInput);
       }
-      project!.modifiedAt = new Date().toISOString();
       void renderFrame();
     };
     const stop = (upEvent: PointerEvent) => {
@@ -3321,6 +4591,8 @@ function bindTimeline() {
       handle.removeEventListener("pointerup", stop);
       handle.removeEventListener("pointercancel", stop);
       if (handle.hasPointerCapture(upEvent.pointerId)) handle.releasePointerCapture(upEvent.pointerId);
+      showSnapGuide(null);
+      gesture.end({ clipEdit: true });
       updateInspector();
       updateTimeline();
     };
@@ -3330,7 +4602,7 @@ function bindTimeline() {
   }));
   let scrubbing = false;
   const scrubToPointer = (event: PointerEvent) => {
-    if (!project) return;
+    if (!project || pinchPointers.size > 1) return;
     setTime(snapTimelineTime(timelineTimeFromPointer(event, scrubArea), scrubArea, "", "", event.altKey, true), false);
   };
   scrubArea.addEventListener("pointerdown", (event) => {
@@ -3375,23 +4647,21 @@ function bindTimelineOrderDrag() {
       if (!project || !draggedId) return;
       const targetId = item.dataset.timelineOrderLayer || item.dataset.timelineOrderAudio || "";
       if (!targetId || targetId === draggedId) return;
-      const list = draggedType === "layer" ? project.layers : project.audioTracks;
-      const source = list.findIndex((entry) => entry.id === draggedId);
-      const target = list.findIndex((entry) => entry.id === targetId);
-      if (source < 0 || target < 0) return;
-      snapshot();
       if (draggedType === "layer") {
         // Arrastar a linha move a faixa inteira para antes/depois da faixa alvo.
-        placeTrack(project, trackIdOf(project.layers[source]), trackIdOf(project.layers[target]), source < target);
-        syncLinkedAudioOrder();
+        const source = project.layers.find((layer) => layer.id === draggedId);
+        const target = project.layers.find((layer) => layer.id === targetId);
+        if (!source || !target) return;
+        const tracks = visualTracks(project).map((track) => track.id);
+        const index = trackDropIndex(trackIdOf(source), trackIdOf(target), tracks.indexOf(trackIdOf(source)) < tracks.indexOf(trackIdOf(target)));
+        if (index !== null) reorderLayerTracks(trackIdOf(source), index);
       } else {
-        const [moved] = list.splice(source, 1);
-        list.splice(target, 0, moved as never);
+        const lanes = [...new Set(project.audioTracks.map(laneIdOf))];
+        const source = project.audioTracks.find((track) => track.id === draggedId);
+        const target = project.audioTracks.find((track) => track.id === targetId);
+        if (!source || !target || laneIdOf(source) === laneIdOf(target)) return;
+        applyCommands([{ type: "audio.reorderLane", laneId: laneIdOf(source), index: lanes.indexOf(laneIdOf(target)) }], editLabel("Ordem do áudio", "Audio order"));
       }
-      project.modifiedAt = new Date().toISOString();
-      updateLayerStack();
-      updateTimeline();
-      void renderFrame();
     });
   });
 }
@@ -3405,21 +4675,22 @@ function updateCurveTools() {
 
 function bindCurveTools() {
   app.querySelector<HTMLSelectElement>("#timeline-key-easing")?.addEventListener("change", (event) => {
-    const keyframe = keyframeFromRef();
-    if (!keyframe) return;
-    snapshot();
-    keyframe.easing = (event.target as HTMLSelectElement).value as Easing;
-    if (keyframe.easing === "bezier") keyframe.curve ??= .75;
+    const track = keyRefTrack(selectedKeyRef);
+    const command = track && keyTrackCommand(track.target, track.keys, track.time, withEasing((event.target as HTMLSelectElement).value as Easing));
+    if (!command || !applyCommands([command], editLabel("Curva", "Easing"), { panels: false })) return;
     updateCurveTools();
     updateInspector();
-    void renderFrame();
   });
-  app.querySelector<HTMLInputElement>("#timeline-bezier-strength")?.addEventListener("input", (event) => {
-    const keyframe = keyframeFromRef();
-    if (!keyframe) return;
-    keyframe.curve = Number((event.target as HTMLInputElement).value);
-    project!.modifiedAt = new Date().toISOString();
-    void renderFrame();
+  const strength = app.querySelector<HTMLInputElement>("#timeline-bezier-strength");
+  strength?.addEventListener("blur", endEditSession);
+  strength?.addEventListener("change", endEditSession);
+  strength?.addEventListener("input", () => {
+    const track = keyRefTrack(selectedKeyRef);
+    if (!track || !Number.isFinite(strength.valueAsNumber)) return;
+    const command = keyTrackCommand(track.target, track.keys, track.time, (key) => ({ ...key, curve: strength.valueAsNumber }));
+    if (!command) return;
+    const session = openEditSession(`curve:${selectedKeyRef}`, editLabel("Curva", "Easing"));
+    if (previewEdit(session, [["set", command]])) void renderFrame();
   });
 }
 
@@ -3462,15 +4733,13 @@ function bindDragAndDrop(root: ParentNode = app) {
     item.addEventListener("drop", (event) => {
       event.preventDefault();
       if (!project || !draggedLayer || draggedLayer === item.dataset.layerId) return;
-      snapshot();
       const dragged = project.layers.find((layer) => layer.id === draggedLayer);
       const targetLayer = project.layers.find((layer) => layer.id === item.dataset.layerId);
       const rect = item.getBoundingClientRect();
       const after = event.clientY >= rect.top + rect.height / 2;
-      if (dragged && targetLayer) placeTrack(project, trackIdOf(dragged), trackIdOf(targetLayer), after);
-      syncLinkedAudioOrder();
-      project.modifiedAt = new Date().toISOString();
-      renderEditorPreservingCanvas();
+      if (!dragged || !targetLayer) return;
+      const index = trackDropIndex(trackIdOf(dragged), trackIdOf(targetLayer), after);
+      if (index !== null) reorderLayerTracks(trackIdOf(dragged), index);
     });
   });
   root.querySelectorAll<HTMLElement>("[data-effect-id]").forEach((item) => {
@@ -3498,15 +4767,12 @@ function bindDragAndDrop(root: ParentNode = app) {
         candidate.some((effect) => effect.id === draggedEffect)
         && candidate.some((effect) => effect.id === targetId));
       if (!list) return;
-      snapshot();
-      const source = list.findIndex((effect) => effect.id === draggedEffect);
       const rect = item.getBoundingClientRect();
       const after = event.clientY >= rect.top + rect.height / 2;
-      const [moved] = list.splice(source, 1);
-      const target = list.findIndex((effect) => effect.id === targetId);
-      list.splice(target + (after ? 1 : 0), 0, moved);
-      project.modifiedAt = new Date().toISOString();
+      const target = list.filter((effect) => effect.id !== draggedEffect).findIndex((effect) => effect.id === targetId);
+      if (!applyCommands([{ type: "effect.reorder", effectId: draggedEffect, index: target + (after ? 1 : 0) }], editLabel("Ordem dos efeitos", "Effect order"), { panels: false })) return;
       renderEditorPreservingCanvas();
+      refreshHistoryButtons();
     });
   });
 }
@@ -3653,16 +4919,21 @@ function bindTransformBoxInteraction() {
     const directionX = operation.includes("w") ? -1 : operation.includes("e") ? 1 : 0;
     const directionY = operation.includes("n") ? -1 : operation.includes("s") ? 1 : 0;
     let createdKeyframe = false;
-    snapshot();
+    const layerId = layer.id;
+    const gestureKey = `transform:${layerId}:${operation}`;
+    const gestureLabel = operation === "rotate" ? editLabel("Girar camada", "Rotate layer") : editLabel("Redimensionar camada", "Resize layer");
+    endEditSession();
     handle.setPointerCapture(event.pointerId);
     const move = (moveEvent: PointerEvent) => {
       const nextPointer = point(moveEvent);
+      const session = openEditSession(gestureKey, gestureLabel);
+      let values: Record<string, number>;
       if (operation === "rotate") {
         const angle = Math.atan2(nextPointer.y - origin.y, nextPointer.x - origin.x);
         let rotation = origin.rotation + (angle - originAngle) * 180 / Math.PI;
         const angleSnap = Math.round(rotation / 15) * 15;
         if ((canvasSnap || moveEvent.shiftKey) && Math.abs(rotation - angleSnap) <= 3) rotation = angleSnap;
-        createdKeyframe = setLayerNumericValue(layer, "rotation", rotation) || createdKeyframe;
+        values = { rotation };
       } else {
         const dx = nextPointer.x - originPointer.x;
         const dy = nextPointer.y - originPointer.y;
@@ -3684,12 +4955,11 @@ function bindTransformBoxInteraction() {
         const localShiftY = directionY ? (nextHeight - origin.height) * origin.scaleY * directionY / 2 : 0;
         const nextX = origin.x + localShiftX * Math.cos(angle) - localShiftY * Math.sin(angle);
         const nextY = origin.y + localShiftX * Math.sin(angle) + localShiftY * Math.cos(angle);
-        createdKeyframe = setLayerNumericValue(layer, "width", nextWidth) || createdKeyframe;
-        createdKeyframe = setLayerNumericValue(layer, "height", nextHeight) || createdKeyframe;
-        createdKeyframe = setLayerNumericValue(layer, "x", nextX) || createdKeyframe;
-        createdKeyframe = setLayerNumericValue(layer, "y", nextY) || createdKeyframe;
+        values = { width: nextWidth, height: nextHeight, x: nextX, y: nextY };
       }
-      project!.modifiedAt = new Date().toISOString();
+      const previewed = previewLayerValues(session, layerId, values);
+      if (!previewed) return;
+      createdKeyframe = previewed.created || createdKeyframe;
       syncInspectorValues();
       void renderFrame();
     };
@@ -3698,6 +4968,7 @@ function bindTransformBoxInteraction() {
       handle.removeEventListener("pointerup", stop);
       handle.removeEventListener("pointercancel", stop);
       if (handle.hasPointerCapture(upEvent.pointerId)) handle.releasePointerCapture(upEvent.pointerId);
+      endEditSession();
       updateInspector();
       if (createdKeyframe) requestTimelineRefresh();
       updateTransformBox();
@@ -3711,6 +4982,7 @@ function bindTransformBoxInteraction() {
 function bindCanvasInteraction() {
   const canvas = app.querySelector<HTMLCanvasElement>("#composition-canvas");
   if (!canvas) return;
+  bindInlineTextEditing(canvas);
   let dragging = false;
   let originPointer = { x: 0, y: 0 };
   let originLayer = { x: 0, y: 0 };
@@ -3736,7 +5008,7 @@ function bindCanvasInteraction() {
     }
     const layer = selectedLayer();
     if (!layer || layer.locked || event.button !== 0) return;
-    snapshot();
+    endEditSession();
     dragging = true;
     originPointer = point;
     originLayer = {
@@ -3754,8 +5026,10 @@ function bindCanvasInteraction() {
     const deltaX = point.x - originPointer.x;
     const deltaY = point.y - originPointer.y;
     const snapped = snapCanvasPosition(layer, originLayer.x + deltaX, originLayer.y + deltaY, canvas.getBoundingClientRect(), event.altKey);
-    createdKeyframe = setLayerNumericValue(layer, "x", snapped.x) || createdKeyframe;
-    createdKeyframe = setLayerNumericValue(layer, "y", snapped.y) || createdKeyframe;
+    const session = openEditSession(`canvas:${layer.id}`, editLabel("Mover camada", "Move layer"));
+    const previewed = previewLayerValues(session, layer.id, { x: snapped.x, y: snapped.y });
+    if (!previewed) return;
+    createdKeyframe = previewed.created || createdKeyframe;
     const guideX = app.querySelector<HTMLElement>("#canvas-snap-x");
     const guideY = app.querySelector<HTMLElement>("#canvas-snap-y");
     if (guideX) {
@@ -3766,7 +5040,6 @@ function bindCanvasInteraction() {
       guideY.classList.toggle("is-visible", snapped.guideY !== null);
       if (snapped.guideY !== null) guideY.style.top = `${snapped.guideY / project!.settings.height * 100}%`;
     }
-    project!.modifiedAt = new Date().toISOString();
     syncInspectorValues();
     void renderFrame();
   });
@@ -3776,11 +5049,147 @@ function bindCanvasInteraction() {
     canvas.classList.remove("is-dragging");
     app.querySelectorAll(".canvas-snap-guide").forEach((guide) => guide.classList.remove("is-visible"));
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    endEditSession();
     updateInspector();
     if (createdKeyframe) requestTimelineRefresh();
   };
   canvas.addEventListener("pointerup", stopDragging);
   canvas.addEventListener("pointercancel", stopDragging);
+}
+
+// ---- Edição de texto direto no canvas: duplo clique (ou duplo toque) abre um textarea sobre a caixa.
+let inlineEditor: { layerId: string; textarea: HTMLTextAreaElement; closed: boolean } | null = null;
+
+function positionInlineEditor() {
+  const editor = inlineEditor;
+  const canvas = app.querySelector<HTMLCanvasElement>("#composition-canvas");
+  const layer = project?.layers.find((item) => item.id === editor?.layerId);
+  if (!editor || !canvas || !layer || !renderer || !project) return;
+  const { textarea } = editor;
+  const scale = canvas.getBoundingClientRect().width / project.settings.width;
+  const scaleX = Math.abs(renderer.layerValue(layer, "scaleX", currentTime));
+  const scaleY = Math.abs(renderer.layerValue(layer, "scaleY", currentTime));
+  const width = Math.max(2, renderer.layerValue(layer, "width", currentTime) * scaleX);
+  const height = Math.max(2, renderer.layerValue(layer, "height", currentTime) * scaleY);
+  const fontSize = (renderer.layerValue(layer, "fontSize", currentTime) || 80) * scaleY * scale;
+  const layout = renderer.measureText(layer, currentTime);
+  const lineHeight = layout.lineHeight * scaleY * scale;
+  const boxHeight = height * scale;
+  textarea.style.left = `${renderer.layerValue(layer, "x", currentTime) / project.settings.width * 100}%`;
+  textarea.style.top = `${renderer.layerValue(layer, "y", currentTime) / project.settings.height * 100}%`;
+  textarea.style.width = `${width / project.settings.width * 100}%`;
+  textarea.style.height = `${height / project.settings.height * 100}%`;
+  textarea.style.transform = `translate(-50%, -50%) rotate(${renderer.layerValue(layer, "rotation", currentTime)}deg)`;
+  textarea.style.fontFamily = layer.fontFamily || "IBM Plex Sans";
+  textarea.style.fontWeight = String(renderer.layerValue(layer, "fontWeight", currentTime) || 500);
+  textarea.style.fontSize = `${fontSize}px`;
+  textarea.style.lineHeight = `${lineHeight}px`;
+  textarea.style.textAlign = layer.align || "center";
+  textarea.style.padding = `${Math.max(0, (boxHeight - layout.lines.length * lineHeight) / 2)}px ${layout.padding * scaleX * scale}px 0`;
+}
+
+function previewInlineText(layerId: string, value: string) {
+  const layer = project?.layers.find((item) => item.id === layerId);
+  if (!layer || layer.locked) return;
+  const session = openEditSession(`layer:${layer.id}:text`, propertyLabel("text"));
+  if (!session.memo.has("layer")) session.memo.set("layer", { ...layer });
+  const base = session.memo.get("layer") as Layer;
+  const props: Record<string, unknown> = { text: value };
+  const height = fittedTextHeight({ ...base, text: value });
+  if (height !== undefined) props.height = height;
+  if (!previewEdit(session, [["set", { type: "layer.set", layerId: layer.id, props }]])) return;
+  const updated = project?.layers.find((item) => item.id === layerId);
+  if (updated) updateTextOverflowWarning(updated);
+  const inspectorText = app.querySelector<HTMLTextAreaElement>('[data-layer-text="text"]');
+  if (inspectorText && inspectorText.value !== value) inspectorText.value = value;
+  positionInlineEditor();
+  updateTransformBox();
+  void renderFrame();
+}
+
+function closeInlineEditor(commit: boolean) {
+  const editor = inlineEditor;
+  if (!editor || editor.closed) return;
+  editor.closed = true;
+  inlineEditor = null;
+  const key = `layer:${editor.layerId}:text`;
+  if (commit) endEditSession();
+  else if (editSession?.key === key) {
+    editSession.gesture.cancel();
+    editSession = null;
+  }
+  editor.textarea.remove();
+  app.querySelector(".canvas-shell")?.classList.remove("is-text-editing");
+  updateInspector();
+  updateTransformBox();
+  requestTimelineRefresh();
+  void renderFrame();
+}
+
+function openInlineTextEditor(layerId: string) {
+  const layer = project?.layers.find((item) => item.id === layerId);
+  const shell = app.querySelector<HTMLElement>("#canvas-shell");
+  if (!project || !layer || layer.kind !== "text" || layer.locked || !shell || exportInProgress) return;
+  if (inlineEditor && !inlineEditor.textarea.isConnected) inlineEditor = null;
+  if (inlineEditor) {
+    if (inlineEditor.layerId === layerId) return;
+    closeInlineEditor(true);
+  }
+  stopPlayback();
+  if (selectedLayerId !== layerId) selectLayerById(layerId);
+  endEditSession();
+  const textarea = document.createElement("textarea");
+  textarea.className = "text-inline-editor";
+  textarea.value = layer.text || "";
+  textarea.spellcheck = false;
+  textarea.setAttribute("aria-label", language === "pt-BR" ? "Editar texto no canvas" : "Edit text on canvas");
+  textarea.setAttribute("data-inline-text-editor", "");
+  shell.append(textarea);
+  shell.classList.add("is-text-editing");
+  inlineEditor = { layerId, textarea, closed: false };
+  positionInlineEditor();
+  textarea.addEventListener("input", () => previewInlineText(layerId, textarea.value));
+  textarea.addEventListener("pointerdown", (event) => event.stopPropagation());
+  textarea.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeInlineEditor(false);
+    } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      closeInlineEditor(true);
+    }
+  });
+  textarea.addEventListener("blur", () => closeInlineEditor(true));
+  textarea.focus();
+  textarea.select();
+}
+
+function textLayerAt(event: PointerEvent | MouseEvent, canvas: HTMLCanvasElement) {
+  if (!project || !renderer) return null;
+  const rect = canvas.getBoundingClientRect();
+  const hits = renderer.hitTestAll((event.clientX - rect.left) / rect.width * project.settings.width, (event.clientY - rect.top) / rect.height * project.settings.height, currentTime);
+  const hit = hits.find((item) => item.id === selectedLayerId) || hits[0];
+  const layer = hit && project.layers.find((item) => item.id === hit.id);
+  return layer?.kind === "text" ? layer : null;
+}
+
+function bindInlineTextEditing(canvas: HTMLCanvasElement) {
+  canvas.addEventListener("dblclick", (event) => {
+    const layer = textLayerAt(event, canvas);
+    if (layer) openInlineTextEditor(layer.id);
+  });
+  // Toque e caneta não geram dblclick de forma confiável: o duplo toque é detectado aqui.
+  let lastTap = { time: 0, x: 0, y: 0 };
+  canvas.addEventListener("pointerup", (event) => {
+    if (event.pointerType === "mouse") return;
+    const now = performance.now();
+    const again = now - lastTap.time < 400 && Math.hypot(event.clientX - lastTap.x, event.clientY - lastTap.y) < 32;
+    lastTap = again ? { time: 0, x: 0, y: 0 } : { time: now, x: event.clientX, y: event.clientY };
+    if (!again) return;
+    const layer = textLayerAt(event, canvas);
+    if (layer) openInlineTextEditor(layer.id);
+  });
 }
 
 function setTime(time: number, rerenderInspector = true) {
@@ -3835,6 +5244,7 @@ function stopPlayback() {
   finalizeRecordedAutomation();
   const button = app.querySelector("#play");
   if (button) button.textContent = "▶";
+  updateLevelMeter();
   updateLiveUi();
   updatePreviewQualityState();
   setStatus("READY · PREVIEW FULL");
@@ -3843,16 +5253,16 @@ function stopPlayback() {
 
 function finalizeRecordedAutomation() {
   if (!project || !recordedTracks.size) return;
+  endEditSession();
   const discrete = new Set(["mode", "count", "segments", "direction", "invert", "colorize", "blocks", "fontWeight"]);
+  const commands: VctCommand[] = [];
   for (const token of recordedTracks) {
     const [scope, id, property] = token.split(":");
-    const keys = scope === "layer"
-      ? project.layers.find((layer) => layer.id === id)?.keyframes[property]
-      : scope === "effect"
-        ? findEffect(id)?.keyframes[property]
-        : project.layers.find((layer) => layer.id === id)?.keyframes[property];
-    if (!keys?.length) continue;
-    keys.sort((a, b) => a.time - b.time);
+    const stored = scope === "effect"
+      ? findEffect(id)?.keyframes[property]
+      : project.layers.find((layer) => layer.id === id)?.keyframes[property];
+    if (!stored?.length) continue;
+    const keys = structuredClone(stored).sort((a, b) => a.time - b.time);
     const recordedRange = recordedRanges.get(token);
     const affected = (key: Keyframe) => !recordedRange
       || (key.time >= recordedRange.min - keyframeTolerance() && key.time <= recordedRange.max + keyframeTolerance());
@@ -3872,13 +5282,15 @@ function finalizeRecordedAutomation() {
       key.easing = discrete.has(property) || scope === "color" ? "linear" : "bezier";
       if (key.easing === "bezier") key.curve = .82;
     }
+    commands.push(scope === "effect"
+      ? { type: "effect.keyframe.set", effectId: id, property, keys }
+      : { type: "keyframe.set", layerId: id, property, keys });
   }
   recordedTracks.clear();
   recordedRanges.clear();
-  project.modifiedAt = new Date().toISOString();
+  applyCommands(commands, editLabel("Gravação", "Recording"));
   requestTimelineRefresh();
   updateInspector();
-  void renderFrame();
 }
 
 function togglePlayback() {
@@ -3889,6 +5301,8 @@ function togglePlayback() {
   }
   playing = true;
   if (currentTime >= project.settings.duration) setTime(0, false);
+  const area = project.settings.workArea;
+  if (timelineLoop && area && (currentTime < area.in || currentTime >= area.out)) setTime(area.in, false);
   lastPlaybackFrame = Math.floor(currentTime * project.settings.fps);
   playbackDroppedFrames = 0;
   previewFastFrames = 0;
@@ -3913,18 +5327,22 @@ function updateLiveUi() {
 function playbackLoop(now: number, generation: number) {
   if (!playing || !project || generation !== playbackGeneration) return;
   const next = playbackOffset + (now - playbackStarted) / 1000;
+  const area = project.settings.workArea;
+  const loopStart = area ? area.in : 0;
+  const loopEnd = area ? area.out : project.settings.duration;
+  if (timelineLoop && next >= loopEnd) {
+    const wrapped = loopStart + (next - loopStart) % (loopEnd - loopStart);
+    playbackStarted = now;
+    playbackOffset = wrapped;
+    lastPlaybackFrame = -1;
+    renderer?.setPlaybackState(true, wrapped);
+    void audioEngine.play(project, wrapped);
+    setTime(wrapped, false);
+    followPlayhead();
+    requestAnimationFrame((time) => playbackLoop(time, generation));
+    return;
+  }
   if (next >= project.settings.duration) {
-    if (timelineLoop) {
-      const wrapped = next % project.settings.duration;
-      playbackStarted = now;
-      playbackOffset = wrapped;
-      lastPlaybackFrame = -1;
-      renderer?.setPlaybackState(true, wrapped);
-      void audioEngine.play(project, wrapped);
-      setTime(wrapped, false);
-      requestAnimationFrame((time) => playbackLoop(time, generation));
-      return;
-    }
     setTime(project.settings.duration, false);
     stopPlayback();
     updateInspector();
@@ -3938,7 +5356,9 @@ function playbackLoop(now: number, generation: number) {
     }
     lastPlaybackFrame = frame;
     setTime(frame / project.settings.fps, false);
+    followPlayhead();
   }
+  updateLevelMeter();
   requestAnimationFrame((time) => playbackLoop(time, generation));
 }
 
@@ -4003,6 +5423,40 @@ async function renderFrame(exporting = false) {
   } finally {
     renderInFlight = false;
   }
+}
+
+async function settleRender() {
+  while (renderInFlight) await new Promise<void>((resolve) => window.setTimeout(resolve, 8));
+}
+
+/** Renders one frame that waits for video decode; the preview loop stays out of the way meanwhile. */
+async function renderStillFrame(time?: number) {
+  if (!project || !renderer) throw new Error("Nenhum projeto está aberto.");
+  if (exportInProgress) throw new Error("Aguarde a exportação antes de capturar quadros.");
+  if (time !== undefined) stopPlayback();
+  await settleRender();
+  renderInFlight = true;
+  try {
+    if (time !== undefined) setTime(clamp(time, 0, project.settings.duration), false);
+    return await renderer.renderStill(currentTime);
+  } finally {
+    renderQueued = false;
+    renderInFlight = false;
+  }
+}
+
+function copyCompositionCanvas(maxWidth: number) {
+  const canvas = app.querySelector<HTMLCanvasElement>("#composition-canvas");
+  if (!canvas || !project) throw new Error("Preview indisponível.");
+  const scale = Math.min(1, maxWidth / canvas.width);
+  const frame = document.createElement("canvas");
+  frame.width = Math.max(1, Math.round(canvas.width * scale));
+  frame.height = Math.max(1, Math.round(canvas.height * scale));
+  const context = frame.getContext("2d")!;
+  context.fillStyle = project.settings.transparent ? "#000000" : project.settings.background;
+  context.fillRect(0, 0, frame.width, frame.height);
+  context.drawImage(canvas, 0, 0, frame.width, frame.height);
+  return frame;
 }
 
 // Enquanto o usuário não muda o zoom à mão, o preview acompanha o tamanho da janela.
@@ -4079,6 +5533,13 @@ function showCompositionModal() {
           <label class="field"><span>${t("height")} PX</span><input id="composition-height" type="number" value="${project.settings.height}" min="16" max="8192" step="1"></label>
           <label class="field"><span>${t("background")}</span><input id="composition-background" type="color" value="${escapeHtml(project.settings.background)}"></label>
           <label class="toggle-field composition-alpha"><input id="composition-transparent" type="checkbox" ${project.settings.transparent ? "checked" : ""}><span class="toggle"></span><span>${t("transparent")} / ALPHA</span></label>
+          <fieldset class="grid-settings">
+            <legend>${language === "pt-BR" ? "GRADE MUSICAL (BPM)" : "MUSICAL GRID (BPM)"}</legend>
+            <label class="field"><span>BPM</span><input id="composition-bpm" type="number" value="${project.settings.grid?.bpm ?? ""}" min="20" max="400" step="0.1" placeholder="—"></label>
+            <label class="field"><span>OFFSET (s)</span><input id="composition-grid-offset" type="number" value="${project.settings.grid?.offset ?? 0}" min="0" max="60" step="0.01"></label>
+            <label class="field"><span>${language === "pt-BR" ? "TEMPOS POR COMPASSO" : "BEATS PER BAR"}</span><input id="composition-beats" type="number" value="${project.settings.grid?.beatsPerBar ?? 4}" min="1" max="16" step="1"></label>
+            <div class="grid-actions"><button type="button" id="composition-tap" title="${language === "pt-BR" ? "Toque no ritmo (3 toques ou mais)" : "Tap along (3 taps or more)"}">TAP</button><button type="button" id="composition-grid-remove">${language === "pt-BR" ? "Remover grade" : "Remove grid"}</button></div>
+          </fieldset>
           <fieldset class="resize-mode">
             <legend>${language === "pt-BR" ? "COMO TRATAR AS CAMADAS EXISTENTES" : "HOW TO HANDLE EXISTING LAYERS"}</legend>
             <label><input type="radio" name="resize-mode" value="adapt" checked><span><strong>${language === "pt-BR" ? "ADAPTAR PROPORCIONALMENTE" : "ADAPT PROPORTIONALLY"}</strong><small>${language === "pt-BR" ? "Redimensiona e centraliza as camadas sem deformação." : "Resizes and centers layers without distortion."}</small></span></label>
@@ -4086,7 +5547,7 @@ function showCompositionModal() {
           </fieldset>
           <p class="composition-warning" id="composition-warning"></p>
         </div>
-        <footer><button id="cancel-composition">${t("cancel")}</button><button class="primary-button" id="apply-composition">${language === "pt-BR" ? "APLICAR TAMANHO" : "APPLY SIZE"} →</button></footer>
+        <footer><button id="cancel-composition">${t("cancel")}</button><button class="primary-button" id="apply-composition">${language === "pt-BR" ? "APLICAR" : "APPLY"} →</button></footer>
       </section>
     </div>`;
   const preset = root.querySelector<HTMLSelectElement>("#composition-preset")!;
@@ -4096,6 +5557,23 @@ function showCompositionModal() {
   [width, height].forEach((input) => input.addEventListener("input", () => {
     if (preset.value !== `${width.value},${height.value}`) preset.value = "custom";
   }));
+  const bpm = root.querySelector<HTMLInputElement>("#composition-bpm")!;
+  const gridOffset = root.querySelector<HTMLInputElement>("#composition-grid-offset")!;
+  const beats = root.querySelector<HTMLInputElement>("#composition-beats")!;
+  const taps: number[] = [];
+  root.querySelector("#composition-tap")?.addEventListener("click", () => {
+    const now = performance.now();
+    if (taps.length && now - taps[taps.length - 1] > 3000) taps.length = 0;
+    taps.push(now);
+    const tempo = tapTempo(taps);
+    if (tempo) bpm.value = String(clamp(tempo, 20, 400));
+  });
+  root.querySelector("#composition-grid-remove")?.addEventListener("click", () => {
+    bpm.value = "";
+    gridOffset.value = "0";
+    beats.value = "4";
+    taps.length = 0;
+  });
   root.querySelector("#close-composition")?.addEventListener("click", closeCompositionModal);
   root.querySelector("#cancel-composition")?.addEventListener("click", closeCompositionModal);
   root.querySelector("#apply-composition")?.addEventListener("click", applyCompositionResize);
@@ -4104,32 +5582,6 @@ function showCompositionModal() {
 function closeCompositionModal() {
   const root = app.querySelector("#modal-root");
   if (root) root.innerHTML = "";
-}
-
-function remapLayerForComposition(layer: Layer, oldWidth: number, oldHeight: number, newWidth: number, newHeight: number) {
-  const scale = Math.min(newWidth / oldWidth, newHeight / oldHeight);
-  const mapX = (value: number) => (value - oldWidth / 2) * scale + newWidth / 2;
-  const mapY = (value: number) => (value - oldHeight / 2) * scale + newHeight / 2;
-  layer.x = mapX(layer.x);
-  layer.y = mapY(layer.y);
-  layer.width *= scale;
-  layer.height *= scale;
-  if (layer.fontSize) layer.fontSize *= scale;
-  layer.strokeWidth *= scale;
-  for (const keyframe of layer.keyframes.x || []) keyframe.value = mapX(keyframe.value);
-  for (const keyframe of layer.keyframes.y || []) keyframe.value = mapY(keyframe.value);
-  for (const property of ["width", "height", "fontSize", "strokeWidth"]) {
-    for (const keyframe of layer.keyframes[property] || []) keyframe.value *= scale;
-  }
-}
-
-function recenterLayerForComposition(layer: Layer, oldWidth: number, oldHeight: number, newWidth: number, newHeight: number) {
-  const shiftX = (newWidth - oldWidth) / 2;
-  const shiftY = (newHeight - oldHeight) / 2;
-  layer.x += shiftX;
-  layer.y += shiftY;
-  for (const keyframe of layer.keyframes.x || []) keyframe.value += shiftX;
-  for (const keyframe of layer.keyframes.y || []) keyframe.value += shiftY;
 }
 
 function applyCompositionResize() {
@@ -4147,28 +5599,40 @@ function applyCompositionResize() {
     if (warning) warning.textContent = language === "pt-BR" ? "A composição excede o limite seguro de pixels para a GPU." : "The composition exceeds the safe GPU pixel limit.";
     return;
   }
+  const bpmText = app.querySelector<HTMLInputElement>("#composition-bpm")?.value.trim() || "";
+  const oldGrid = project.settings.grid;
+  let grid: { bpm: number; offset: number; beatsPerBar: number } | null = null;
+  if (bpmText) {
+    grid = {
+      bpm: Number(bpmText),
+      offset: Number(app.querySelector<HTMLInputElement>("#composition-grid-offset")?.value || 0),
+      beatsPerBar: Number(app.querySelector<HTMLInputElement>("#composition-beats")?.value || 4),
+    };
+    if (!(grid.bpm >= 20 && grid.bpm <= 400) || !(grid.offset >= 0 && grid.offset <= 60) || !Number.isInteger(grid.beatsPerBar) || grid.beatsPerBar < 1 || grid.beatsPerBar > 16) {
+      if (warning) warning.textContent = language === "pt-BR" ? "Grade: BPM de 20 a 400, offset de 0 a 60 s e 1 a 16 tempos por compasso." : "Grid: BPM 20–400, offset 0–60 s and 1–16 beats per bar.";
+      return;
+    }
+  }
+  const gridChanged = JSON.stringify(grid) !== JSON.stringify(oldGrid ?? null);
   const oldWidth = project.settings.width;
   const oldHeight = project.settings.height;
-  if (width === oldWidth && height === oldHeight && background === project.settings.background && transparent === project.settings.transparent) {
+  const sizeChanged = width !== oldWidth || height !== oldHeight || background !== project.settings.background || transparent !== project.settings.transparent;
+  if (!sizeChanged && !gridChanged) {
     closeCompositionModal();
     return;
   }
-  const mode = app.querySelector<HTMLInputElement>('input[name="resize-mode"]:checked')?.value || "adapt";
+  const mode = app.querySelector<HTMLInputElement>('input[name="resize-mode"]:checked')?.value === "keep" ? "keep" : "adapt";
   stopPlayback();
-  snapshot();
-  if (width !== oldWidth || height !== oldHeight) {
-    for (const layer of project.layers) {
-      if (mode === "adapt") remapLayerForComposition(layer, oldWidth, oldHeight, width, height);
-      else recenterLayerForComposition(layer, oldWidth, oldHeight, width, height);
+  // Tamanho e grade entram no mesmo comando: um único passo de desfazer.
+  const props: Record<string, unknown> = sizeChanged ? { width, height, background, transparent } : {};
+  if (gridChanged) props.grid = grid;
+  if (!applyCommands([{ type: "composition.set", props, ...(sizeChanged ? { resize: mode } : {}) }], editLabel("Alterar composição", "Resize composition"))) {
+    if (warning && project.layers.some((layer) => layer.locked)) {
+      warning.textContent = language === "pt-BR" ? "Desbloqueie as camadas bloqueadas para redimensionar a composição." : "Unlock locked layers to resize the composition.";
     }
+    return;
   }
-  project.settings.width = width;
-  project.settings.height = height;
-  project.settings.background = background;
-  project.settings.transparent = transparent;
-  project.modifiedAt = new Date().toISOString();
   closeCompositionModal();
-  renderEditorPreservingCanvas();
   window.setTimeout(fitCanvas, 0);
   setStatus(`${language === "pt-BR" ? "COMPOSIÇÃO ALTERADA" : "COMPOSITION RESIZED"} · ${width}×${height}`);
 }
@@ -4194,12 +5658,25 @@ function showExportModal() {
           <label class="toggle-field"><input id="export-alpha" type="checkbox" ${defaultFormat === "png-sequence" ? "checked" : ""} disabled><span class="toggle"></span><span>ALPHA ${language === "pt-BR" ? "DISPONÍVEL NA SEQUÊNCIA PNG" : "AVAILABLE IN PNG SEQUENCE"}</span></label>
         </div>
         <label class="output-picker"><span>${language === "pt-BR" ? "NOME DO ARQUIVO" : "FILE NAME"}</span><input id="export-output" value="${escapeHtml(defaultName)}" maxlength="120"></label>
-        <div class="export-summary">${Math.ceil(project.settings.duration * project.settings.fps)} FRAMES · ${formatTime(project.settings.duration)}</div>
+        <div class="export-summary" id="export-summary"></div>
         <div class="export-log" id="export-log"><span class="status-dot is-ready"></span><span>READY</span></div>
         <div class="progress-track"><span id="export-progress"></span></div>
         <footer><button id="cancel-export">${t("cancel")}</button><button class="primary-button" id="start-export">${t("startExport")} →</button></footer>
       </section>
     </div>`;
+  const updateSummary = () => {
+    if (!project) return;
+    const fps = Number(root.querySelector<HTMLInputElement>("#export-fps")?.value) || project.settings.fps;
+    const range = exportRange({ fps, duration: project.settings.duration, workArea: project.settings.workArea });
+    const area = project.settings.workArea;
+    const scope = area
+      ? `${language === "pt-BR" ? "Região de trabalho" : "Work area"} ${formatRulerTime(range.start, fps)} – ${formatRulerTime(range.end, fps)}`
+      : language === "pt-BR" ? "Composição inteira" : "Whole composition";
+    const summary = root.querySelector("#export-summary");
+    if (summary) summary.textContent = `${range.frameCount} FRAMES · ${formatTime(range.duration)} · ${scope}`;
+  };
+  updateSummary();
+  root.querySelector("#export-fps")?.addEventListener("input", updateSummary);
   const format = root.querySelector<HTMLSelectElement>("#export-format")!;
   const alpha = root.querySelector<HTMLInputElement>("#export-alpha")!;
   format.addEventListener("change", () => {
@@ -4243,7 +5720,8 @@ async function runExport() {
     return;
   }
   const fps = Number(app.querySelector<HTMLInputElement>("#export-fps")!.value);
-  const total = Math.ceil(project.settings.duration * fps);
+  const range = exportRange({ fps, duration: project.settings.duration, workArea: project.settings.workArea });
+  const total = range.frameCount;
   const options = {
     fileName: app.querySelector<HTMLInputElement>("#export-output")!.value.trim().replace(/\.(mp4|zip)$/i, "") || "noisetupi-render",
     width: Number(app.querySelector<HTMLInputElement>("#export-width")!.value),
@@ -4258,7 +5736,9 @@ async function runExport() {
   const previousTime = currentTime;
   const exportCanvas = createExportCanvas(options.width, options.height);
   try {
-    const mixedAudio = format === "mp4-h264" ? await mixProjectAudio(project) : null;
+    const fullMix = format === "mp4-h264" ? await mixProjectAudio(project) : null;
+    // A mixagem cobre a composição inteira; com região de trabalho, só o trecho dela segue para o arquivo.
+    const mixedAudio = fullMix && project.settings.workArea ? sliceAudioBuffer(fullMix, range.start, range.duration) : fullMix;
     activeExporter = format === "png-sequence"
       ? new PngSequenceBrowserExporter(exportCanvas, options)
       : new Mp4BrowserExporter(exportCanvas, options, mixedAudio);
@@ -4266,7 +5746,7 @@ async function runExport() {
     await activeExporter.start();
     for (let frame = 0; frame < total; frame++) {
       if (exportCancelled) throw new Error(language === "pt-BR" ? "Exportação cancelada" : "Export cancelled");
-      currentTime = frame / fps;
+      currentTime = range.start + frame / fps;
       await renderer.render(currentTime, true);
       copyFrame(renderer.canvas, exportCanvas, format === "png-sequence", project.settings.background);
       await activeExporter.addFrame(frame);
@@ -4360,24 +5840,37 @@ window.addEventListener("keydown", (event) => {
     event.preventDefault();
     void saveProject();
   }
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+  const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement
+    || event.target instanceof HTMLSelectElement || (event.target as HTMLElement | null)?.isContentEditable;
+  if (!typing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
     event.preventDefault();
     event.shiftKey ? redo() : undo();
   }
+  if (project && !typing && (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "x" && selectionIds().length) {
+    event.preventDefault();
+    cutSelection();
+    return;
+  }
+  if (project && !typing && !event.shiftKey && (event.key === "Delete" || event.key === "Backspace") && selectedKeyRef && deleteSelectedKeyframe()) {
+    event.preventDefault();
+    return;
+  }
+  if (project && !typing && handleTransportKey(event)) {
+    event.preventDefault();
+    return;
+  }
   // Corte no playhead: S (sem modificador) ou Ctrl/⌘+B, fora de campos de texto.
-  const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement
-    || event.target instanceof HTMLSelectElement || (event.target as HTMLElement | null)?.isContentEditable;
   if (project && !typing && ((event.key.toLowerCase() === "s" && !event.ctrlKey && !event.metaKey && !event.altKey)
     || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "b"))) {
     event.preventDefault();
     splitAtPlayhead();
     return;
   }
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "d" && project) {
+  if (!typing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "d" && project) {
     event.preventDefault();
     duplicateLayer();
   }
-  if (event.code === "Space" && project && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) {
+  if (event.code === "Space" && project && !typing && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) {
     event.preventDefault();
     togglePlayback();
   }
@@ -4397,20 +5890,32 @@ window.addEventListener("keydown", (event) => {
     const layer = selectedLayer();
     if (!layer || layer.locked) return;
     event.preventDefault();
-    snapshot();
     const amount = event.shiftKey ? 10 : 1;
     const x = renderer?.layerValue(layer, "x", currentTime) ?? layer.x;
     const y = renderer?.layerValue(layer, "y", currentTime) ?? layer.y;
-    let createdKeyframe = false;
-    if (event.key === "ArrowLeft") createdKeyframe = setLayerNumericValue(layer, "x", x - amount);
-    if (event.key === "ArrowRight") createdKeyframe = setLayerNumericValue(layer, "x", x + amount);
-    if (event.key === "ArrowUp") createdKeyframe = setLayerNumericValue(layer, "y", y - amount);
-    if (event.key === "ArrowDown") createdKeyframe = setLayerNumericValue(layer, "y", y + amount);
+    const values: Record<string, number> = {};
+    if (event.key === "ArrowLeft") values.x = x - amount;
+    if (event.key === "ArrowRight") values.x = x + amount;
+    if (event.key === "ArrowUp") values.y = y - amount;
+    if (event.key === "ArrowDown") values.y = y + amount;
+    // Segurar a tecla é um único passo de desfazer; terminar ao soltar.
+    const session = openEditSession(`nudge:${layer.id}`, editLabel("Mover camada", "Move layer"));
+    const previewed = previewLayerValues(session, layer.id, values);
+    if (!previewed) return;
     updateInspector();
-    if (createdKeyframe) requestTimelineRefresh();
+    if (previewed.created) requestTimelineRefresh();
     void renderFrame();
   }
 });
+
+function endNudge() {
+  if (editSession?.key.startsWith("nudge:")) endEditSession();
+}
+
+window.addEventListener("keyup", (event) => {
+  if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) endNudge();
+});
+window.addEventListener("blur", endNudge);
 
 window.addEventListener("beforeunload", (event) => {
   if (!project) return;
@@ -4434,44 +5939,24 @@ automationApi = createVctApi({
   },
   confirmConsequential: (message) => window.confirm(language === "pt-BR" ? message : "Confirm clip/effect removal before applying this batch?"),
   captureFrame: async (time, maxWidth) => {
-    if (!project || !renderer) throw new Error("Nenhum projeto está aberto.");
-    if (time !== undefined) {
-      stopPlayback();
-      setTime(clamp(time, 0, project.settings.duration), false);
-    }
-    await renderFrame();
-    const canvas = app.querySelector<HTMLCanvasElement>("#composition-canvas");
-    if (!canvas) throw new Error("Preview indisponível.");
-    const scale = Math.min(1, maxWidth / canvas.width);
-    const frame = document.createElement("canvas");
-    frame.width = Math.max(1, Math.round(canvas.width * scale));
-    frame.height = Math.max(1, Math.round(canvas.height * scale));
-    const context = frame.getContext("2d")!;
-    context.fillStyle = project.settings.transparent ? "#000000" : project.settings.background;
-    context.fillRect(0, 0, frame.width, frame.height);
-    context.drawImage(canvas, 0, 0, frame.width, frame.height);
-    return { time: currentTime, width: frame.width, height: frame.height, dataUrl: frame.toDataURL("image/jpeg", .8) };
+    const { notReady } = await renderStillFrame(time);
+    const frame = copyCompositionCanvas(maxWidth);
+    return { time: currentTime, width: frame.width, height: frame.height, dataUrl: frame.toDataURL("image/jpeg", .8), notReady };
+  },
+  stillFrame: async (time, maxWidth) => {
+    const { notReady } = await renderStillFrame(time);
+    return { canvas: copyCompositionCanvas(maxWidth), notReady };
   },
   commitProject: (next, label) => {
     if (!project) throw new Error("Nenhum projeto está aberto.");
     if (exportInProgress) throw new Error('Aguarde a exportação antes de editar.');
+    // An open edit (scrub, nudge, inline text) would rebuild from its old base and erase this batch.
+    endEditSession();
     stopPlayback();
-    snapshot();
-    const structureChanged = project.layers.map(layer => layer.id).join('|') !== next.layers.map(layer => layer.id).join('|')
-      || project.audioTracks.map(track => track.id).join('|') !== next.audioTracks.map(track => track.id).join('|');
-    Object.assign(project, next);
+    snapshot(label);
     selectedClipIds.clear();
-    if (!project.layers.some(layer => layer.id === selectedLayerId)) selectedLayerId = project.layers[0]?.id || '';
-    if (!project.audioTracks.some(track => track.id === selectedAudioTrackId)) selectedAudioTrackId = '';
-    markProjectModified(project);
-    if (structureChanged) renderEditorPreservingCanvas();
-    else updatePanels();
-    updateTransformBox();
-    const serialized = JSON.stringify(project);
-    app.querySelector<HTMLButtonElement>("#undo")?.toggleAttribute("disabled", !history.canUndo(serialized));
-    app.querySelector<HTMLButtonElement>("#redo")?.toggleAttribute("disabled", !history.canRedo(serialized));
+    commitDocument(next);
     setStatus(`VCT · ${label}`);
-    void renderFrame();
   },
 });
 installAgentAutomation(automationApi, () => language);

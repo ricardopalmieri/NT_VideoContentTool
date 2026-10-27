@@ -135,13 +135,23 @@ function transactionComplete(transaction: IDBTransaction) {
   });
 }
 
+/** Media used by clips. */
+export function usedAssetReferences(project: ProjectDocument) {
+  return [...new Set([
+    ...project.layers.map((layer) => layer.asset).filter((asset): asset is string => Boolean(asset)),
+    ...project.audioTracks.map((track) => track.asset).filter(Boolean),
+  ])];
+}
+
+/** Media used by clips plus media kept only in the bin. */
+export function projectAssetReferences(project: ProjectDocument) {
+  return [...new Set([...usedAssetReferences(project), ...Object.keys(project.assetMetadata || {})])];
+}
+
 export async function saveProjectRecovery(project: ProjectDocument) {
   const database = await openRecoveryDatabase();
   try {
-    const references = [...new Set([
-      ...project.layers.map((layer) => layer.asset).filter((asset): asset is string => Boolean(asset)),
-      ...project.audioTracks.map((track) => track.asset).filter(Boolean),
-    ])];
+    const references = projectAssetReferences(project);
     const transaction = database.transaction(["snapshots", "assets"], "readwrite");
     const snapshots = transaction.objectStore("snapshots");
     const assets = transaction.objectStore("assets");
@@ -266,6 +276,29 @@ export function findRelinkFile(
   return null;
 }
 
+const FINGERPRINT_SLICE = 1024 * 1024;
+
+/** Size plus SHA-256 of the first and last MiB: fast enough for 1 GB files, stable across renames. */
+export async function fileFingerprint(file: Blob) {
+  const head = await file.slice(0, FINGERPRINT_SLICE).arrayBuffer();
+  const tail = file.size > FINGERPRINT_SLICE ? await file.slice(Math.max(FINGERPRINT_SLICE, file.size - FINGERPRINT_SLICE)).arrayBuffer() : new ArrayBuffer(0);
+  const joined = new Uint8Array(head.byteLength + tail.byteLength);
+  joined.set(new Uint8Array(head), 0);
+  joined.set(new Uint8Array(tail), head.byteLength);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", joined));
+  return `${file.size}:${[...digest.slice(0, 12)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** Relink by content when the file was renamed or moved: same fingerprint, any name. */
+export async function findRelinkFileByFingerprint(metadata: AssetSourceMetadata | undefined, files: File[]) {
+  if (!metadata?.fingerprint) return null;
+  for (const file of files) {
+    if (file.size !== metadata.size) continue;
+    if (await fileFingerprint(file) === metadata.fingerprint) return file;
+  }
+  return null;
+}
+
 export async function importWebAsset(file: File): Promise<ImportedAsset> {
   const base = safeName(file.name);
   const dot = base.lastIndexOf(".");
@@ -310,11 +343,10 @@ interface CollectedMedia {
 }
 
 function prepareCollectedMedia(project: ProjectDocument): CollectedMedia {
-  const references = [...new Set([
-    ...project.layers.map((layer) => layer.asset).filter((asset): asset is string => Boolean(asset)),
-    ...project.audioTracks.map((track) => track.asset).filter(Boolean),
-  ])];
-  const missing = references.filter((reference) => !assetBlobs.has(reference));
+  // Bin-only media is collected when its file is loaded; used media is required.
+  const used = usedAssetReferences(project);
+  const references = [...used, ...projectAssetReferences(project).filter((reference) => !used.includes(reference) && assetBlobs.has(reference))];
+  const missing = used.filter((reference) => !assetBlobs.has(reference));
   if (missing.length) {
     throw new Error(`Não é possível coletar mídias ausentes: ${missing.join(", ")}`);
   }
@@ -334,10 +366,9 @@ function prepareCollectedMedia(project: ProjectDocument): CollectedMedia {
   }
   for (const track of collectedProject.audioTracks) track.asset = referencePaths.get(track.asset)!;
   if (collectedProject.assetMetadata) {
-    collectedProject.assetMetadata = Object.fromEntries(references.flatMap((reference) => {
-      const metadata = project.assetMetadata?.[reference];
-      return metadata ? [[referencePaths.get(reference)!, metadata]] : [];
-    }));
+    // Bin entries whose file is not loaded keep their metadata (and relink data) under the old key.
+    collectedProject.assetMetadata = Object.fromEntries(Object.entries(project.assetMetadata || {}).map(([reference, metadata]) =>
+      [referencePaths.get(reference) ?? reference, metadata]));
   }
 
   return {

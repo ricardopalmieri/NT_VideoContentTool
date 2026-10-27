@@ -3,13 +3,14 @@
 // servidor mostrou e passa a responder pedidos com métodos de `window.vct`.
 // Nada roda sem a página aberta e a conexão ativa; desconectar encerra tudo.
 import type { VctApi } from "./window-vct";
+import type { VctCommand } from "../model/commands";
 
 export const BRIDGE_PROTOCOL = "vct-bridge-1";
 
 // Métodos que o agente pode chamar. Leitura, simulação, lote transacional,
 // desfazer/refazer e captura de quadro. Nada de arquivos, salvar ou exportar.
 export const BRIDGE_METHODS = [
-  "describe", "getTimeline", "getProject", "validate", "listCatalog",
+  "describe", "more", "assets", "summary", "lint", "plan", "getTimeline", "getProject", "validate", "listCatalog",
   "dryRun", "batch", "undo", "redo", "captureFrame",
 ] as const;
 export type BridgeMethod = typeof BRIDGE_METHODS[number];
@@ -46,7 +47,16 @@ export async function handleBridgeRequest(api: VctApi, request: unknown): Promis
   try {
     let result: unknown;
     switch (request.method) {
-      case "describe": result = api.describe(); break;
+      case "describe": result = api.describe(typeof params.type === "string" ? params.type : undefined); break;
+      case "more": result = api.more(); break;
+      case "assets": result = api.assets(); break;
+      case "summary": result = api.summary(); break;
+      case "lint": result = api.lint(); break;
+      case "plan": {
+        if (!Array.isArray(params.batches)) throw new Error("params.batches deve ser uma lista de lotes.");
+        result = api.plan(params.batches as VctCommand[][], { label: typeof params.label === "string" ? params.label : "Agente", dryRun: params.dryRun === true });
+        break;
+      }
       case "getTimeline": result = api.getTimeline(); break;
       case "getProject": result = api.getProject(); break;
       case "validate": result = api.validate(); break;

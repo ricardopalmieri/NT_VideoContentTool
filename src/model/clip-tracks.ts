@@ -3,7 +3,7 @@
 // Sem `trackId`, a layer é a própria faixa (`trackId = id`), então projetos v2
 // antigos abrem iguais e o arquivo só ganha o campo quando há corte ou movimento.
 import { normalizeFades } from "../timeline/timing";
-import { uid, type AudioTrack, type Layer, type ProjectDocument } from "./types";
+import { uid, type AudioTrack, type Layer, type ProjectDocument, type TrackMeta } from "./types";
 
 export const trackIdOf = (layer: Pick<Layer, "id" | "trackId">) => layer.trackId || layer.id;
 export const laneIdOf = (track: Pick<AudioTrack, "id" | "laneId">) => track.laneId || track.id;
@@ -13,8 +13,18 @@ export interface VisualTrack {
   clips: Layer[];
 }
 
+// Named tracks (project.tracks) are optional. Without them a track exists while
+// it has clips. With them, tracks keep their name and order and may be empty;
+// tracks implied by clips but not yet named come first (new tracks go on top).
+function withMeta<T extends { id: string; clips: unknown[] }>(derived: T[], meta: TrackMeta[], empty: (id: string) => T) {
+  if (!meta.length) return derived;
+  const byId = new Map(derived.map((track) => [track.id, track]));
+  const named = new Set(meta.map((track) => track.id));
+  return [...derived.filter((track) => !named.has(track.id)), ...meta.map((track) => byId.get(track.id) ?? empty(track.id))];
+}
+
 // Faixas na ordem da primeira aparição em `project.layers` (índice 0 = topo).
-export function visualTracks(project: Pick<ProjectDocument, "layers">): VisualTrack[] {
+export function visualTracks(project: Pick<ProjectDocument, "layers"> & Partial<Pick<ProjectDocument, "tracks">>): VisualTrack[] {
   const tracks = new Map<string, VisualTrack>();
   for (const layer of project.layers) {
     const id = trackIdOf(layer);
@@ -22,10 +32,10 @@ export function visualTracks(project: Pick<ProjectDocument, "layers">): VisualTr
     if (!track) tracks.set(id, track = { id, clips: [] });
     track.clips.push(layer);
   }
-  return [...tracks.values()];
+  return withMeta([...tracks.values()], (project.tracks || []).filter((track) => track.kind === "video"), (id) => ({ id, clips: [] }));
 }
 
-export function audioLanes(project: Pick<ProjectDocument, "audioTracks">) {
+export function audioLanes(project: Pick<ProjectDocument, "audioTracks"> & Partial<Pick<ProjectDocument, "tracks">>) {
   const lanes = new Map<string, { id: string; clips: AudioTrack[] }>();
   for (const track of project.audioTracks) {
     const id = laneIdOf(track);
@@ -33,12 +43,73 @@ export function audioLanes(project: Pick<ProjectDocument, "audioTracks">) {
     if (!lane) lanes.set(id, lane = { id, clips: [] });
     lane.clips.push(track);
   }
-  return [...lanes.values()];
+  return withMeta([...lanes.values()], (project.tracks || []).filter((track) => track.kind === "audio"), (id) => ({ id, clips: [] as AudioTrack[] }));
+}
+
+/** Display name of a track: its saved name, else V1… from the bottom (A1… for audio). */
+export function trackName(project: Pick<ProjectDocument, "layers" | "audioTracks"> & Partial<Pick<ProjectDocument, "tracks">>, id: string) {
+  const saved = project.tracks?.find((track) => track.id === id)?.name;
+  if (saved) return saved;
+  const video = visualTracks(project);
+  const index = video.findIndex((track) => track.id === id);
+  if (index >= 0) return `V${video.length - index}`;
+  const lane = audioLanes(project).findIndex((track) => track.id === id);
+  return lane >= 0 ? `A${lane + 1}` : id;
+}
+
+/**
+ * Keeps project.tracks in sync with the clips (names kept, new tracks named,
+ * order taken from the current layout). No-op for projects without named tracks.
+ */
+export function normalizeTrackMeta(project: ProjectDocument) {
+  if (!project.tracks) return;
+  const names = new Map(project.tracks.map((track) => [track.id, track.name]));
+  const video = visualTracks(project).map((track) => ({ id: track.id, kind: "video" as const }));
+  const audio = audioLanes(project).map((track) => ({ id: track.id, kind: "audio" as const }));
+  const draft = { ...project, tracks: [] as TrackMeta[] };
+  const used = new Set([...names.values()]);
+  project.tracks = [...video, ...audio].map((track) => {
+    const saved = names.get(track.id);
+    if (saved) return { ...track, name: saved };
+    let name = trackName(draft, track.id);
+    for (let number = 1; used.has(name); number++) name = `${track.kind === "video" ? "V" : "A"}${number}`;
+    used.add(name);
+    return { ...track, name };
+  });
+}
+
+/** Gives every current track a saved name so tracks persist when emptied. */
+export function ensureTrackMeta(project: ProjectDocument) {
+  if (project.tracks) return project.tracks;
+  project.tracks = [];
+  normalizeTrackMeta(project);
+  return project.tracks;
 }
 
 // Reescreve `project.layers` com as faixas contíguas, na ordem dada.
 function writeTracks(project: ProjectDocument, tracks: VisualTrack[]) {
   project.layers = tracks.flatMap((track) => track.clips);
+  if (project.tracks) {
+    const meta = new Map(project.tracks.map((track) => [track.id, track]));
+    const video = tracks.map((track) => meta.get(track.id) ?? { id: track.id, kind: "video" as const, name: "" });
+    // Named tracks left out of the new layout (now empty) keep their old slot.
+    project.tracks.filter((track) => track.kind === "video").forEach((track, index) => {
+      if (!video.some((item) => item.id === track.id)) video.splice(Math.min(index, video.length), 0, track);
+    });
+    project.tracks = [...video, ...project.tracks.filter((track) => track.kind === "audio")];
+    normalizeTrackMeta(project);
+  }
+}
+
+/** Adds a clip to an existing track (named empty tracks included). */
+export function insertIntoTrack(project: ProjectDocument, layer: Layer, trackId: string) {
+  const tracks = visualTracks(project);
+  const target = tracks.find((track) => track.id === trackId);
+  if (!target) return false;
+  layer.trackId = trackId === layer.id ? undefined : trackId;
+  target.clips.push(layer);
+  writeTracks(project, tracks);
+  return true;
 }
 
 export function shiftTrack(project: ProjectDocument, trackId: string, direction: number) {

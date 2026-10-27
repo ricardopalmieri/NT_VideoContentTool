@@ -133,10 +133,15 @@ const asText = (value) => ({ content: [{ type: "text", text: typeof value === "s
 const asError = (error) => ({ isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] });
 const forward = (method, params) => callPage(method, params).then(asText, asError);
 
-const commandSchema = z.array(z.record(z.string(), z.unknown())).min(1).max(100)
+const commandSchema = z.array(z.record(z.string(), z.unknown())).min(1).max(500)
   .describe("Comandos VCT (veja vct_describe). Tempos em segundos, alinhados a frames.");
 
-const server = new McpServer({ name: "noisetupi-vct", version: "0.7.1" }, {
+/* global __VCT_VERSION__ */
+const VERSION = typeof __VCT_VERSION__ !== "undefined"
+  ? __VCT_VERSION__
+  : JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version;
+
+const server = new McpServer({ name: "noisetupi-vct", version: VERSION }, {
   instructions: "Edite vídeos no Noisetupi Video Content Tool aberto no navegador do usuário. "
     + "Fluxo: vct_describe (uma vez) → vct_get_timeline → planeje → vct_dry_run → vct_apply (um lote por intenção, com label) "
     + "→ vct_capture_frame para conferir → ajuste. Prefira vct_get_timeline a vct_get_project. "
@@ -175,7 +180,7 @@ server.registerTool("vct_connection_info", {
 }, async () => asText({ connected: Boolean(page), bridge: `ws://127.0.0.1:${PORT}`, token: TOKEN, link: `${EDITOR_URL}#agent=ws://127.0.0.1:${PORT}&token=${TOKEN}`, help: page ? undefined : connectionHelp() }));
 
 for (const [name, method, description] of [
-  ["vct_describe", "describe", "Contrato da API: comandos de edição com campos, unidades e limitações."],
+  ["vct_describe", "describe", "Contrato da API em texto curto: todos os comandos, campos, limites e regras de tempo."],
   ["vct_get_timeline", "getTimeline", "Timeline compacta: faixas, clipes (id, nome, tipo, início/fim em s), transições e faixas de áudio."],
   ["vct_get_project", "getProject", "Projeto completo em JSON (grande; use só se a timeline não bastar)."],
   ["vct_validate", "validate", "Valida o projeto aberto."],

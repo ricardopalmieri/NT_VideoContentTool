@@ -83,13 +83,31 @@ unsubscribe();
 do projeto. Eventos são emitidos para commits feitos por `window.vct`; edições
 manuais continuam disponíveis normalmente pela interface.
 
+## Referência completa e fluxo econômico
+
+A lista completa de comandos, campos, limites e regras de tempo está em
+`docs/API-AGENTE.md`, gerado do registro de comandos (o mesmo texto que
+`window.vct.describe()` devolve). Fluxo que gasta menos tokens:
+
+1. `vct.describe()` uma vez (e `vct.more()` se o texto continuar).
+2. `vct.assets()` e `vct.summary()`: bin e timeline em texto curto.
+3. `vct.assetSheet(asset, { show: true })`: o material bruto numa imagem, sem
+   colocar na timeline; um screenshot basta.
+4. `vct.analyzeAudio(asset)`: BPM e offset para `composition.set` grid; depois
+   tempos como `bar:3.2`.
+5. `clip.place` (um comando por plano), `track.create`, `composition.set`
+   (duração, região de trabalho). Lotes de até 500 comandos ou `vct.plan`.
+6. `vct.lint()`, `vct.analyzeMix()` e `vct.contactSheet({ show: true })` para
+   revisar.
+
 ## Limites atuais
 
 - API versionada como `window.vct.version === "1"`.
-- Sem servidor MCP, WebMCP, ponte local, WebSocket ou autenticação: ainda não
-  existe canal externo para disparar a API.
-- Sem edição de mídia/arquivos, clipe split/ripple, salvar/exportar ou apagar
-  camadas; essas operações exigem contratos e confirmação próprios.
+- O caminho ativo é o agente executar JavaScript na página (Claude in Chrome).
+  A ponte MCP local existe em `mcp/`, mas o editor atual não a conecta
+  (decisão no Batch 5 de `PLANO-DE-ACAO.md`).
+- Corte, ripple, duplicar e remover clipes existem desde a 0.7.1. A API não
+  importa mídia, não salva e não exporta: isso continua com o usuário.
 - O modelo de projeto continua `.ntvct` v2. A API não muda seu formato.
 
 ## Editar com IA no navegador (recomendado)

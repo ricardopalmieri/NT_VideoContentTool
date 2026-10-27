@@ -1,5 +1,9 @@
 # Upgrade de UX/UI, edição e automação por IA
 
+> **27/10/2026:** a ordem de trabalho agora está em `PLANO-DE-ACAO.md`
+> (batches 0 a 6). Este documento fica como histórico e referência; os
+> checkboxes abaixo não são mais atualizados.
+
 ## Objetivo e continuidade
 
 Este documento é o checkpoint compartilhado do trabalho. Deve ser atualizado

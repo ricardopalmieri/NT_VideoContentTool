@@ -102,8 +102,25 @@ void main() {
   } else if (u_effect == 8) {
     vec3 key = vec3(abs(u_p0 * 6.0 - 3.0) - 1.0, 2.0 - abs(u_p0 * 6.0 - 2.0), 2.0 - abs(u_p0 * 6.0 - 4.0));
     key = clamp(key, 0.0, 1.0);
-    float dist = distance(c.rgb, key);
-    c.a *= smoothstep(u_p1, u_p1 + max(.001, u_p2), dist);
+    // Textures are premultiplied: compare the straight color, scale all channels.
+    vec3 straight = c.a > .0001 ? c.rgb / c.a : c.rgb;
+    float dist = distance(straight, key);
+    c *= smoothstep(u_p1, u_p1 + max(.001, u_p2), dist);
+  } else if (u_effect == 10) {
+    vec3 straight = c.a > .0001 ? c.rgb / c.a : c.rgb;
+    float luma = dot(straight, vec3(.2126, .7152, .0722));
+    float keep = smoothstep(u_p0, u_p0 + max(.001, u_p1), luma);
+    c *= u_p2 > .5 ? 1.0 - keep : keep;
+  } else if (u_effect == 11) {
+    vec3 straight = c.a > .0001 ? c.rgb / c.a : c.rgb;
+    vec3 keyColor = vec3(u_p0, u_p1, u_p2);
+    mat3 toCbCr = mat3(-.168736, .5, 0.0, -.331264, -.418688, 0.0, .5, -.081312, 0.0);
+    vec2 chroma = (toCbCr * straight).xy;
+    vec2 keyChroma = (toCbCr * keyColor).xy;
+    float keep = smoothstep(u_p3, u_p3 + max(.001, u_p4), distance(chroma, keyChroma));
+    float gray = dot(straight, vec3(.2126, .7152, .0722));
+    straight = mix(straight, mix(vec3(gray), straight, keep), u_p5);
+    c = vec4(straight * c.a * keep, c.a * keep);
   } else if (u_effect == 9) {
     float e = edgeAt(uv, max(.5, u_p2));
     float line = smoothstep(u_p1, u_p1 + max(.005, u_p3), e);

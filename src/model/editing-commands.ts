@@ -1,54 +1,16 @@
-import { copyClips, moveClipToTrack, overlapsTrack, pasteClips, rippleDelete, shiftClip, splitClip, trackIdOf } from './clip-tracks';
-import { isTransitionType, syncTransitionAudioFades, type ClipTransition } from './transitions';
-import { createLayer, type ProjectDocument } from './types';
+import { copyClips, insertIntoTrack, moveClipToTrack, overlapsTrack, pasteClips, rippleDelete, shiftClip, splitClip, trackIdOf, visualTracks } from './clip-tracks';
+import { syncTransitionAudioFades, type ClipTransition } from './transitions';
+import { setLayerProps } from './project-commands';
+import { createLayer, type InputKind, type ProjectDocument } from './types';
 
 export type EditingCommand =
-  | { type: 'layer.create'; layerId: string; kind: 'text' | 'geometry'; name: string; startTime: number; endTime: number }
+  | { type: 'layer.create'; layerId: string; kind: InputKind; name: string; startTime: number; endTime: number; asset?: string; trackId?: string; props?: Record<string, unknown> }
   | { type: 'layer.setText'; layerId: string; text: string }
-  | { type: 'clip.split'; layerId: string; time: number; newLayerId: string }
+  | { type: 'clip.split'; layerId: string; time: number; newLayerId: string; sourceDuration?: number }
   | { type: 'clip.move'; layerId: string; startTime: number; trackId?: string; allowOverlap?: boolean }
   | { type: 'clip.duplicate'; layerId: string; startTime: number; newLayerId: string }
   | { type: 'clip.remove'; layerId: string; ripple?: boolean }
   | { type: 'clip.setTransition'; layerId: string; transition: ClipTransition | null };
-
-// Machine-readable descriptions also drive strict field parsing for these commands.
-export const EDITING_COMMANDS = {
-  'layer.create': { required: ['layerId', 'kind', 'name', 'startTime', 'endTime'], optional: [], description: 'Create text or geometry on a new top track. kind: text|geometry; times in seconds.' },
-  'layer.setText': { required: ['layerId', 'text'], optional: [], description: 'Set text content (0–10000 characters) on an unlocked text layer.' },
-  'clip.split': { required: ['layerId', 'time', 'newLayerId'], optional: [], description: 'Split at a frame boundary; preserve linked audio. Explicit sourceOut required for video; looping video is rejected.' },
-  'clip.move': { required: ['layerId', 'startTime'], optional: ['trackId', 'allowOverlap'], description: 'Move with duration, keyframes, fades and linked audio. Existing destination track; overlap defaults to false.' },
-  'clip.duplicate': { required: ['layerId', 'startTime', 'newLayerId'], optional: [], description: 'Copy one clip and linked audio; use original track if free, otherwise create a top track.' },
-  'clip.remove': { required: ['layerId'], optional: ['ripple'], description: 'Remove clip and linked audio; ripple defaults to false. Requires page confirmation at commit.' },
-  'clip.setTransition': { required: ['layerId', 'transition'], optional: [], description: 'Set {type: dissolve|dip|wipe-right|wipe-left|push-left, duration: seconds}, or null. Overlap determines duration when present.' },
-} as const;
-
-export function parseEditingCommand(value: Record<string, unknown>): EditingCommand | null {
-  if (typeof value.type !== 'string' || !Object.hasOwn(EDITING_COMMANDS, value.type)) return null;
-  const definition = EDITING_COMMANDS[value.type as keyof typeof EDITING_COMMANDS];
-  const allowed: readonly string[] = ['type', ...definition.required, ...definition.optional];
-  if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('Campo de comando desconhecido.');
-  for (const key of definition.required) if (!(key in value)) throw new Error(`Campo obrigatório: ${key}.`);
-  for (const key of ['layerId', 'newLayerId', 'trackId', 'name']) {
-    if (key in value && (typeof value[key] !== 'string' || !value[key].trim() || value[key].length > 200)) {
-      throw new Error(`${key} deve conter 1–200 caracteres.`);
-    }
-  }
-  for (const key of ['startTime', 'endTime', 'time']) {
-    if (key in value && (typeof value[key] !== 'number' || !Number.isFinite(value[key]) || value[key] < 0 || value[key] > 7200)) {
-      throw new Error(`${key} deve estar entre 0 e 7200 segundos.`);
-    }
-  }
-  for (const key of ['ripple', 'allowOverlap']) if (key in value && typeof value[key] !== 'boolean') throw new Error(`${key} deve ser booleano.`);
-  if (value.type === 'layer.create' && value.kind !== 'text' && value.kind !== 'geometry') throw new Error('kind deve ser text ou geometry.');
-  if (value.type === 'layer.setText' && (typeof value.text !== 'string' || value.text.length > 10000)) throw new Error('text deve ser texto com até 10000 caracteres.');
-  if (value.type === 'clip.setTransition' && value.transition !== null) {
-    const t = value.transition;
-    if (!t || typeof t !== 'object' || Array.isArray(t) || !('type' in t) || !isTransitionType(t.type)
-      || !('duration' in t) || typeof t.duration !== 'number' || !Number.isFinite(t.duration) || t.duration <= 0 || t.duration > 7200
-      || Object.keys(t).some(key => key !== 'type' && key !== 'duration')) throw new Error('Transição inválida.');
-  }
-  return structuredClone(value) as EditingCommand;
-}
 
 function idFactory(project: ProjectDocument, root: string) {
   const used = new Set<string>();
@@ -85,12 +47,20 @@ export function executeEditingCommand(project: ProjectDocument, command: Editing
   if (command.type === 'layer.create') {
     inComposition(project, command.startTime, command.endTime);
     const id = idFactory(project, command.layerId)('layer');
-    project.layers.unshift(createLayer(command.kind, project.settings, {
+    const layer = createLayer(command.kind, project.settings, {
       id, name: command.name, startTime: command.startTime, endTime: command.endTime,
       fadeInStart: command.startTime, fadeInEnd: command.startTime,
       fadeOutStart: command.endTime, fadeOutEnd: command.endTime,
-    }));
-    return { layerId: id };
+      ...(command.asset ? { asset: command.asset } : {}),
+    });
+    if (command.trackId) {
+      if (overlapsTrack(project, command.trackId, command.startTime, command.endTime)) throw new Error('Faixa de destino ocupada.');
+      if (!insertIntoTrack(project, layer, command.trackId)) throw new Error('Faixa de destino não encontrada.');
+    } else {
+      project.layers.unshift(layer);
+    }
+    if (command.props) setLayerProps(project, id, command.props);
+    return { layerId: id, trackId: trackIdOf(layer) };
   }
   const layer = project.layers.find(item => item.id === command.layerId);
   if (!layer) throw new Error(`Camada não encontrada: ${command.layerId}.`);
@@ -102,17 +72,22 @@ export function executeEditingCommand(project: ProjectDocument, command: Editing
       return { layerId: layer.id, text: layer.text };
     case 'clip.split': {
       frameTime(project, command.time);
-      // Do not guess decoded duration or restart a loop in an automated edit.
-      if (layer.kind === 'video' && (layer.loop || layer.sourceOut <= layer.sourceIn)) throw new Error('Corte de vídeo exige sourceOut explícito e loop desligado.');
-      const result = splitClip(project, layer.id, command.time, layer.sourceOut, .5 / project.settings.fps, idFactory(project, command.newLayerId));
+      // Without the decoded file duration, never guess it or restart a loop.
+      if (layer.kind === 'video' && !command.sourceDuration && (layer.loop || layer.sourceOut <= layer.sourceIn)) {
+        throw new Error('Corte de vídeo exige sourceOut explícito e loop desligado (ou sourceDuration).');
+      }
+      const mediaDuration = command.sourceDuration || layer.sourceOut;
+      const result = splitClip(project, layer.id, command.time, mediaDuration, .5 / project.settings.fps, idFactory(project, command.newLayerId));
       if (!result) throw new Error('O corte deve estar dentro do clipe, distante das bordas.');
       return { layerId: layer.id, newLayerId: result.second.id, audioIds: project.audioTracks.filter(t => t.linked && t.linkedLayerId === result.second.id).map(t => t.id) };
     }
     case 'clip.move': {
       const end = command.startTime + layer.endTime - layer.startTime;
-      inComposition(project, command.startTime, end);
+      // Só o início precisa cair num frame: o comprimento é o do próprio clipe (aparar deixa bordas fora da grade).
+      frameTime(project, command.startTime);
+      if (command.startTime < 0 || end > project.settings.duration + 1e-6) throw new Error('O clipe deve caber na duração da composição.');
       const target = command.trackId ?? trackIdOf(layer);
-      if (!project.layers.some(item => trackIdOf(item) === target)) throw new Error('Faixa de destino não encontrada.');
+      if (!visualTracks(project).some(track => track.id === target)) throw new Error('Faixa de destino não encontrada.');
       if (!command.allowOverlap && overlapsTrack(project, target, command.startTime, end, layer.id)) throw new Error('Faixa de destino ocupada.');
       shiftClip(project, layer, command.startTime - layer.startTime);
       if (target !== trackIdOf(layer) && !moveClipToTrack(project, layer.id, target, command.allowOverlap)) throw new Error('Não foi possível mover entre faixas.');

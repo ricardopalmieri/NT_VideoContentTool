@@ -194,6 +194,16 @@ export function validateProjectDocument(value: unknown) {
 
   if (!Array.isArray(value.postEffects)) issues.push("postEffects deve ser uma lista.");
   else value.postEffects.forEach((effect, index) => validateEffect(effect, `postEffects[${index}]`, false, issues, ids));
+  if (value.tracks !== undefined) {
+    const trackIds = new Set<string>();
+    if (!Array.isArray(value.tracks)) issues.push("tracks deve ser uma lista.");
+    else value.tracks.forEach((track, index) => {
+      if (!isRecord(track) || typeof track.id !== "string" || !track.id.trim() || trackIds.has(track.id)
+        || typeof track.name !== "string" || !track.name.trim() || track.name.length > 200
+        || (track.kind !== "video" && track.kind !== "audio")) issues.push(`tracks[${index}] inválida (id único, name 1–200, kind video|audio).`);
+      else trackIds.add(track.id);
+    });
+  }
   return { valid: issues.length === 0, issues };
 }
 

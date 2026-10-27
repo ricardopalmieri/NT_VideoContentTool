@@ -4,8 +4,17 @@ import {
   EFFECT_CATALOG,
   EFFECT_PARAMETERS,
 } from "./effect-catalog";
-import { syncLinkedAudioTracks } from "./linked-media";
-import { parseEditingCommand, executeEditingCommand, type EditingCommand } from "./editing-commands";
+import { executeEditingCommand, type EditingCommand } from "./editing-commands";
+import { isRecord } from "./command-schema";
+import { COMMANDS, parseCommandFields } from "./command-registry";
+import { copyClips, normalizeTrackMeta, pasteClips, type ClipboardClips } from "./clip-tracks";
+import { isTransitionType } from "./transitions";
+import { LOCK_EXEMPT_PROPERTIES } from "./property-tables";
+import * as ops from "./project-commands";
+import * as media from "./media-commands";
+import { resolveCommandTimes } from "./musical-time";
+import * as macros from "./macros";
+import type { Fit } from "./media-assets";
 import { toggleKeyframe, upsertKeyframe } from "./keyframes";
 import { assertValidProjectDocument } from "./validate-project";
 import type { AudioEffectKind, Easing, EffectKind, Keyframe, ProjectDocument } from "./types";
@@ -21,8 +30,7 @@ const numericLayerProperties: readonly LayerNumericProperty[] = [
   "fadeInStart", "fadeInEnd", "fadeOutStart", "fadeOutEnd",
   "fontSize", "fontWeight", "fillOpacity", "strokeOpacity", "strokeWidth",
 ];
-const easingValues = new Set<Easing>(["linear", "bezier", "easeIn", "easeOut", "easeInOut", "hold"]);
-const maxCommandsPerBatch = 100;
+export const MAX_COMMANDS_PER_BATCH = 500;
 const layerNumericRanges: Record<LayerNumericProperty, readonly [number, number]> = {
   x: [-32768, 32768], y: [-32768, 32768], scaleX: [-20, 20], scaleY: [-20, 20],
   rotation: [-3600, 3600], opacity: [0, 1], width: [1, 16384], height: [1, 16384],
@@ -36,20 +44,52 @@ function isNumericLayerProperty(property: string): property is LayerNumericPrope
   return numericLayerProperties.includes(property as LayerNumericProperty);
 }
 
+type TimeBase = "composition" | "clip";
+
 export type VctCommand =
   | EditingCommand
   | { type: "layer.setNumeric"; layerId: string; property: string; value: number }
   | { type: "layer.setName"; layerId: string; name: string }
-  | { type: "keyframe.upsert"; layerId: string; property: string; time: number; value: number; easing?: Easing }
-  | { type: "keyframe.toggle"; layerId: string; property: string; time: number; value: number; easing?: Easing }
-  | { type: "effect.keyframe.upsert"; effectId: string; property: string; time: number; value: number; easing?: Easing }
-  | { type: "effect.keyframe.toggle"; effectId: string; property: string; time: number; value: number; easing?: Easing }
+  | { type: "keyframe.upsert"; layerId: string; property: string; time: number; value: number; easing?: Easing; curve?: number; timeBase?: TimeBase }
+  | { type: "keyframe.toggle"; layerId: string; property: string; time: number; value: number; easing?: Easing; curve?: number; timeBase?: TimeBase }
+  | { type: "effect.keyframe.upsert"; effectId: string; property: string; time: number; value: number; easing?: Easing; curve?: number; timeBase?: TimeBase }
+  | { type: "effect.keyframe.toggle"; effectId: string; property: string; time: number; value: number; easing?: Easing; curve?: number; timeBase?: TimeBase }
   | { type: "effect.add"; kind: EffectKind; ownerId: string; effectId: string }
   | { type: "effect.setParam"; effectId: string; parameter: string; value: number }
   | { type: "effect.remove"; effectId: string }
   | { type: "audioEffect.add"; trackId: string; kind: AudioEffectKind; effectId: string }
   | { type: "audioEffect.setParam"; effectId: string; parameter: string; value: number }
-  | { type: "audioEffect.remove"; effectId: string };
+  | { type: "audioEffect.remove"; effectId: string }
+  | { type: "layer.set"; layerId: string; props: Record<string, unknown>; allowOverlap?: boolean }
+  | { type: "clip.paste"; clipboard: ClipboardClips; startTime: number }
+  | { type: "track.reorder"; trackId: string; index: number }
+  | { type: "keyframe.set"; layerId: string; property: string; keys: unknown[]; timeBase?: TimeBase }
+  | { type: "effect.keyframe.set"; effectId: string; property: string; keys: unknown[]; timeBase?: TimeBase }
+  | { type: "effect.set"; effectId: string; enabled?: boolean; name?: string }
+  | { type: "effect.reorder"; effectId: string; index: number }
+  | { type: "audio.create"; trackId: string; asset: string; name: string; startTime: number; endTime: number; laneId?: string; props?: Record<string, unknown> }
+  | { type: "audio.set"; trackId: string; props: Record<string, unknown> }
+  | { type: "audio.move"; trackId: string; startTime: number; laneId?: string }
+  | { type: "audio.link"; trackId: string; layerId?: string }
+  | { type: "audio.unlink"; trackId: string }
+  | { type: "audio.remove"; trackId: string }
+  | { type: "audio.reorderLane"; laneId: string; index: number }
+  | { type: "audioEffect.set"; effectId: string; enabled: boolean }
+  | { type: "audioEffect.reorder"; effectId: string; index: number }
+  | { type: "composition.set"; props: Record<string, unknown>; resize?: "adapt" | "keep" }
+  | ({ type: "clip.place" } & media.PlaceCommand)
+  | { type: "layer.fit"; layerId: string; fit: Fit }
+  | { type: "asset.add"; asset: string; metadata: Record<string, unknown> }
+  | { type: "asset.remove"; asset: string }
+  | { type: "track.create"; trackId: string; kind: "video" | "audio"; name?: string; index?: number }
+  | { type: "track.rename"; trackId: string; name: string }
+  | { type: "track.remove"; trackId: string }
+  | ({ type: "loop.seam" } & Parameters<typeof macros.expandLoopSeam>[1])
+  | ({ type: "fx.stutter" } & Parameters<typeof macros.expandStutter>[1])
+  | ({ type: "fx.strobe" } & Parameters<typeof macros.expandStrobe>[1])
+  | ({ type: "fx.spike" } & Parameters<typeof macros.expandSpike>[1])
+  | ({ type: "text.animate" } & Parameters<typeof macros.expandAnimate>[1])
+  | ({ type: "text.fromSrt" } & Parameters<typeof macros.expandSrt>[1]);
 
 export interface CommandResult {
   project: ProjectDocument;
@@ -57,94 +97,33 @@ export interface CommandResult {
   commands: readonly VctCommand[];
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function requiredText(value: unknown, name: string) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} precisa ser um texto não vazio.`);
   return value;
 }
 
-function finiteNumber(value: unknown, name: string) {
-  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${name} precisa ser um número finito.`);
-  return value;
-}
-
+// Strict parse: the registry rejects unknown fields and checks types/ranges;
+// the few nested shapes are checked here.
 function parseCommand(value: unknown): VctCommand {
   if (!isRecord(value) || typeof value.type !== "string") throw new Error("Comando VCT inválido.");
-  const editing = parseEditingCommand(value);
-  if (editing) return editing;
-  switch (value.type) {
-    case "layer.setNumeric":
-      return {
-        type: value.type,
-        layerId: requiredText(value.layerId, "layerId"),
-        property: requiredText(value.property, "property"),
-        value: finiteNumber(value.value, "value"),
-      };
-    case "layer.setName":
-      return {
-        type: value.type,
-        layerId: requiredText(value.layerId, "layerId"),
-        name: requiredText(value.name, "name"),
-      };
-    case "keyframe.upsert":
-    case "keyframe.toggle":
-    case "effect.keyframe.upsert":
-    case "effect.keyframe.toggle": {
-      const easing = value.easing === undefined ? "easeInOut" : value.easing;
-      if (typeof easing !== "string" || !easingValues.has(easing as Easing)) throw new Error("easing não é suportado.");
-      const base = {
-        property: requiredText(value.property, "property"),
-        time: finiteNumber(value.time, "time"),
-        value: finiteNumber(value.value, "value"),
-        easing: easing as Easing,
-      };
-      if (value.type === "effect.keyframe.upsert" || value.type === "effect.keyframe.toggle") {
-        return { ...base, type: value.type, effectId: requiredText(value.effectId, "effectId") };
-      }
-      return {
-        ...base,
-        type: value.type,
-        layerId: requiredText(value.layerId, "layerId"),
-      };
+  const type = parseCommandFields(value);
+  if (type === "clip.setTransition" && value.transition !== null) {
+    const t = value.transition;
+    if (!isRecord(t) || !isTransitionType(t.type) || typeof t.duration !== "number" || !Number.isFinite(t.duration)
+      || t.duration <= 0 || t.duration > 7200 || Object.keys(t).some((key) => key !== "type" && key !== "duration")) {
+      throw new Error("Transição inválida.");
     }
-    case "effect.add":
-      return {
-        type: value.type,
-        kind: requiredText(value.kind, "kind") as EffectKind,
-        ownerId: requiredText(value.ownerId, "ownerId"),
-        effectId: requiredText(value.effectId, "effectId"),
-      };
-    case "effect.setParam":
-      return {
-        type: value.type,
-        effectId: requiredText(value.effectId, "effectId"),
-        parameter: requiredText(value.parameter, "parameter"),
-        value: finiteNumber(value.value, "value"),
-      };
-    case "effect.remove":
-      return { type: value.type, effectId: requiredText(value.effectId, "effectId") };
-    case "audioEffect.add":
-      return {
-        type: value.type,
-        trackId: requiredText(value.trackId, "trackId"),
-        kind: requiredText(value.kind, "kind") as AudioEffectKind,
-        effectId: requiredText(value.effectId, "effectId"),
-      };
-    case "audioEffect.setParam":
-      return {
-        type: value.type,
-        effectId: requiredText(value.effectId, "effectId"),
-        parameter: requiredText(value.parameter, "parameter"),
-        value: finiteNumber(value.value, "value"),
-      };
-    case "audioEffect.remove":
-      return { type: value.type, effectId: requiredText(value.effectId, "effectId") };
-    default:
-      throw new Error(`Comando VCT não suportado: ${value.type}.`);
   }
+  if (type === "layer.create" && ["image", "video", "guide"].includes(value.kind as string)) requiredText(value.asset, "asset");
+  if (type === "clip.paste") {
+    const clipboard = value.clipboard as Record<string, unknown>;
+    if (!Array.isArray(clipboard.layers) || !Array.isArray(clipboard.audio) || !clipboard.layers.length) {
+      throw new Error("clipboard deve ter layers (não vazia) e audio.");
+    }
+  }
+  const command = structuredClone(value) as VctCommand & { easing?: Easing };
+  if ("easing" in COMMANDS[type].fields && command.easing === undefined) command.easing = "easeInOut";
+  return command;
 }
 
 function findLayer(project: ProjectDocument, layerId: string) {
@@ -192,7 +171,39 @@ function validateAudioEffectParameter(
   }
 }
 
-function executeCommand(project: ProjectDocument, command: VctCommand, tolerance: number) {
+// timeBase "clip": key times count from the start of the clip that owns them.
+function toCompositionTime(project: ProjectDocument, command: VctCommand) {
+  if (!("timeBase" in command) || command.timeBase !== "clip") return command;
+  const owner = "layerId" in command
+    ? project.layers.find((layer) => layer.id === command.layerId)
+    : project.layers.find((layer) => layer.effects.some((effect) => effect.id === (command as { effectId: string }).effectId));
+  const start = owner?.startTime ?? 0;
+  const copy = structuredClone(command) as VctCommand & { time?: number; keys?: Array<{ time?: unknown }> };
+  if (typeof copy.time === "number") copy.time += start;
+  for (const key of copy.keys ?? []) if (typeof key.time === "number") key.time += start;
+  return copy;
+}
+
+function setCurve(keys: Keyframe[] | undefined, time: number, curve: number | undefined, tolerance: number) {
+  if (curve === undefined || !keys) return;
+  const key = keys.find((item) => Math.abs(item.time - time) <= tolerance);
+  if (key) key.curve = curve;
+}
+
+function executeCommand(project: ProjectDocument, input: VctCommand, tolerance: number): unknown {
+  const command = toCompositionTime(project, input);
+  const result = runCommand(project, command, tolerance);
+  if ((command.type === "keyframe.upsert" || command.type === "keyframe.toggle") && command.curve !== undefined) {
+    setCurve(project.layers.find((layer) => layer.id === command.layerId)?.keyframes[command.property], command.time, command.curve, tolerance);
+  }
+  if ((command.type === "effect.keyframe.upsert" || command.type === "effect.keyframe.toggle") && command.curve !== undefined) {
+    const effect = findEffect(project, command.effectId);
+    setCurve(effect?.keyframes[command.property], command.time, command.curve, tolerance);
+  }
+  return result;
+}
+
+function runCommand(project: ProjectDocument, command: VctCommand, tolerance: number): unknown {
   switch (command.type) {
     case 'layer.create': case 'layer.setText': case 'clip.split': case 'clip.move':
     case 'clip.duplicate': case 'clip.remove': case 'clip.setTransition':
@@ -201,21 +212,13 @@ function executeCommand(project: ProjectDocument, command: VctCommand, tolerance
       if (!isNumericLayerProperty(command.property)) throw new Error(`Propriedade numérica não permitida: ${command.property}.`);
       const layer = findLayer(project, command.layerId);
       if (layer.locked) throw new Error(`A camada está bloqueada: ${layer.id}.`);
-      const [min, max] = layerNumericRanges[command.property];
-      if (command.value < min || command.value > max) throw new Error(`${command.property} deve estar entre ${min} e ${max}.`);
-      layer[command.property] = command.value;
-      if (layer.kind === "video" && [
-        "startTime", "endTime", "sourceIn", "sourceOut", "playbackRate",
-        "fadeInStart", "fadeInEnd", "fadeOutStart", "fadeOutEnd",
-      ].includes(command.property)) {
-        syncLinkedAudioTracks(layer, project.audioTracks);
-      }
+      ops.setLayerProps(project, layer.id, { [command.property]: command.value });
       return { layerId: layer.id, property: command.property, value: command.value };
     }
     case "layer.setName": {
       const layer = findLayer(project, command.layerId);
       if (layer.locked) throw new Error(`A camada está bloqueada: ${layer.id}.`);
-      layer.name = command.name.slice(0, 200);
+      layer.name = command.name;
       return { layerId: layer.id, name: layer.name };
     }
     case "keyframe.upsert":
@@ -343,7 +346,54 @@ function executeCommand(project: ProjectDocument, command: VctCommand, tolerance
       }
       throw new Error(`Efeito de áudio não encontrado: ${command.effectId}.`);
     }
+    case "layer.set": return ops.setLayerProps(project, command.layerId, command.props, command.allowOverlap);
+    case "clip.paste": {
+      const pasted = pasteClips(project, command.clipboard, command.startTime);
+      return { layerIds: pasted.map((layer) => layer.id) };
+    }
+    case "track.reorder": return ops.reorderTrack(project, command.trackId, command.index);
+    case "keyframe.set": return ops.setLayerKeyframes(project, command.layerId, command.property, command.keys);
+    case "effect.keyframe.set": return ops.setEffectKeyframes(project, command.effectId, command.property, command.keys);
+    case "effect.set": return ops.setEffect(project, command.effectId, { enabled: command.enabled, name: command.name });
+    case "effect.reorder": return ops.reorderEffect(project, command.effectId, command.index);
+    case "audio.create": return ops.createAudioClip(project, command);
+    case "audio.set": return ops.setAudioProps(project, command.trackId, command.props);
+    case "audio.move": return ops.moveAudioClip(project, command.trackId, command.startTime, command.laneId);
+    case "audio.link": return ops.linkAudio(project, command.trackId, command.layerId);
+    case "audio.unlink": return ops.unlinkAudio(project, command.trackId);
+    case "audio.remove": return ops.removeAudioClip(project, command.trackId);
+    case "audio.reorderLane": return ops.reorderAudioLane(project, command.laneId, command.index);
+    case "audioEffect.set": return ops.setAudioEffect(project, command.effectId, { enabled: command.enabled });
+    case "audioEffect.reorder": return ops.reorderAudioEffect(project, command.effectId, command.index);
+    case "composition.set": return ops.setComposition(project, command.props, command.resize);
+    case "clip.place": return media.placeClip(project, command);
+    case "layer.fit": return media.fitLayer(project, command.layerId, command.fit);
+    case "asset.add": return media.addAsset(project, command.asset, command.metadata);
+    case "asset.remove": return media.removeAsset(project, command.asset);
+    case "track.create": return media.createTrack(project, command.trackId, command.kind, command.name, command.index);
+    case "track.rename": return media.renameTrack(project, command.trackId, command.name);
+    case "track.remove": return media.removeTrack(project, command.trackId);
+    case "loop.seam": return runMacro(project, macros.expandLoopSeam(project, command), tolerance);
+    case "fx.stutter": return runMacro(project, macros.expandStutter(project, command), tolerance);
+    case "fx.strobe": {
+      if (!command.times.every((time) => typeof time === "number" && Number.isFinite(time) && time >= 0)) throw new Error("times deve ser uma lista de segundos.");
+      return runMacro(project, macros.expandStrobe(project, command), tolerance);
+    }
+    case "fx.spike": return runMacro(project, macros.expandSpike(project, command), tolerance);
+    case "text.animate": return runMacro(project, macros.expandAnimate(project, command), tolerance);
+    case "text.fromSrt": return runMacro(project, macros.expandSrt(project, command), tolerance);
   }
+}
+
+/** Runs a macro's base commands in order; the result lists them for review. */
+function runMacro(project: ProjectDocument, expanded: Array<Record<string, unknown>>, tolerance: number): { expanded: Array<Record<string, unknown>>; results: unknown[] } {
+  const results: unknown[] = expanded.map((item) => executeCommand(project, parseCommand(resolveCommandTimes(item, project.settings)), tolerance));
+  return { expanded, results };
+}
+
+/** Copies clips for clip.paste (same shape the editor clipboard uses). */
+export function clipboardFor(project: ProjectDocument, layerIds: string[]) {
+  return copyClips(project, layerIds);
 }
 
 export function runProjectCommands(
@@ -351,15 +401,29 @@ export function runProjectCommands(
   input: readonly unknown[],
   tolerance: number,
 ): CommandResult {
-  if (!Array.isArray(input) || !input.length || input.length > maxCommandsPerBatch) {
-    throw new Error(`O lote deve conter entre 1 e ${maxCommandsPerBatch} comandos.`);
+  if (!Array.isArray(input) || !input.length || input.length > MAX_COMMANDS_PER_BATCH) {
+    throw new Error(`O lote deve conter entre 1 e ${MAX_COMMANDS_PER_BATCH} comandos.`);
   }
   if (!Number.isFinite(tolerance) || tolerance < 0) throw new Error("A tolerância de keyframe é inválida.");
-  const commands = input.map(parseCommand);
+  // bar:beat times use the grid already in the project or set earlier in this batch.
+  let timing = source.settings;
+  const commands = input.map((value) => {
+    const command = parseCommand(resolveCommandTimes(value, timing));
+    if (command.type === "composition.set" && isRecord(command.props) && isRecord(command.props.grid)) {
+      timing = { ...timing, grid: { offset: 0, beatsPerBar: 4, ...command.props.grid } as ProjectDocument["settings"]["grid"] };
+    }
+    return command;
+  });
   const project = structuredClone(source);
   const results = commands.map((command) => executeCommand(project, command, tolerance));
+  normalizeTrackMeta(project);
+  // A composition resize remaps every layer, locked ones included (as the editor always did).
+  const resizing = commands.some((command) => command.type === "composition.set" && ("width" in command.props || "height" in command.props));
+  const resizeKeys = ["x", "y", "width", "height", "fontSize", "strokeWidth", "keyframes"];
+  const lockedView = (layer: object) => JSON.stringify(layer, (key, value) => LOCK_EXEMPT_PROPERTIES.includes(key) || (resizing && resizeKeys.includes(key)) ? undefined : value);
   for (const locked of source.layers.filter(layer => layer.locked)) {
-    if (JSON.stringify(project.layers.find(layer => layer.id === locked.id)) !== JSON.stringify(locked)) {
+    const after = project.layers.find(layer => layer.id === locked.id);
+    if (after && lockedView(after) !== lockedView(locked)) {
       throw new Error(`A camada está bloqueada: ${locked.id}.`);
     }
   }

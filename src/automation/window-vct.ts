@@ -1,20 +1,23 @@
 import { listAudioEffectCatalog, listEffectCatalog } from "../model/effect-catalog";
-import { runProjectCommands, type VctCommand } from "../model/commands";
+import { MAX_COMMANDS_PER_BATCH, runProjectCommands, type VctCommand } from "../model/commands";
+import { describeCommand, describeCommandsText, isConsequential } from "../model/command-registry";
 import { validateProjectDocument } from "../model/validate-project";
 import type { ProjectDocument } from "../model/types";
-import { audioLanes, visualTracks } from "../model/clip-tracks";
-import { EDITING_COMMANDS } from "../model/editing-commands";
+import { audioLanes, trackName, visualTracks } from "../model/clip-tracks";
+import { assetsText } from "../model/media-assets";
+import { timelineText } from "../model/timeline-text";
+import { lintText } from "../model/lint";
 import { AGENT_GUIDE } from "./agent-guide";
 
 function timelineSummary(project: ProjectDocument) {
   return structuredClone({
     settings: project.settings,
-    tracks: visualTracks(project).map(track => ({ id: track.id, clips: track.clips.map(layer => ({
+    tracks: visualTracks(project).map(track => ({ id: track.id, name: trackName(project, track.id), clips: track.clips.map(layer => ({
       id: layer.id, name: layer.name, kind: layer.kind, startTime: layer.startTime, endTime: layer.endTime,
       locked: layer.locked, asset: layer.asset, text: layer.kind === 'text' ? layer.text : undefined,
       transition: layer.transition, effectIds: layer.effects.map(effect => effect.id),
     })) })),
-    audio: audioLanes(project).map(lane => ({ id: lane.id, clips: lane.clips.map(track => ({
+    audio: audioLanes(project).map(lane => ({ id: lane.id, name: trackName(project, lane.id), clips: lane.clips.map(track => ({
       id: track.id, name: track.name, startTime: track.startTime, endTime: track.endTime,
       linked: track.linked, linkedLayerId: track.linkedLayerId, effectIds: track.effects.map(effect => effect.id),
     })) })),
@@ -22,8 +25,35 @@ function timelineSummary(project: ProjectDocument) {
 }
 
 function requiresConfirmation(commands: readonly VctCommand[]) {
-  return commands.some(command => ['clip.remove', 'effect.remove', 'audioEffect.remove'].includes(command.type));
+  return commands.some(command => isConsequential(command.type));
 }
+
+// Rules that are not obvious from field names. Text only, without ? & or =
+// (Claude in Chrome blocks those characters in returned values).
+const SEMANTICS = [
+  "Tempos em segundos da composição, alinhados a frames (frame dividido por fps).",
+  "Fluxo curto: assets() e summary() para ler; clip.place para montar; dryRun ou plan com dryRun; batch ou plan; lint(); captureFrame para conferir.",
+  "Keyframe: time em s da composição; com timeBase clip conta do início do clipe. O easing de um keyframe vale do key até o próximo; hold segura o valor e salta no próximo key.",
+  "Tempos musicais: com grid definido (composition.set grid bpm), startTime endTime time duration e at aceitam bar:3.2, beat:14, bars:2 e beats:4.",
+  "Efeitos de pós (rgbDelay noise glitch vhs cameraShake glow) usam ownerId __post__; os demais vão numa camada.",
+  "Faixa visual: id da faixa é trackId do clipe ou o id do primeiro clipe. Índice 0 é o topo (desenhado por cima).",
+  "Remoções pedem confirmação ao usuário no commit. dryRun não pede.",
+  "Ids novos: curtos e legíveis. Ids derivados de corte e duplicação: novoId:audio:N e novoId:fx:N.",
+];
+
+const PAGE = 900;
+let pending = "";
+
+/** Long text comes back in pages of 900 characters; call more() for the rest. */
+function paged(raw: string) {
+  // User text (clip names, titles) may contain them; full-width forms read the same.
+  const text = raw.replace(/[?&=]/g, (character) => ({ "?": "？", "&": "＆", "=": "＝" })[character]!);
+  if (text.length <= PAGE) { pending = ""; return text; }
+  pending = text.slice(PAGE);
+  return `${text.slice(0, PAGE)}\n[continua: vct.more()]`;
+}
+
+const METHODS = ['guide', 'describe', 'more', 'assets', 'summary', 'lint', 'plan', 'contactSheet', 'assetSheet', 'hideSheet', 'analyzeMix', 'analyzeAudio', 'analyzeVideo', 'getTimeline', 'getProject', 'query', 'validate', 'listCatalog', 'dryRun', 'dispatch', 'batch', 'undo', 'redo', 'captureFrame', 'onChange'];
 
 export interface VctChangeEvent {
   revision: number;
@@ -36,7 +66,29 @@ export interface VctApi {
   getProject(): ProjectDocument;
   /** Guia para agentes de IA: fluxo, regras do editor, motion design e VJ. */
   guide(): string;
-  describe(): { version: string; timeUnit: string; maxBatchSize: number; editingCommands: typeof EDITING_COMMANDS; methods: string[]; limitations: string[] };
+  /** Sem argumento: texto curto com todos os comandos e regras. Com um tipo: campos, limites e exemplo desse comando. */
+  describe(type?: string): string | ReturnType<typeof describeCommand>;
+  /** Próxima página de um texto longo devolvido por describe/guide. */
+  more(): string;
+  /** Mídias do bin, uma por linha: id, tipo, duração, resolução, orientação, áudio, uso. */
+  assets(): string;
+  /** Timeline em texto curto: uma linha por faixa. */
+  summary(): string;
+  /** Problemas de qualidade em texto: flashes, área segura, buracos, áudio sobreposto, tempo de leitura. */
+  lint(): string;
+  /** Vários lotes simulados em sequência e aplicados como um passo de desfazer (ou só simulados com dryRun). */
+  plan(batches: ReadonlyArray<readonly VctCommand[]>, options?: { label?: string; dryRun?: boolean }): { results: unknown[][]; summary: string; lint: string };
+  /** Folha de contato da composição: vários quadros numa imagem, com o tempo em cada célula. show cobre a aba para um screenshot. */
+  contactSheet(options?: SheetOptions & { times?: number[]; every?: number }): Promise<SheetResult>;
+  /** Folha de contato de uma mídia do bin, sem pôr na timeline. */
+  assetSheet(asset: string, options?: SheetOptions & { count?: number; times?: number[] }): Promise<SheetResult>;
+  hideSheet(): void;
+  /** Nível da mixagem final por trecho, fontes que soam e alerta de clipping. */
+  analyzeMix(options?: { start?: number; end?: number; step?: number }): Promise<string>;
+  /** BPM, offset da grade, onsets e seções de volume de uma mídia do bin. */
+  analyzeAudio(asset: string): Promise<string>;
+  /** Cortes de cena, brilho, cor e movimento de um vídeo do bin. */
+  analyzeVideo(asset: string, options?: { step?: number }): Promise<string>;
   getTimeline(): ReturnType<typeof timelineSummary>;
   dryRun(commands: readonly VctCommand[]): { results: readonly unknown[]; timeline: ReturnType<typeof timelineSummary>; requiresConfirmation: boolean };
   undo(): boolean;
@@ -62,6 +114,26 @@ export interface VctApiHost {
   undo?(): boolean;
   redo?(): boolean;
   captureFrame?(time: number | undefined, maxWidth: number): Promise<VctFrame>;
+  /** Renders a still that waits for decode; returns a canvas copy and layers that failed. */
+  stillFrame?(time: number, maxWidth: number): Promise<{ canvas: HTMLCanvasElement; notReady: string[] }>;
+}
+
+export interface SheetOptions {
+  cols?: number;
+  /** Largura de cada célula em px (padrão 240). */
+  size?: number;
+  /** true: mostra a folha sobre o editor (um screenshot basta) e não devolve dataUrl. */
+  show?: boolean;
+}
+
+export interface SheetResult {
+  width: number;
+  height: number;
+  frames: number;
+  /** Quadros em que alguma camada não decodificou (marcados em vermelho). */
+  notReady: string[];
+  dataUrl?: string;
+  note: string;
 }
 
 export interface VctFrame {
@@ -70,6 +142,8 @@ export interface VctFrame {
   height: number;
   /** data:image/jpeg;base64,… */
   dataUrl: string;
+  /** Ids de camadas que não decodificaram a tempo e ficaram fora do quadro. */
+  notReady?: string[];
 }
 
 declare global {
@@ -103,18 +177,119 @@ function queryProject(host: VctApiHost, selector: unknown) {
   return structuredClone(layer);
 }
 
+async function sheetResult(frames: Array<{ image: CanvasImageSource; width: number; height: number; label: string; warning?: boolean }>, options: SheetOptions, size: number, notReady: string[], caption: string): Promise<SheetResult> {
+  const { composeSheet, showSheet } = await import('./contact-sheet');
+  const canvas = composeSheet(frames, options.cols ?? Math.min(6, Math.ceil(Math.sqrt(frames.length * 1.5))), size);
+  const base = { width: canvas.width, height: canvas.height, frames: frames.length, notReady };
+  if (options.show) {
+    showSheet(canvas, caption);
+    return { ...base, note: 'Folha na tela: tire um screenshot e depois chame hideSheet().' };
+  }
+  return { ...base, dataUrl: canvas.toDataURL('image/jpeg', .8), note: caption };
+}
+
 export function createVctApi(host: VctApiHost): VctApi {
   const listeners = new Set<(event: VctChangeEvent) => void>();
   let revision = 0;
   const api: VctApi = {
     version: "1",
     getProject: () => structuredClone(activeProject(host)),
-    guide: () => AGENT_GUIDE,
-    describe: () => structuredClone({
-      version: '1', timeUnit: 'seconds', maxBatchSize: 100, editingCommands: EDITING_COMMANDS,
-      methods: ['guide', 'getTimeline', 'getProject', 'query', 'validate', 'listCatalog', 'dryRun', 'dispatch', 'batch', 'undo', 'redo', 'captureFrame', 'onChange'],
-      limitations: ['Existing open project required', 'Runs inside the page: agents execute JavaScript in this tab (e.g. Claude in Chrome)', 'No file access/import/export', 'New clip timings must fit composition and align to frames', 'Split video requires explicit sourceOut and loop disabled', 'Deletion requires confirmation in page'],
-    }),
+    guide: () => paged(AGENT_GUIDE),
+    describe: (type) => {
+      if (type !== undefined) return describeCommand(type);
+      return paged([
+        `VCT API 1 · lote 1 a ${MAX_COMMANDS_PER_BATCH} comandos, tudo ou nada, um passo de desfazer`,
+        `Métodos: ${METHODS.join(" ")}`,
+        "Campos com ! são obrigatórios. Detalhe e exemplo: describe(tipo).",
+        ...SEMANTICS.map((line) => `- ${line}`),
+        describeCommandsText(),
+        "Limites: projeto aberto pela pessoa; a API não importa mídia, não salva e não exporta.",
+      ].join("\n"));
+    },
+    more: () => paged(pending),
+    assets: () => paged(assetsText(activeProject(host))),
+    summary: () => paged(timelineText(activeProject(host))),
+    lint: () => paged(lintText(activeProject(host))),
+    contactSheet: async (options = {}) => {
+      const project = activeProject(host);
+      if (!host.stillFrame) throw new Error('Folha de contato indisponível neste host.');
+      const start = project.settings.workArea?.in ?? 0;
+      const end = project.settings.workArea?.out ?? project.settings.duration;
+      if (options.times !== undefined && !Array.isArray(options.times)) throw new Error('times deve ser uma lista de segundos.');
+      if (options.every !== undefined && !(options.every > 0)) throw new Error('every deve ser maior que zero.');
+      const last = end - 1 / project.settings.fps;
+      const every = options.every ?? Math.max(1 / project.settings.fps, (last - start) / 11);
+      const times = (options.times?.length ? options.times : Array.from({ length: Math.min(48, Math.floor((last - start) / every + 1e-9) + 1) }, (_, index) => Math.min(last, start + index * every)))
+        .filter((time) => Number.isFinite(time) && time >= 0 && time <= project.settings.duration).slice(0, 48);
+      if (!times.length) throw new Error('Nenhum tempo válido para a folha.');
+      const size = Math.max(80, Math.min(480, Math.round(options.size ?? 240)));
+      const frames = [];
+      const notReady: string[] = [];
+      for (const time of times) {
+        const still = await host.stillFrame(time, size);
+        if (still.notReady.length) notReady.push(`${time.toFixed(2)} s: ${still.notReady.join(' ')}`);
+        frames.push({ image: still.canvas, width: still.canvas.width, height: still.canvas.height, label: `${time.toFixed(2)} s`, warning: still.notReady.length > 0 });
+      }
+      return sheetResult(frames, options, size, notReady, `Composição: ${times.length} quadros`);
+    },
+    assetSheet: async (asset, options = {}) => {
+      const project = activeProject(host);
+      const { assetFrames } = await import('./contact-sheet');
+      const size = Math.max(80, Math.min(480, Math.round(options.size ?? 240)));
+      const frames = await assetFrames(asset, { count: options.count, times: options.times, duration: project.assetMetadata?.[asset]?.duration });
+      return sheetResult(frames, options, size, frames.filter((frame) => frame.warning).map((frame) => frame.label), `${asset}: ${frames.length} quadros`);
+    },
+    hideSheet: () => {
+      void import('./contact-sheet').then(({ hideSheet }) => hideSheet());
+    },
+    analyzeMix: async (options = {}) => {
+      const { analyzeMixText } = await import('./agent-analysis');
+      const project = activeProject(host);
+      return paged(await analyzeMixText(project, options.start ?? 0, options.end ?? project.settings.duration, Math.max(.1, options.step ?? .5)));
+    },
+    analyzeVideo: async (asset, options = {}) => {
+      activeProject(host);
+      const { analyzeVideoText } = await import("./agent-analysis");
+      return paged(await analyzeVideoText(asset, Math.max(.1, Math.min(10, options.step ?? .5))));
+    },
+    analyzeAudio: async (asset) => {
+      activeProject(host);
+      const { analyzeAudioText } = await import('./agent-analysis');
+      return paged(await analyzeAudioText(asset));
+    },
+    plan: (batches, options = {}) => {
+      if (!Array.isArray(batches) || !batches.length || batches.length > 50) throw new Error("plan espera de 1 a 50 lotes.");
+      const source = activeProject(host);
+      let draft = source;
+      const results: unknown[][] = [];
+      const commands: VctCommand[] = [];
+      batches.forEach((batch, index) => {
+        try {
+          const step = runProjectCommands(draft, batch, host.keyframeTolerance());
+          draft = step.project;
+          results.push(step.results as unknown[]);
+          commands.push(...step.commands);
+        } catch (error) {
+          throw new Error(`Lote ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      });
+      const report = { results, summary: paged(timelineText(draft)), lint: lintText(draft) };
+      if (options.dryRun) return report;
+      host.assertCanEdit?.();
+      const label = options.label?.trim() || "Plano do agente";
+      if (requiresConfirmation(commands) && !host.confirmConsequential(`Confirmar remoção de clipe/efeito no plano "${label}"?`)) {
+        throw new Error("Plano cancelado pelo usuário.");
+      }
+      if (JSON.stringify(draft) !== JSON.stringify(source)) {
+        host.commitProject(draft, label);
+        revision++;
+        const event = { revision, label, commands };
+        for (const listener of listeners) {
+          try { listener(event); } catch (error) { console.error("A VCT change listener failed.", error); }
+        }
+      }
+      return report;
+    },
     getTimeline: () => timelineSummary(activeProject(host)),
     dryRun: commands => {
       const result = runProjectCommands(activeProject(host), commands, host.keyframeTolerance());

@@ -92,7 +92,7 @@ describe('agent API', () => {
     expect(api.getTimeline()).toEqual(plan.timeline);
     plan.timeline.tracks[0].clips[0].name = 'Mutated';
     expect(doc.layers[0].name).not.toBe('Mutated');
-    expect(api.describe().editingCommands['clip.split'].required).toContain('newLayerId');
+    expect((api.describe('clip.split') as { fields: Record<string, { required?: boolean }> }).fields.newLayerId.required).toBe(true);
   });
 
   it('cancelled removal leaves the project intact and dryRun only reports the confirmation', () => {

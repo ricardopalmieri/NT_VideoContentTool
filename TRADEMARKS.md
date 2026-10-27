@@ -1,7 +1,6 @@
 # Marcas e identidade visual
 
-Noisetupi e os logos deste projeto são identificadores de Ricardo Palmieri /
-Noisetupi. A licença MPL-2.0 do código e a licença CC BY 4.0 da documentação
+Noisetupi e os logos deste projeto são identificadores da Noisetupi. A licença MPL-2.0 do código e a licença CC BY 4.0 da documentação
 não concedem autorização geral para usar essas marcas em outro produto nem
 para sugerir apoio, parceria ou autoria oficial.
 

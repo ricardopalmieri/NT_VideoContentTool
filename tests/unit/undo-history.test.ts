@@ -45,3 +45,15 @@ describe("undo history", () => {
     expect(undoCount).toBe(60);
   });
 });
+
+describe("undo step names", () => {
+  it("keeps the label of each step across undo and redo", () => {
+    const history = new UndoHistory();
+    history.checkpoint("A", "Mover clipe");
+    expect(history.undoLabel("B")).toBe("Mover clipe");
+    expect(history.undo("B")).toBe("A");
+    expect(history.redoLabel("A")).toBe("Mover clipe");
+    expect(history.redo("A")).toBe("B");
+    expect(history.undoLabel("B")).toBe("Mover clipe");
+  });
+});

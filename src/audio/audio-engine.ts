@@ -159,6 +159,17 @@ export class AudioTimelineEngine {
   private context: AudioContext | null = null;
   private active: AudioBufferSourceNode[] = [];
   private generation = 0;
+  private analyser: AnalyserNode | null = null;
+  private samples: Float32Array<ArrayBuffer> | null = null;
+
+  /** Peak level (0..1) of what is playing now; 0 when idle. Reads a tap, the mix is untouched. */
+  level() {
+    if (!this.analyser || !this.samples || !this.active.length) return 0;
+    this.analyser.getFloatTimeDomainData(this.samples);
+    let peak = 0;
+    for (const sample of this.samples) peak = Math.max(peak, Math.abs(sample));
+    return Math.min(1.2, peak);
+  }
 
   stop() {
     this.generation++;
@@ -172,6 +183,12 @@ export class AudioTimelineEngine {
     this.stop();
     this.context ||= new AudioContext();
     await this.context.resume();
+    if (!this.analyser) {
+      this.analyser = this.context.createAnalyser();
+      this.analyser.fftSize = 1024;
+      this.samples = new Float32Array(this.analyser.fftSize);
+      this.analyser.connect(this.context.destination);
+    }
     const generation = this.generation;
     for (const track of project.audioTracks || []) {
       if (track.muted || timelineTime >= track.endTime) continue;
@@ -189,7 +206,7 @@ export class AudioTimelineEngine {
         const remaining = Math.max(0, track.endTime - Math.max(timelineTime, track.startTime));
         if (!remaining) continue;
         const timelineStart = Math.max(timelineTime, track.startTime);
-        connectTrack(this.context, source, track, this.context.destination, this.context.currentTime + delay, timelineStart);
+        connectTrack(this.context, source, track, this.analyser, this.context.currentTime + delay, timelineStart);
         source.start(this.context.currentTime + delay, Math.min(original.duration - .001, offset));
         source.stop(this.context.currentTime + delay + remaining);
         this.active.push(source);
@@ -220,4 +237,25 @@ export async function mixProjectAudio(project: ProjectDocument, sampleRate = 48_
     }
   }
   return scheduled ? context.startRendering() : null;
+}
+
+/** Copy of the part of a buffer that starts at start seconds and lasts duration seconds. */
+export function sliceAudioBuffer(buffer: AudioBuffer, start: number, duration: number) {
+  const first = Math.min(buffer.length, Math.max(0, Math.round(start * buffer.sampleRate)));
+  const length = Math.max(1, Math.min(buffer.length - first, Math.round(duration * buffer.sampleRate)));
+  const result = new AudioBuffer({ length, numberOfChannels: buffer.numberOfChannels, sampleRate: buffer.sampleRate });
+  for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+    result.copyToChannel(buffer.getChannelData(channel).subarray(first, first + length), channel);
+  }
+  return result;
+}
+
+/** Decodes a bin file (audio or the audio of a video) for analysis; cached like playback. */
+export async function decodeAsset(asset: string) {
+  const context = new OfflineAudioContext(1, 1, 44_100);
+  try {
+    return await fetchAudioBuffer(asset, context);
+  } catch (error) {
+    throw new Error(`Não foi possível decodificar o áudio de ${asset}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }

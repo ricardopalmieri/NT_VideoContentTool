@@ -26,7 +26,7 @@ await build({
   format: "esm",
   target: "node20",
   external: ["bufferutil", "utf-8-validate"],
-  define: { __VCT_GUIDES__: JSON.stringify(guides) },
+  define: { __VCT_GUIDES__: JSON.stringify(guides), __VCT_VERSION__: JSON.stringify(version) },
   banner: { js: "import { createRequire as __vctRequire } from 'node:module'; const require = __vctRequire(import.meta.url);" },
   legalComments: "eof",
   logLevel: "warning",

@@ -568,6 +568,14 @@ export class ComposerRenderer {
       ctx.beginPath();
       ctx.rect(-layerWidth / 2, -layerHeight / 2, layerWidth, layerHeight);
       ctx.clip();
+      const shadowAlpha = layer.shadowColor ? layer.shadowOpacity ?? .6 : 0;
+      if (shadowAlpha > 0) {
+        const hex = layer.shadowColor!.replace("#", "");
+        ctx.shadowColor = `rgba(${parseInt(hex.slice(0, 2), 16)}, ${parseInt(hex.slice(2, 4), 16)}, ${parseInt(hex.slice(4, 6), 16)}, ${shadowAlpha})`;
+        ctx.shadowBlur = layer.shadowBlur ?? 12;
+        ctx.shadowOffsetX = layer.shadowX ?? 0;
+        ctx.shadowOffsetY = layer.shadowY ?? 4;
+      }
       visibleLines.forEach((line, index) => {
         const drawY = startY + index * lineHeight;
         if (layer.fillEnabled) {
@@ -590,17 +598,17 @@ export class ComposerRenderer {
       if (media instanceof HTMLVideoElement) {
         // Preview should never wait for media I/O. loadedmetadata/loadeddata
         // invalidate the renderer as soon as the frame can actually be drawn.
-        if (media.readyState < 1 && !exporting) return false;
+        if (media.readyState < 1 && !exporting && !this.stillMode) return false;
         const sourceTime = this.sourceTimeFor(layer, time, media.duration || 0);
         const speed = Math.max(.05, Math.min(8, Math.abs(this.evaluated(layer, "playbackRate", time) || 1)));
-        if (exporting || !this.previewPlaying || layer.reverse) {
+        if (exporting || this.stillMode || !this.previewPlaying || layer.reverse) {
           if (!await this.seekVideo(media, sourceTime)) return false;
         } else {
           this.syncVideoPlayback(layer.id, media, sourceTime, speed);
         }
         if (media.readyState < 2) {
           const cachedFrame = this.videoFrameCache.get(layer.id);
-          if (exporting || !cachedFrame?.width || !cachedFrame.height) return false;
+          if (exporting || this.stillMode || !cachedFrame?.width || !cachedFrame.height) return false;
           drawable = cachedFrame;
         } else {
           this.captureVideoFrame(layer.id, media);
@@ -628,7 +636,7 @@ export class ComposerRenderer {
   }
 
   private effectCode(kind: EffectNode["kind"]) {
-    return ({ mirror: 1, feedback: 2, levels: 3, kaleidoscope: 4, blur: 5, crop: 6, edge: 7, colorKey: 8, animaTracer: 9, rgbDelay: 20, noise: 21, glitch: 22, vhs: 23, cameraShake: 24, glow: 25 } as const)[kind];
+    return ({ mirror: 1, feedback: 2, levels: 3, kaleidoscope: 4, blur: 5, crop: 6, edge: 7, colorKey: 8, animaTracer: 9, lumaKey: 10, chromaKey: 11, rgbDelay: 20, noise: 21, glitch: 22, vhs: 23, cameraShake: 24, glow: 25 } as const)[kind];
   }
 
   private effectParam(effect: EffectNode, key: string, time: number) {
@@ -660,6 +668,8 @@ export class ComposerRenderer {
       case "crop": return [p.left, p.right, p.top, p.bottom];
       case "edge": return [p.amount, p.threshold, p.colorize];
       case "colorKey": return [p.hue, p.tolerance, p.softness];
+      case "lumaKey": return [p.threshold, p.softness, p.invert];
+      case "chromaKey": return [p.red, p.green, p.blue, p.tolerance, p.softness, p.spill];
       case "animaTracer": return [p.progress, p.sensitivity, p.thickness, p.softness, p.direction, p.irregularity, 0, p.invert];
       case "rgbDelay": return [p.redDelay, p.greenDelay, p.blueDelay];
       case "noise": return [p.amount, p.scale];
@@ -810,10 +820,29 @@ export class ComposerRenderer {
     this.drawPass(current, this.compTarget, null, time, undefined, undefined, opacity, layer.blendMode === "darken");
   }
 
+  private stillMode = false;
+  private notReady = new Set<string>();
+
+  /**
+   * One frame that waits for every video to seek and decode (like export) but
+   * never throws: layers that still could not be drawn are reported instead.
+   * Used for agent captures and contact sheets.
+   */
+  async renderStill(time: number) {
+    this.stillMode = true;
+    try {
+      await this.render(time, false);
+    } finally {
+      this.stillMode = false;
+    }
+    return { notReady: [...this.notReady] };
+  }
+
   async render(time: number, exporting = false) {
     if (this.contextLost || this.gl.isContextLost()) {
       throw new Error("WebGL context was lost. Restore the browser tab before rendering.");
     }
+    this.notReady.clear();
     this.ensureRenderScale(exporting ? 1 : this.previewScale);
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.compTarget.framebuffer);
@@ -835,6 +864,7 @@ export class ComposerRenderer {
         if (ready) this.applyReveal(transition);
         if (ready) this.compositeRaster(layer, visualEffects, time, transition.opacity);
         else if (exporting) throw new Error(`Não foi possível renderizar a mídia da layer "${layer.name}".`);
+        else this.notReady.add(layer.id);
         continue;
       }
       const requestedCount = Math.round(this.effectParam(trail, "count", time));
@@ -858,6 +888,7 @@ export class ComposerRenderer {
         if (ready) this.applyReveal(transition);
         if (ready) this.compositeRaster(layer, visualEffects, time, transition.opacity);
         else if (exporting) throw new Error(`Não foi possível renderizar a mídia da layer "${layer.name}" no frame ${Math.round(sampleTime * this.project.settings.fps)}.`);
+        else this.notReady.add(layer.id);
       }
     }
 

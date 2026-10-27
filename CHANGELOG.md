@@ -1,5 +1,74 @@
 # Histórico de alterações
 
+## Não lançado — batches 0 a 4 de `docs/PLANO-DE-ACAO.md`
+
+### Batch 0 — arrumação
+
+- A versão é lida só do `package.json` (editor, `index.html`, `version.json`
+  gerado no build e servidor MCP).
+- Copyright: © 2026 Noisetupi.
+- Formatos de export declarados: só MP4 e sequência PNG (transparência só em PNG).
+
+### Batch 1 — núcleo de comandos
+
+- Registro único de comandos (`src/model/command-registry.ts`): parser
+  estrito, `describe()` e guia saem dele. Campo desconhecido vira erro em
+  todos os comandos.
+- Comandos novos: `layer.set` (várias propriedades, com checagem de tempo),
+  `audio.create/set/move/link/unlink/remove/reorderLane`, `composition.set`
+  (tamanho, fps, duração, fundo), `effect.set/reorder`,
+  `audioEffect.set/reorder`, `keyframe.set`, `effect.keyframe.set`,
+  `track.reorder`, `clip.paste`; `layer.create` aceita mídia, faixa e
+  propriedades; `clip.split` aceita `sourceDuration`.
+- Lotes de até 500 comandos. O desfazer guarda o nome do passo (dica do botão
+  e linha de status).
+- `window.vct.describe()` devolve texto curto com todos os comandos, campos,
+  limites e regras de tempo; `describe(tipo)` dá o detalhe com exemplo;
+  `more()` pagina textos longos. Nenhuma saída de texto tem `?`, `&` ou `=`.
+- Correção: `layer.setNumeric` em tempos não deixa o clipe passar do fim da
+  composição; `layer.setName` rejeita nomes longos em vez de cortar.
+
+### Batch 2 — mídia, faixas e "ver"
+
+- Bin de mídia no `assetMetadata` (duração, resolução, áudio, impressão
+  digital), sem mudar o formato: o arquivo continua `.ntvct` v2.
+- Faixas com nome (`project.tracks`), que continuam existindo vazias.
+- Comandos: `clip.place` (mídia do bin na timeline num passo, com trecho do
+  arquivo, enquadramento e áudio vinculado), `layer.fit`
+  (contain/cover/rotate-cover/none), `track.create/rename/remove`,
+  `asset.add/remove`.
+- `window.vct.assets()` e `window.vct.summary()`: bin e timeline em texto curto.
+- Relink por conteúdo (impressão digital) quando o arquivo foi renomeado.
+- Recuperação e Collect Media incluem as mídias que estão só no bin.
+- Quadro confiável: `captureFrame` espera o vídeo decodificar e informa as
+  camadas que não decodificaram (`notReady`). `vct.contactSheet()` e
+  `vct.assetSheet()` montam folhas de contato numa imagem só; com
+  `{ show: true }` a folha cobre a aba para um screenshot.
+- Interface: todas as ações e gestos (inspector, canvas, timeline, gravação)
+  passam pelo registro de comandos, com um passo de desfazer nomeado cada.
+  Atalhos de desfazer e duplicar não disparam enquanto se digita.
+
+### Batch 3 — timeline, tempo e áudio
+
+- Região de trabalho (`composition.set` workArea) e grade musical (grid bpm,
+  offset, compasso); tempos como `bar:3.2`, `beat:14`, `bars:2` nos comandos.
+- Keyframes com `timeBase: "clip"` e `curve` do bezier.
+- Snap também na grade e nas bordas da região de trabalho; tap tempo.
+- `vct.analyzeMix()` (nível por trecho, fontes que soam, clipping) e
+  `vct.analyzeAudio()` (BPM, offset, onsets, seções).
+
+### Batch 4 — composição, texto e qualidade
+
+- Efeitos novos: luma key e chroma key YCbCr com supressão de spill. A chave
+  de cor antiga passa a recortar também a cor (antes deixava um halo).
+- Sombra de texto (`shadowColor`, `shadowOpacity`, `shadowBlur`, `shadowX`, `shadowY`).
+- `vct.lint()`: flashes acima de 3 por segundo (WCAG 2.3.1), texto fora da
+  área segura, tempo de leitura, buracos, áudio sobreposto, clipe fora da composição.
+- `vct.plan()`: vários lotes simulados em sequência e aplicados num passo.
+- Macros: `loop.seam`, `fx.stutter`, `fx.strobe`, `fx.spike`, `text.animate`,
+  `text.fromSrt`. Cada macro mostra a expansão em comandos base.
+- `vct.analyzeVideo()`: cortes de cena, brilho, cor e movimento por trecho.
+
 ## 0.7.1 — edição com IA (Rodada 6) e Rodada 2
 
 Esta versão publica a Rodada 6 e a Rodada 2 (abaixo). Os scripts de

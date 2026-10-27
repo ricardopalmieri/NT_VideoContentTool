@@ -2,7 +2,7 @@
 
 Editor de motion graphics e videomapping com processamento local no navegador,
 interface PT/EN, WebGL2 e exportação por WebCodecs.
-Código próprio: **MPL-2.0 — Ricardo Palmieri / Noisetupi**.
+Código próprio: **MPL-2.0 — © 2026 Noisetupi**.
 
 O fonte **0.6.2 foi recuperado**. Antes da reorganização, seu build reproduziu
 os **19 arquivos de produção byte a byte**. Veja [a evidência](docs/BASELINE-0.6.2.json)

@@ -76,13 +76,18 @@ interface ModelContextLike {
 }
 
 const WEBMCP_DESCRIPTIONS: Record<BridgeMethod, string> = {
-  describe: "Describe the VCT automation API, commands and limitations.",
+  describe: "Short text with every VCT command, field, limit and timing rule. Input: {type?} for one command with an example.",
+  more: "Next page of a long text returned by describe, assets or summary.",
+  assets: "Media bin as short text: id, kind, duration, resolution, orientation, audio, usage.",
+  summary: "Timeline as short text, one line per track.",
+  lint: "Quality issues: flashes, safe area, gaps, overlapping audio, reading time.",
+  plan: "Several command batches simulated in sequence and applied as one undo step. Input: {batches, label, dryRun?}.",
   getTimeline: "Compact timeline: tracks, clips (times in seconds), transitions and audio lanes.",
   getProject: "Full project JSON (large; prefer getTimeline).",
   validate: "Validate the open project.",
   listCatalog: "Effect and audio effect catalog with parameter ranges.",
   dryRun: "Simulate a command batch without changing the project. Input: {commands}.",
-  batch: "Apply 1–100 commands atomically as one undo step. Input: {commands, label}.",
+  batch: "Apply 1–500 commands atomically as one undo step. Input: {commands, label}.",
   undo: "Undo the last edit.",
   redo: "Redo the last undone edit.",
   captureFrame: "Render one frame as a small JPEG data URL. Input: {time?, maxWidth?}.",

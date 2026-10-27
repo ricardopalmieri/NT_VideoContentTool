@@ -151,3 +151,17 @@ describe("abertura transacional de projeto web", () => {
     await expect(createCollectedMediaArchive(project)).rejects.toThrow("media/missing.png");
   });
 });
+
+describe("relink por conteúdo", () => {
+  it("acha o arquivo renomeado pela impressão digital", async () => {
+    const { fileFingerprint, findRelinkFileByFingerprint } = await import("../../src/io/web-platform");
+    const bytes = new Uint8Array(3 * 1024 * 1024).map((_, index) => index % 251);
+    const original = new File([bytes], "selva.mov", { type: "video/quicktime" });
+    const fingerprint = await fileFingerprint(original);
+    const renamed = new File([bytes], "selva-final.mov", { type: "video/quicktime" });
+    const other = new File([bytes.map((value) => 255 - value)], "outro.mov");
+    const metadata = { ...assetSourceMetadata(original), fingerprint };
+    expect(await findRelinkFileByFingerprint(metadata, [other, renamed])).toBe(renamed);
+    expect(await findRelinkFileByFingerprint({ ...metadata, fingerprint: undefined }, [renamed])).toBeNull();
+  });
+});

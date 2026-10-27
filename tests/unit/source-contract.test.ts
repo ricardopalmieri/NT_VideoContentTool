@@ -27,6 +27,11 @@ function method(name: string) {
 const ROUND1_FRAGMENT_PATCHES: Array<[string, string]> = [
   ['uniform float u_mix;\n', 'uniform float u_mix;\n// Composite final: opacidade × fade aplicados depois dos efeitos; u_darken compõe sobre branco para o MIN.\nuniform float u_opacity;\nuniform float u_darken;\n'],
   ['  outColor = clamp(c, 0.0, 1.0);\n}', '  c = clamp(c, 0.0, 1.0) * u_opacity;\n  if (u_darken > 0.5) c = vec4(c.rgb + (1.0 - c.a), 1.0);\n  outColor = c;\n}'],
+  // Batch 4: color key on straight color (premultiplied fix), luma key (10) and YCbCr chroma key (11).
+  [
+    '    float dist = distance(c.rgb, key);\n    c.a *= smoothstep(u_p1, u_p1 + max(.001, u_p2), dist);\n  } else if (u_effect == 9) {',
+    fragmentSource.slice(fragmentSource.indexOf('    // Textures are premultiplied'), fragmentSource.indexOf('  } else if (u_effect == 9) {') + '  } else if (u_effect == 9) {'.length),
+  ],
 ];
 
 it('preserva os shaders GLSL originais, exceto o composite da Rodada 1', () => {

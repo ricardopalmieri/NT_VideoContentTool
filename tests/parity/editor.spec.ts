@@ -40,12 +40,28 @@ async function createScene(page: Page) {
   await page.locator('[data-add-input="geometry"]').click();
   await numeric(page, 'y', 125);
   await numeric(page, 'fadeInEnd', .5);
+  // O painel atual separa Mídia e Efeitos em abas; a versão legada não tem abas.
+  if (await page.locator('[data-left-tab="effects"]').count()) await page.locator('[data-left-tab="effects"]').click();
   await page.locator('[data-add-effect="levels"]').click();
   const brightness = page.locator('[data-effect-param="brightness"]');
   await brightness.dblclick();
   await brightness.fill('0.2');
   await brightness.press('Enter');
+  if (await page.locator('[data-left-tab="media"]').count()) await page.locator('[data-left-tab="media"]').click();
   await page.evaluate(async () => { await document.fonts.ready; });
+}
+
+// Importa arquivos pelo painel Mídia (só para o painel, nada vai para a timeline).
+async function importToBin(page: Page, ...files: Array<{ name: string; mimeType: string; buffer: Buffer }>) {
+  const chooser = page.waitForEvent('filechooser');
+  await page.locator('[data-bin-import]').first().click();
+  await (await chooser).setFiles(files);
+  await expect(page.locator('[data-bin-asset]')).toHaveCount(files.length);
+}
+
+async function placeFromBin(page: Page, name: string, where: 'playhead' | 'new-track' = 'new-track') {
+  await page.locator('[data-bin-asset]').filter({ hasText: name }).click();
+  await page.locator(`[data-bin-place="${where}"]`).click();
 }
 
 async function save(page: Page): Promise<Buffer> {
@@ -226,9 +242,16 @@ test('vídeo contador: exportação atual preserva a sequência de frames', asyn
     await writeFile(info.outputPath('contador.webm'), video);
     for (const { page } of [legacy, current]) {
       await createScene(page);
-      const chooser = page.waitForEvent('filechooser');
-      await page.locator('[data-add-input="video"]').click();
-      await (await chooser).setFiles({ name: 'contador.webm', mimeType: 'video/webm', buffer: video });
+      const file = { name: 'contador.webm', mimeType: 'video/webm', buffer: video };
+      if (page === legacy.page) {
+        const chooser = page.waitForEvent('filechooser');
+        await page.locator('[data-add-input="video"]').click();
+        await (await chooser).setFiles(file);
+      } else {
+        // Atual: o vídeo vai para o painel Mídia e é colocado de lá.
+        await importToBin(page, file);
+        await placeFromBin(page, 'contador.webm');
+      }
       await expect(page.locator('[data-layer-text="name"]')).toHaveValue('contador.webm');
       await expect(page.locator('[data-layer-property="sourceOut"]')).toHaveValue('1');
     }
@@ -557,13 +580,8 @@ test('autosave recupera projeto e blobs de mídia após abrir uma nova sessão',
   const { context, page } = await openEditor(browser, 'current');
   try {
     await createScene(page);
-    const chooser = page.waitForEvent('filechooser');
-    await page.locator('[data-add-input="image"]').click();
-    await (await chooser).setFiles({
-      name: 'recovery.png',
-      mimeType: 'image/png',
-      buffer: PNG.sync.write(new PNG({ width: 2, height: 2 })),
-    });
+    await importToBin(page, { name: 'recovery.png', mimeType: 'image/png', buffer: PNG.sync.write(new PNG({ width: 2, height: 2 })) });
+    await placeFromBin(page, 'recovery.png');
     await expect(page.locator('[data-layer-id]')).toHaveCount(3);
     await expect(page.locator('#status-text')).toContainText('RECUPERAÇÃO SALVA', { timeout: 10_000 });
     await page.close();
@@ -704,7 +722,7 @@ test('window.vct valida, consulta e aplica lote determinístico com undo único'
     expect(apiResult.validation).toEqual({ valid: true, issues: [] });
     expect(apiResult.resultCount).toBe(2);
     expect(apiResult.layerCount).toBe(2);
-    expect(apiResult.effectCount).toBe(15);
+    expect(apiResult.effectCount).toBe(17);
     expect(apiResult.eventCount).toBe(1);
     expect(apiResult.event).toMatchObject({ revision: 1, label: "Teste da API" });
     expect(apiResult.returnedName).toBe("Camada via API");
@@ -808,26 +826,356 @@ test('modo Sobrepor: arrastar um clipe sobre o anterior cria Dissolver na sobrep
   }
 });
 
-test('importar vários arquivos põe as mídias em sequência numa faixa, num só passo de desfazer', async ({ browser }) => {
+test('importar vários arquivos põe tudo no painel Mídia num só passo de desfazer, sem tocar na timeline', async ({ browser }) => {
   const { context, page } = await openEditor(browser, 'current');
   try {
     await createScene(page);
     const before = await page.locator('[data-move-layer-clip]').count();
-    const chooser = page.waitForEvent('filechooser');
-    await page.locator('[data-import-many]').click();
     const png = PNG.sync.write(new PNG({ width: 4, height: 4 }));
-    await (await chooser).setFiles([
+    await importToBin(page,
       { name: 'foto-2.png', mimeType: 'image/png', buffer: png },
       { name: 'foto-1.png', mimeType: 'image/png', buffer: png },
-    ]);
-    await expect(page.locator('[data-move-layer-clip]')).toHaveCount(before + 2);
-    const imported = await page.evaluate(() => (window as unknown as { vct: { getProject(): { layers: Array<{ name: string; startTime: number; endTime: number; trackId?: string; id: string }> } } }).vct
-      .getProject().layers.filter((layer) => layer.name.startsWith('foto-')).map((layer) => ({ name: layer.name, start: layer.startTime, end: layer.endTime, track: layer.trackId || layer.id })));
-    expect(imported.map((item) => item.name)).toEqual(['foto-1.png', 'foto-2.png']);
-    expect(imported[1].start).toBeCloseTo(imported[0].end, 5);
-    expect(imported[1].track).toBe(imported[0].track);
+    );
+    // Os cartões seguem a ordem numérica dos nomes e a timeline continua igual.
+    await expect(page.locator('[data-bin-asset] strong')).toHaveText(['foto-1.png', 'foto-2.png']);
+    await expect(page.locator('[data-move-layer-clip]')).toHaveCount(before);
+    await expect(page.locator('.import-progress')).toHaveCount(0);
+    // Colocar um cartão cria o clipe (e só ele).
+    await placeFromBin(page, 'foto-1.png');
+    await expect(page.locator('[data-move-layer-clip]')).toHaveCount(before + 1);
+    const project = () => page.evaluate(() => (window as unknown as { vct: { getProject(): { layers: Array<{ name: string; asset?: string }>; assetMetadata?: Record<string, { kind?: string; width?: number }> } } }).vct.getProject());
+    expect((await project()).layers.filter((layer) => layer.name.startsWith('foto-')).map((layer) => layer.name)).toEqual(['foto-1.png']);
+    // Um desfazer tira o clipe; o seguinte tira a importação inteira.
     await page.locator('body').press('Control+z');
     await expect(page.locator('[data-move-layer-clip]')).toHaveCount(before);
+    expect(Object.keys((await project()).assetMetadata || {})).toHaveLength(2);
+    await page.locator('body').press('Control+z');
+    await expect(page.locator('[data-bin-asset]')).toHaveCount(0);
+    expect(Object.keys((await project()).assetMetadata || {})).toHaveLength(0);
+  } finally {
+    await context.close();
+  }
+});
+
+
+test('tablet: importar dois arquivos, tocar num cartão e usar Nova faixa, tudo por toque', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 1024, height: 1366 }, hasTouch: true, deviceScaleFactor: 1, acceptDownloads: true });
+  await context.addInitScript(() => {
+    Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
+    Object.defineProperty(window, 'showDirectoryPicker', { value: undefined, configurable: true });
+  });
+  const page = await context.newPage();
+  page.on('dialog', (dialog) => void dialog.dismiss());
+  try {
+    await page.goto('http://127.0.0.1:4174/current/');
+    await page.locator('[data-language="pt-BR"]').tap();
+    const project = createProject({ name: 'Tablet Mídia', width: 320, height: 180, fps: 8, duration: 1, background: '#000000', transparent: true });
+    await openProject(page, Buffer.from(JSON.stringify(project)));
+    // Em telas estreitas o painel é uma gaveta; em 1024 já fica na coluna.
+    const openLibrary = async () => {
+      const toggle = page.locator('#toggle-library');
+      if (await toggle.isVisible() && await toggle.getAttribute('aria-expanded') === 'false') await toggle.tap();
+    };
+    await openLibrary();
+    await expect(page.locator('[data-left-tab="media"]')).toHaveAttribute('aria-selected', 'true');
+    const png = PNG.sync.write(new PNG({ width: 4, height: 4 }));
+    const chooser = page.waitForEvent('filechooser');
+    await page.locator('[data-bin-import]').first().tap();
+    await (await chooser).setFiles([
+      { name: 'um.png', mimeType: 'image/png', buffer: png },
+      { name: 'dois.png', mimeType: 'image/png', buffer: png },
+    ]);
+    await expect(page.locator('[data-bin-asset]')).toHaveCount(2);
+    await expect(page.locator('[data-move-layer-clip]')).toHaveCount(0);
+
+    await page.locator('[data-bin-asset]').filter({ hasText: 'um.png' }).tap();
+    await expect(page.locator('[data-bin-place="new-track"]')).toBeVisible();
+    await page.locator('[data-bin-place="new-track"]').tap();
+    await expect(page.locator('[data-move-layer-clip]')).toHaveCount(1);
+
+    await openLibrary();
+    await page.locator('[data-bin-asset]').filter({ hasText: 'dois.png' }).tap();
+    await page.locator('[data-bin-place="new-track"]').tap();
+    await expect(page.locator('[data-move-layer-clip]')).toHaveCount(2);
+    const tracks = await page.evaluate(() => (window as unknown as { vct: { getProject(): { layers: Array<{ id: string; trackId?: string; endTime: number }>; settings: { duration: number } } } }).vct.getProject());
+    expect(new Set(tracks.layers.map((layer) => layer.trackId || layer.id)).size).toBe(2);
+    // As imagens têm 3 s; a composição de 1 s cresceu junto, no mesmo passo.
+    expect(tracks.settings.duration).toBeGreaterThanOrEqual(3);
+    await expect(page.locator('.timeline-label-row .track-name')).toHaveCount(2);
+  } finally {
+    await context.close();
+  }
+});
+
+test('arrastar um cartão do painel Mídia para a timeline cria faixa nova no ponto solto, e faixas ganham nome', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await createScene(page);
+    await importToBin(page, { name: 'arrasto.png', mimeType: 'image/png', buffer: PNG.sync.write(new PNG({ width: 4, height: 4 })) });
+    const before = await page.locator('[data-move-layer-clip]').count();
+    const ruler = await page.locator('.time-ruler').boundingBox();
+    const header = await page.locator('.video-group-track').boundingBox();
+    if (!ruler || !header) throw new Error('Timeline não está visível');
+    await page.locator('[data-bin-asset]').first().dragTo(page.locator('.video-group-track'), { targetPosition: { x: ruler.width * .5, y: header.height / 2 } });
+    await expect(page.locator('[data-move-layer-clip]')).toHaveCount(before + 1);
+    const placed = await page.evaluate(() => (window as unknown as { vct: { getProject(): { layers: Array<{ name: string; startTime: number }> } } }).vct.getProject().layers.find((layer) => layer.name === 'arrasto.png'));
+    expect(placed!.startTime).toBeGreaterThan(.2);
+    expect(placed!.startTime).toBeLessThan(.9);
+
+    // "+ faixa" cria uma faixa vazia no topo, que aparece como linha e pode ser renomeada.
+    const rows = await page.locator('.timeline-label-row.layer-label').count();
+    await page.locator('#add-track').click();
+    await expect(page.locator('.timeline-label-row.empty-label')).toHaveCount(1);
+    await expect(page.locator('.timeline-label-row.layer-label')).toHaveCount(rows);
+    await page.locator('.empty-label .track-name').dblclick();
+    await page.keyboard.type('Letreiros');
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.empty-label .track-name')).toHaveText('Letreiros');
+    await page.locator('.empty-label .track-name').dblclick();
+    await page.keyboard.type('Descartado');
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.empty-label .track-name')).toHaveText('Letreiros');
+  } finally {
+    await context.close();
+  }
+});
+
+async function openTimelineProject(page: Page) {
+  const settings = { name: 'Timeline', width: 320, height: 180, fps: 10, duration: 10, background: '#000000', transparent: false };
+  const project = createProject(settings);
+  project.layers.push(
+    createLayer('geometry', settings, { id: 'alpha', name: 'Alpha', startTime: 0, endTime: 3 }),
+    createLayer('geometry', settings, { id: 'beta', name: 'Beta', startTime: 5, endTime: 8 }),
+  );
+  await openProject(page, Buffer.from(JSON.stringify(project)));
+}
+
+type VctWindow = { vct: { getProject(): { settings: { workArea?: { in: number; out: number }; grid?: { bpm: number; offset: number; beatsPerBar: number } }; layers: Array<{ id: string; startTime: number }> } } };
+
+test('I e O definem a região de trabalho e o modal de exportação mostra o trecho', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await openTimelineProject(page);
+    await expect(page.locator('#export-project')).toBeVisible();
+    await page.keyboard.press('Shift+.');
+    await page.keyboard.press('Shift+.');
+    await page.keyboard.press('i');
+    await page.keyboard.press('Shift+.');
+    await page.keyboard.press('Shift+.');
+    await page.keyboard.press('o');
+    const area = () => page.evaluate(() => (window as unknown as VctWindow).vct.getProject().settings.workArea ?? null);
+    expect(await area()).toEqual({ in: 2, out: 4 });
+    await expect(page.locator('.timeline-tracks .work-area-band')).toHaveCount(1);
+    await expect(page.locator('.time-ruler .work-area-band')).toHaveCount(1);
+    await page.locator('#export-project').click();
+    await expect(page.locator('#export-summary')).toContainText('Região de trabalho 00:02:00 – 00:04:00');
+    await expect(page.locator('#export-summary')).toContainText('20 FRAMES');
+    await page.locator('#close-export').click();
+    // Alt+X limpa a região e o modal volta a falar da composição inteira.
+    await page.keyboard.press('Alt+x');
+    expect(await area()).toBeNull();
+    await expect(page.locator('.work-area-band')).toHaveCount(0);
+    await page.locator('#export-project').click();
+    await expect(page.locator('#export-summary')).toContainText('Composição inteira');
+    await expect(page.locator('#export-summary')).toContainText('100 FRAMES');
+  } finally {
+    await context.close();
+  }
+});
+
+test('grade BPM pela janela da composição desenha linhas de tempo e vale um passo de desfazer', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await openTimelineProject(page);
+    await expect(page.locator('.grid-line')).toHaveCount(0);
+    await page.locator('#composition-settings').click();
+    await page.locator('#composition-bpm').fill('120');
+    await page.locator('#composition-beats').fill('4');
+    await page.locator('#apply-composition').click();
+    const grid = await page.evaluate(() => (window as unknown as VctWindow).vct.getProject().settings.grid);
+    expect(grid).toEqual({ bpm: 120, offset: 0, beatsPerBar: 4 });
+    // 10 s a 120 BPM = 21 batidas (0..10), uma a cada 4 no início de compasso.
+    await expect(page.locator('.timeline-tracks .grid-line')).toHaveCount(21);
+    await expect(page.locator('.timeline-tracks .grid-line.is-bar')).toHaveCount(6);
+    await page.locator('#undo').click();
+    await expect(page.locator('.grid-line')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as unknown as VctWindow).vct.getProject().settings.grid)).toBeUndefined();
+    await page.locator('#redo').click();
+    await expect(page.locator('.timeline-tracks .grid-line')).toHaveCount(21);
+    // "Remover grade" apaga a grade no mesmo passo de aplicar.
+    await page.locator('#composition-settings').click();
+    await page.locator('#composition-grid-remove').click();
+    await page.locator('#apply-composition').click();
+    await expect(page.locator('.grid-line')).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+test('Ctrl + roda amplia a timeline em torno do ponteiro e atualiza o minimapa', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await openTimelineProject(page);
+    const zoom = () => page.evaluate(() => Number(localStorage.getItem('nt-vct-timeline-zoom-x') || 1));
+    expect(await zoom()).toBe(1);
+    const box = await page.locator('.timeline-scroll').boundingBox();
+    if (!box) throw new Error('Timeline não está visível');
+    await page.mouse.move(box.x + box.width * .75, box.y + 80);
+    await page.keyboard.down('Control');
+    await page.mouse.wheel(0, -400);
+    await page.keyboard.up('Control');
+    await expect.poll(zoom).toBeGreaterThan(1.5);
+    const scrolled = await page.locator('.timeline-scroll').evaluate((element) => ({ left: element.scrollLeft, wide: element.scrollWidth > element.clientWidth }));
+    expect(scrolled.wide).toBe(true);
+    expect(scrolled.left).toBeGreaterThan(0);
+    await expect.poll(() => page.locator('#timeline-minimap b').evaluate((element) => parseFloat(element.style.width))).toBeLessThan(70);
+    // A roda sem Ctrl não mexe no zoom.
+    const before = await zoom();
+    await page.mouse.wheel(0, 200);
+    expect(await zoom()).toBe(before);
+  } finally {
+    await context.close();
+  }
+});
+
+test('? abre a lista de atalhos', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await openTimelineProject(page);
+    await page.keyboard.press('?');
+    await expect(page.locator('#shortcuts-panel')).toBeVisible();
+    await expect(page.locator('#shortcuts-panel .shortcut-table')).toContainText(/região de trabalho/i);
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#shortcuts-panel')).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+test('Ctrl+X recorta o clipe selecionado num só passo e Ctrl+Z devolve', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await openTimelineProject(page);
+    const ids = () => page.evaluate(() => (window as unknown as VctWindow).vct.getProject().layers.map((layer) => layer.id));
+    await page.locator('[data-select-layer="beta"]').first().click();
+    await page.keyboard.press('Control+x');
+    expect(await ids()).toEqual(['alpha']);
+    await page.keyboard.press('Control+z');
+    expect((await ids()).sort()).toEqual(['alpha', 'beta']);
+    await page.locator('[data-select-layer="beta"]').first().click();
+    await page.keyboard.press('Control+x');
+    expect(await ids()).toEqual(['alpha']);
+    // O clipe recortado vai para a área de transferência de clipes: colar no playhead o traz de volta.
+    await page.keyboard.press('Control+v');
+    expect(await ids()).toHaveLength(2);
+  } finally {
+    await context.close();
+  }
+});
+
+async function openGapProject(page: Page) {
+  const settings = { name: 'Gaps', width: 320, height: 180, fps: 10, duration: 10, background: '#000000', transparent: false };
+  const project = createProject(settings);
+  project.layers.push(
+    createLayer('geometry', settings, { id: 'alpha', name: 'Alpha', trackId: 'v1', startTime: 0, endTime: 3, keyframes: { x: [{ time: 1, value: 10, easing: 'linear' }, { time: 2, value: 20, easing: 'linear' }] } }),
+    createLayer('geometry', settings, { id: 'beta', name: 'Beta', trackId: 'v1', startTime: 5, endTime: 8 }),
+  );
+  await openProject(page, Buffer.from(JSON.stringify(project)));
+}
+
+type LayerView = { id: string; startTime: number; keyframes: Record<string, Array<{ time: number }>> };
+const layersOf = (page: Page) => page.evaluate(() => (window as unknown as { vct: { getProject(): { layers: LayerView[] } } }).vct.getProject().layers);
+
+test('Fechar espaços aproxima os clipes seguintes da faixa em um passo', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await openGapProject(page);
+    await page.locator('[data-select-layer="alpha"]').first().click();
+    await page.locator('#close-gaps').click();
+    const moved = await layersOf(page);
+    expect(moved.find((layer) => layer.id === 'beta')!.startTime).toBeCloseTo(3, 5);
+    await page.locator('#undo').click();
+    expect((await layersOf(page)).find((layer) => layer.id === 'beta')!.startTime).toBeCloseTo(5, 5);
+  } finally {
+    await context.close();
+  }
+});
+
+test('Alt + arrastar um clipe duplica no ponto solto e mantém o original', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await openGapProject(page);
+    const box = await page.locator('[data-move-layer-clip="alpha"]').boundingBox();
+    const scroll = await page.locator('.timeline-scroll').boundingBox();
+    if (!box || !scroll) throw new Error('Timeline não está visível');
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.keyboard.down('Alt');
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + scroll.width * .4, box.y + box.height / 2, { steps: 6 });
+    await expect(page.locator('.clip-ghost')).toHaveCount(1);
+    await page.mouse.up();
+    await page.keyboard.up('Alt');
+    const layers = await layersOf(page);
+    expect(layers).toHaveLength(3);
+    expect(layers.find((layer) => layer.id === 'alpha')!.startTime).toBe(0);
+    expect(layers.filter((layer) => layer.id !== 'alpha' && layer.id !== 'beta')[0].startTime).toBeGreaterThan(3);
+    await page.locator('#undo').click();
+    expect(await layersOf(page)).toHaveLength(2);
+  } finally {
+    await context.close();
+  }
+});
+
+test('keyframe arrasta no tempo, Delete apaga e o snap mostra o guia', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await openGapProject(page);
+    const times = async () => (await layersOf(page)).find((layer) => layer.id === 'alpha')!.keyframes.x.map((key) => key.time);
+    const dot = page.locator('[data-key-ref]').first();
+    const box = await dot.boundingBox();
+    const scroll = await page.locator('.timeline-scroll').boundingBox();
+    if (!box || !scroll) throw new Error('Keyframe não está visível');
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + scroll.width * .04, box.y + box.height / 2, { steps: 5 });
+    await page.mouse.up();
+    const dragged = await times();
+    expect(dragged).toHaveLength(2);
+    expect(dragged[0]).toBeGreaterThan(1.2);
+    expect(dragged[0]).toBeLessThan(1.8);
+    await page.locator('#undo').click();
+    expect(await times()).toEqual([1, 2]);
+    await page.locator('[data-key-ref]').first().click();
+    await page.keyboard.press('Delete');
+    expect(await times()).toEqual([2]);
+    await page.locator('#undo').click();
+    expect(await times()).toEqual([1, 2]);
+    // Aparar o clipe Beta perto do fim do Alpha trava no snap e mostra o guia.
+    const trim = await page.locator('[data-trim-clip="beta"][data-trim-edge="start"]').boundingBox();
+    if (!trim) throw new Error('Alça de trim não está visível');
+    await page.mouse.move(trim.x + 2, trim.y + trim.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(trim.x + 2 - scroll.width * .2, trim.y + trim.height / 2, { steps: 6 });
+    await expect(page.locator('.snap-guide-line')).toHaveCount(1);
+    await page.mouse.up();
+    await expect(page.locator('.snap-guide-line')).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+test('exportar com região de trabalho renderiza só os frames dela', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await openTimelineProject(page);
+    await page.keyboard.press('Shift+.');
+    await page.keyboard.press('Shift+.');
+    await page.keyboard.press('i');
+    await page.keyboard.press('Shift+.');
+    await page.keyboard.press('o');
+    const frames = await exportFrames(page);
+    expect(frames).toHaveLength(10);
+    expect(frames[0].name).toContain('000001');
   } finally {
     await context.close();
   }

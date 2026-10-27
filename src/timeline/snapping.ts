@@ -26,6 +26,9 @@ export function timelineSnapCandidates(
     for (const keys of Object.values(layer.keyframes)) for (const key of keys) values.push(key.time);
     for (const effect of layer.effects) for (const keys of Object.values(effect.keyframes)) for (const key of keys) values.push(key.time);
   }
+  const area = project.settings.workArea;
+  if (area) values.push(area.in, area.out);
+  values.push(...gridTimes(project.settings));
   for (const track of project.audioTracks) {
     if (excludedAudio.has(track.id)) continue;
     values.push(track.startTime, track.endTime, track.fadeInStart, track.fadeInEnd, track.fadeOutStart, track.fadeOutEnd);
@@ -48,4 +51,24 @@ export function snapTimelineTime(value: number, project: ProjectDocument | null,
     }
   }
   return clamp(result, 0, project.settings.duration);
+}
+
+/** Beat times of the musical grid inside the composition (at most 4000). */
+export function gridTimes(settings: Pick<ProjectDocument["settings"], "duration" | "grid">) {
+  const grid = settings.grid;
+  if (!grid || grid.bpm <= 0) return [];
+  const beat = 60 / grid.bpm;
+  const times: number[] = [];
+  for (let time = grid.offset % beat; time <= settings.duration + 1e-9 && times.length < 4000; time += beat) times.push(+time.toFixed(6));
+  return times;
+}
+
+/** Tempo from taps (ms timestamps): median interval of the last 8 taps, 20..400 BPM. */
+export function tapTempo(taps: readonly number[]) {
+  const recent = taps.slice(-9);
+  if (recent.length < 3) return null;
+  const intervals = recent.slice(1).map((time, index) => time - recent[index]).filter((value) => value > 150 && value < 3000).sort((a, b) => a - b);
+  if (intervals.length < 2) return null;
+  const median = intervals[Math.floor(intervals.length / 2)];
+  return Math.round(60000 / median * 10) / 10;
 }

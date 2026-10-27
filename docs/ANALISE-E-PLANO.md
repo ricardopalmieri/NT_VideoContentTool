@@ -1,5 +1,9 @@
 # Noisetupi Video Content Tool: análise da versão 0.6.2 e plano de upgrade
 
+> **27/10/2026:** a ordem de trabalho agora está em `PLANO-DE-ACAO.md`
+> (batches 0 a 6). Este documento fica como histórico e referência; os
+> checkboxes abaixo não são mais atualizados.
+
 > **Atualização de 26/10/2026:** o fonte web 0.6.2 foi recuperado do chat
 > “video content tool”. O primeiro build reproduziu os 19 arquivos de produção
 > byte a byte. A fundação passa a ser restauração e modularização, conforme

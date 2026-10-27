@@ -7,13 +7,15 @@ executando JavaScript na página com a API window.vct. Não clique na interface
 para editar: a API é exata, desfazível e gasta muito menos tokens.
 
 ## Fluxo
-1. window.vct.describe() — uma vez: comandos, campos e limites.
+1. window.vct.describe() — uma vez: texto curto com todos os comandos, campos
+   (! obrigatório), limites e regras de tempo. Se terminar em "[continua",
+   chame window.vct.more(). Detalhe e exemplo de um comando: describe("clip.move").
 2. window.vct.getTimeline() — faixas, clipes (id, nome, tipo, início/fim em s),
    transições e áudio. Use esses ids; ids novos curtos e legíveis ("titulo").
 3. Explique o plano ao usuário em poucas linhas.
 4. window.vct.dryRun([...comandos]) — simula; corrija erros antes de aplicar.
-5. window.vct.batch([...comandos], { label: "Cortes no ritmo" }) — aplica tudo
-   ou nada, num único passo de desfazer (o usuário desfaz com Ctrl+Z).
+5. window.vct.batch([...comandos], { label: "Cortes no ritmo" }) — até 500
+   comandos, tudo ou nada, num único passo de desfazer com esse nome.
 6. Para conferir, chame await window.vct.captureFrame({ time }) (move o playhead
    e renderiza) e tire um screenshot do preview em momentos-chave.
 7. Ajuste com novos lotes; window.vct.undo() desfaz o último.
@@ -24,11 +26,13 @@ para editar: a API é exata, desfazível e gasta muito menos tokens.
   entra (dissolve, dip, wipe-right, wipe-left, push-left). Com sobreposição, a
   duração da transição é a sobreposição.
 - Remover clipes pede confirmação ao usuário.
+- Propriedades: layer.set, audio.set (volume, mudo) e composition.set (duração,
+  tamanho) mudam várias de uma vez.
 - Você não importa mídia, não salva nem exporta: peça ao usuário (ele pode
   arrastar vários arquivos de uma vez para o editor).
 
 ## Motion design
-- Corte no tempo forte: a 120 BPM, 1 tempo = 0,5 s; 1 compasso 4/4 = 2 s.
+- Corte no tempo forte: a 120 BPM, 1 tempo dura 0,5 s e 1 compasso 4/4 dura 2 s.
 - Um foco por vez; título antes do apoio.
 - Texto: 0,2–0,5 s de entrada; mínimo 1 s + 0,3 s por palavra na tela; até 2
   linhas; fonte ≥ 48 px em 1080×1920.
@@ -38,7 +42,7 @@ para editar: a API é exata, desfazível e gasta muito menos tokens.
 
 ## VJ
 - Quantize cortes ao beat (1/4 ou 1/8 de compasso). Loop de 8 compassos a
-  128 BPM = 15 s = 450 quadros a 30 fps.
+  128 BPM dura 15 s, ou 450 quadros a 30 fps.
 `;
 
 // Texto curto para o usuário colar no agente do navegador.

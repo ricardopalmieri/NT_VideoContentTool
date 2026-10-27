@@ -12,6 +12,8 @@ export type EffectKind =
   | "crop"
   | "edge"
   | "colorKey"
+  | "lumaKey"
+  | "chromaKey"
   | "animaTracer"
   | "rgbDelay"
   | "noise"
@@ -68,6 +70,12 @@ export interface Layer {
   strokeWidth: number;
   fillEnabled: boolean;
   strokeEnabled: boolean;
+  /** Text drop shadow; off when shadowColor is absent or shadowOpacity is 0. */
+  shadowColor?: string;
+  shadowOpacity?: number;
+  shadowBlur?: number;
+  shadowX?: number;
+  shadowY?: number;
   x: number;
   y: number;
   width: number;
@@ -131,6 +139,10 @@ export interface ProjectSettings {
   duration: number;
   background: string;
   transparent: boolean;
+  /** Export and loop range; absent means the whole composition. */
+  workArea?: { in: number; out: number };
+  /** Musical grid for snapping and bar:beat times. */
+  grid?: { bpm: number; offset: number; beatsPerBar: number };
 }
 
 export interface ProjectDocument {
@@ -140,7 +152,10 @@ export interface ProjectDocument {
   layers: Layer[];
   audioTracks: AudioTrack[];
   postEffects: EffectNode[];
+  /** Media bin: every imported file, used on the timeline or not (key: media/… reference). */
   assetMetadata?: Record<string, AssetSourceMetadata>;
+  /** Named tracks in display order (video top first, then audio). Optional; tracks may also be implied by clips. */
+  tracks?: TrackMeta[];
   createdAt: string;
   modifiedAt: string;
 }
@@ -164,19 +179,26 @@ export interface AssetSourceMetadata {
   size: number;
   lastModified: number;
   mimeType: string;
+  kind?: "video" | "image" | "audio";
+  /** Seconds (video/audio). */
+  duration?: number;
+  width?: number;
+  height?: number;
+  hasAudio?: boolean;
+  /** Size plus a hash of the first and last MiB, used to relink moved files. */
+  fingerprint?: string;
+  addedAt?: string;
+}
+
+export interface TrackMeta {
+  id: string;
+  name: string;
+  kind: "video" | "audio";
 }
 
 export interface ExportOptions {
-  format:
-    | "webm-vp9"
-    | "mov-prores4444"
-    | "mov-hap-alpha"
-    | "mov-animation"
-    | "mkv-ffv1"
-    | "mp4-h264"
-    | "png-sequence"
-    | "apng"
-    | "gif";
+  // Only these two are implemented; transparency is exported as PNG sequence only.
+  format: "mp4-h264" | "png-sequence";
   outputPath: string;
   width: number;
   height: number;
