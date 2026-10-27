@@ -1,5 +1,49 @@
 # Histórico de alterações
 
+## Rodada 2 — edição com vários clipes por faixa
+
+### Transições e modo Sobrepor
+
+- **Modo Sobrepor** (botão de dois retângulos na barra da timeline, a escolha
+  fica salva): clipes da mesma faixa podem se sobrepor; ao soltar, a
+  sobreposição vira automaticamente uma transição Dissolver (como no Vegas).
+  Desligado, os clipes param no vizinho, como antes.
+- **Transições básicas** no painel do clipe ("Transição de entrada"):
+  Dissolver, Fade pelo fundo, Cortina →, Cortina ← e Empurrar. Com
+  sobreposição, a duração é o trecho sobreposto; sem sobreposição, o clipe
+  entra com a duração escolhida.
+- Zona da transição desenhada no início do clipe na timeline, com o tipo e a
+  duração no tooltip. Funciona no preview e na exportação.
+- Áudio vinculado faz crossfade na mesma janela da transição.
+
+### Edição
+
+- **Ripple delete:** Shift+Delete apaga o clipe e puxa os seguintes da faixa,
+  com keyframes, fades e áudio vinculado.
+- **Seleção múltipla:** Ctrl/⌘/Shift+clique nos clipes; Delete apaga todos.
+- **Copiar/colar:** Ctrl/⌘+C e Ctrl/⌘+V colam no playhead, na faixa original
+  quando ela está livre (senão, numa faixa nova), com o áudio junto.
+- **Inserir no playhead:** mídia, texto e geometria novos começam no playhead
+  (em 0 s continuam ocupando a composição, como antes).
+- Ripple delete fecha corretamente a faixa quando o próximo clipe está
+  sobreposto; duração, keyframes, fades e áudio vinculado acompanham o ajuste.
+- A validação do projeto cobre os campos opcionais `trackId`, `laneId` e
+  `transition`, mantendo o formato `.ntvct` v2.
+- Fechamento verificado com 89 testes Vitest e 15 cenários Playwright, além de
+  typecheck strict, build e conferência da integridade do legado.
+
+- **Cortar no playhead:** tecla S, Ctrl/⌘+B ou botão de tesoura na timeline.
+  O clipe vira dois na mesma faixa, com trecho de origem, velocidade, reverse
+  e fades corretos; o áudio vinculado é cortado junto.
+- **Faixas com vários clipes:** cada linha da timeline é uma faixa e mostra
+  todos os seus clipes (selo com a quantidade). Projetos antigos abrem iguais.
+- **Mover entre faixas:** arrastar o clipe para cima/baixo destaca a faixa de
+  destino; se o trecho estiver ocupado, o movimento é recusado com aviso.
+- Clipes de uma faixa não se sobrepõem: arrastar e aparar param no vizinho.
+- Reordenar (▲▼ ou arrastar a linha) move a faixa inteira.
+- Thumbnails de vídeo e onda de áudio mostram o trecho que o clipe realmente
+  toca e se atualizam ao aparar, cortar ou mudar a velocidade.
+
 ## 0.7.0 — legibilidade e equilíbrio da interface
 
 ### Inspector minimalista (referência: ui-skills / baseline-ui)
@@ -23,8 +67,8 @@
 - Campos numéricos viraram sliders: nome em cima, valor embaixo e trilha fina
   com preenchimento. Arrastar não seleciona mais o texto do campo; duplo
   clique continua abrindo a edição.
-- Mídia importada entra no tamanho real em pixels (1:1 com a composição); só
-  é reduzida se for maior que a composição. A imagem guia ocupa a composição.
+- Mídia importada entra no tamanho real em pixels (1:1 com a composição), mesmo
+  quando é maior que ela (4K em 1080p fica com o dobro). A imagem guia ocupa a composição.
 - Duração da composição em timecode `HH:MM:SS:FF` ou em frames (escolha
   salva no navegador), no lugar de segundos. Valor inválido é recusado com
   aviso na barra de status.

@@ -1,5 +1,15 @@
 # Status report: Noisetupi Video Content Tool Web
 
+> **Historical report.** This file records the checkpoint before Rounds 1 and
+> 2 were closed. Its failing tests, branch state, test counts and next steps are
+> no longer current. Use `docs/UPGRADE-UX-UI-AUTOMACAO.md` for process control
+> and `docs/RODADA2-RELATORIO.md` for the current verified status.
+
+**Current checkpoint (2026-10-26):** Round 2 is closed; the legacy integrity
+check, 89 Vitest tests, strict type check, production build and all 15
+Playwright tests pass. Version 0.7.0 is under a feature freeze pending final
+review and local commits. No push or deployment was performed.
+
 **Language rules:** ASD-STE100 (Simplified Technical English)
 **Date:** 2026-10-26
 **Branch:** `codex/rodada0-restauracao` (local)

@@ -159,6 +159,56 @@ contratos de domínio necessários e confirmar compatibilidade v2.
   Deduplicar referências repetidas é necessário, e montar ZIPs de mídias grandes
   deve evitar bloquear a UI ou duplicar todo o conteúdo na memória.
 
+## Prioridades após o fechamento da Rodada 2 (26/10/2026)
+
+1. **Congelamento funcional da 0.7.0:** não incluir novas features antes da
+   revisão final e do empacotamento. Manter apenas correções de regressão.
+2. **Rodada 6 — automação com IA** (diferencial do produto): skills, servidor
+   MCP e WebMCP sobre `window.vct`, já com os comandos de clipe. Incluir um
+   benchmark reproduzível de tokens e de controle (mesma tarefa via `window.vct`
+   × via prompts numa interface web genérica) antes de afirmar economia.
+3. **Rodada 3 — navegação e texto**, incluindo revisão do snap automático de
+   alinhamento entre bordas e objetos (canvas e timeline).
+4. **Rodada 5 — motion design e VJ**, sem exportação com transparência.
+5. **Documentação em inglês** (última).
+- **Rodada 4 — modo pedagógico: em espera.**
+
+## Checkpoint — Rodada 2 concluída e validada (26/10/2026)
+
+- `src/model/transitions.ts`: `layer.transition` (dissolve, dip, wipe-right,
+  wipe-left, push-left); janela = sobreposição com o clipe anterior da faixa
+  ou `duration`; estado por frame (opacidade, deslocamento, revelação) para o
+  clipe que entra e o que sai; Dissolver automático no modo Sobrepor;
+  crossfade do áudio vinculado.
+- Renderer desenha por faixa (de baixo para cima) e, dentro da faixa, o clipe
+  que começa depois por cima; aplica a transição no preview e na exportação.
+- `clip-tracks.ts`: `shiftClip`, `rippleDelete`, `copyClips`, `pasteClips`.
+- Editor: botão Sobrepor (persistido), seção "Transição de entrada", seleção
+  múltipla, Shift+Delete, Ctrl/⌘+C/V, inserir no playhead.
+- `src/model/clip-tracks.ts`: `trackId`/`laneId` opcionais agrupam clipes numa
+  faixa (sem o campo, a layer é a própria faixa: projetos v2 abrem iguais).
+  Corte (`splitClip`) com trecho de origem, velocidade, reverse, fades e áudio
+  vinculado; mover entre faixas sem sobreposição; vizinhos limitam arrasto/trim.
+- Timeline: uma linha por faixa com todos os clipes; S, Ctrl/⌘+B e botão de
+  tesoura; arrastar na vertical muda de faixa; reordenar move a faixa inteira.
+- Thumbnails por arquivo (24 quadros) e onda por arquivo; cada clipe mostra o
+  próprio trecho (trim, corte, velocidade, reverse).
+- QA manual direto no Chrome: projeto novo, geometria, reprodução/pausa, corte
+  no playhead, sobreposição, troca de Dissolver para Empurrar, copiar/colar no
+  playhead, criação automática de faixa ocupada, inserção de texto e undo.
+- O QA encontrou uma lacuna no ripple delete quando o próximo clipe começava
+  dentro da sobreposição. Um teste de regressão foi executado primeiro e
+  falhou; o cálculo passou a fechar o espaço até o vizinho anterior, preservando
+  duração, keyframes, fades e áudio vinculado.
+- A validação `.ntvct` v2 agora verifica também `trackId`, `laneId` e transição
+  opcional, sem alterar a versão do formato.
+- Validação final: legado íntegro; 13 arquivos/89 testes Vitest; TypeScript
+  strict; build Vite; 15/15 testes Playwright, incluindo paridade visual,
+  ida e volta `.ntvct`, exportação e os fluxos novos da timeline.
+- Relatório detalhado: `docs/RODADA2-RELATORIO.md`.
+- Próximo passo: congelar features, revisar a entrega e só então empacotar a
+  0.7.0. A Rodada 6 permanece no backlog.
+
 ## Checkpoint — Rodada 1 fechada (26/10/2026)
 
 **Branch:** `codex/rodada0-restauracao` (publicada no GitHub).
