@@ -851,7 +851,7 @@ function numberField(label: string, property: keyof Layer, value: number, min: n
   const displayedValue = property === "sourceOut" && layer && !layer.sourceOut ? value : evaluatedValue;
   const fill = clamp((displayedValue - min) / Math.max(step, max - min) * 100, 0, 100);
   const neutral = ({ scaleX: 1, scaleY: 1, opacity: 1, fillOpacity: 1, strokeOpacity: 1 } as Record<string, number>)[String(property)] ?? 0;
-  return `<label class="numeric-field"><div class="param-scrub" data-param-scrub data-neutral="${neutral}" style="--value-fill:${fill}%"><span>${label}</span><input type="number" readonly data-layer-property="${String(property)}" value="${Number(displayedValue.toFixed(4))}" min="${min}" max="${max}" step="${step}" title="Drag to adjust · Double-click to type"></div>${TIMING_PROPERTIES.has(String(property)) ? "" : `<button class="keyframe-button ${active ? "is-active" : ""}" data-keyframe="${String(property)}" title="${t("addKeyframe")}">◆</button>${active ? easingSelect("layer", String(property), active.easing) : ""}`}</label>`;
+  return `<label class="numeric-field"><div class="param-scrub" data-param-scrub data-neutral="${neutral}" style="--value-fill:${fill}%;--value-ratio:${fill / 100}"><span>${label}</span><input type="number" readonly data-layer-property="${String(property)}" value="${Number(displayedValue.toFixed(4))}" min="${min}" max="${max}" step="${step}" title="Drag to adjust · Double-click to type"></div>${TIMING_PROPERTIES.has(String(property)) ? "" : `<button class="keyframe-button ${active ? "is-active" : ""}" data-keyframe="${String(property)}" title="${t("addKeyframe")}">◆</button>${active ? easingSelect("layer", String(property), active.easing) : ""}`}</label>`;
 }
 
 function easingSelect(scope: "layer" | "effect", property: string, value: Easing) {
@@ -930,7 +930,7 @@ function renderInspector() {
 
 function audioNumberField(label: string, property: keyof AudioTrack, value: number, min: number, max: number, step: number) {
   const fill = clamp((value - min) / Math.max(step, max - min) * 100, 0, 100);
-  return `<label class="numeric-field"><div class="param-scrub" data-param-scrub data-neutral="${property === "volume" || property === "playbackRate" ? 1 : 0}" style="--value-fill:${fill}%"><span>${label}</span><input type="number" readonly data-audio-property="${String(property)}" value="${Number(value.toFixed(4))}" min="${min}" max="${max}" step="${step}" title="Drag to adjust · Double-click to type"></div></label>`;
+  return `<label class="numeric-field"><div class="param-scrub" data-param-scrub data-neutral="${property === "volume" || property === "playbackRate" ? 1 : 0}" style="--value-fill:${fill}%;--value-ratio:${fill / 100}"><span>${label}</span><input type="number" readonly data-audio-property="${String(property)}" value="${Number(value.toFixed(4))}" min="${min}" max="${max}" step="${step}" title="Drag to adjust · Double-click to type"></div></label>`;
 }
 
 function renderAudioInspector(track: AudioTrack) {
@@ -982,7 +982,7 @@ function renderAudioEffect(effect: AudioEffectNode) {
     <div class="property-grid">${audioEffectDefinitions(effect).map(([label, key, min, max, step]) => {
       const value = effect.params[key];
       const fill = clamp((value - min) / (max - min) * 100, 0, 100);
-      return `<label class="numeric-field"><div class="param-scrub" data-param-scrub data-neutral="0" style="--value-fill:${fill}%"><span>${label}</span><input type="number" readonly data-audio-effect-param="${key}" data-audio-effect-id="${effect.id}" value="${value}" min="${min}" max="${max}" step="${step}"></div></label>`;
+      return `<label class="numeric-field"><div class="param-scrub" data-param-scrub data-neutral="0" style="--value-fill:${fill}%;--value-ratio:${fill / 100}"><span>${label}</span><input type="number" readonly data-audio-effect-param="${key}" data-audio-effect-id="${effect.id}" value="${value}" min="${min}" max="${max}" step="${step}"></div></label>`;
     }).join("")}</div>
   </article>`;
 }
@@ -1049,7 +1049,7 @@ function renderEffectInspector(layer: Layer, effect: EffectNode) {
         const displayedValue = renderer?.effectValue(effect, key, currentTime) ?? effect.params[key];
         const center = min + Math.round((max - min) / step / 2) * step;
         const fill = clamp((displayedValue - min) / Math.max(step, max - min) * 100, 0, 100);
-        return `<label class="effect-param-field"><div class="param-scrub" data-param-scrub data-neutral="${center}" style="--value-fill:${fill}%"><span>${label}</span><input type="number" readonly data-effect-param="${key}" min="${min}" max="${max}" step="${step}" value="${Number(displayedValue.toFixed(4))}" title="Drag to adjust · Double-click to type"></div><button class="keyframe-button ${keyframe ? "is-active" : ""}" data-effect-keyframe="${key}" title="${t("addKeyframe")}">◆</button>${keyframe ? easingSelect("effect", key, keyframe.easing) : ""}</label>`;
+        return `<label class="effect-param-field"><div class="param-scrub" data-param-scrub data-neutral="${center}" style="--value-fill:${fill}%;--value-ratio:${fill / 100}"><span>${label}</span><input type="number" readonly data-effect-param="${key}" min="${min}" max="${max}" step="${step}" value="${Number(displayedValue.toFixed(4))}" title="Drag to adjust · Double-click to type"></div><button class="keyframe-button ${keyframe ? "is-active" : ""}" data-effect-keyframe="${key}" title="${t("addKeyframe")}">◆</button>${keyframe ? easingSelect("effect", key, keyframe.easing) : ""}</label>`;
       }).join("")}</div>
     </section></div>
     <div class="inspector-actions"><button class="danger" data-remove-effect="${effect.id}">${t("delete")}</button></div>`;
@@ -1912,6 +1912,8 @@ function updateInspector() {
   bindDynamicControls(target);
   const scroll = target.querySelector<HTMLElement>(".inspector-scroll");
   if (scroll) scroll.scrollTop = scrollTop;
+  // Nome completo no tooltip quando o painel estreito corta o rótulo.
+  target.querySelectorAll<HTMLElement>(".param-scrub > span").forEach((label) => { label.title = label.textContent || ""; });
   const layer = selectedLayer();
   if (layer?.kind === "text") updateTextOverflowWarning(layer);
 }
@@ -1965,6 +1967,7 @@ function updateParamScrub(input: HTMLInputElement) {
   const max = Number(input.max);
   const fill = clamp((input.valueAsNumber - min) / Math.max(Number(input.step) || 1, max - min) * 100, 0, 100);
   scrub.style.setProperty("--value-fill", `${fill}%`);
+  scrub.style.setProperty("--value-ratio", String(fill / 100));
 }
 
 async function addInput(kind: InputKind) {

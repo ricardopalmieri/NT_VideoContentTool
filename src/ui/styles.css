@@ -953,3 +953,116 @@ button { transition: color 120ms ease, background-color 120ms ease, border-color
 .param-scrub input { justify-self: end; height: 18px; }
 .param-scrub::after, .param-scrub::before { bottom: 6px; }
 .keyframe-button { height: 50px; }
+
+/* ==========================================================================
+   0.7 — inspector minimalista (padrão de inspector profissional).
+   Cada parâmetro é uma linha: nome | trilha de 2 px | valor tabular | ◆.
+   Sem caixas nem gradientes; o vermelho só aparece ao arrastar ou com keyframe.
+   ========================================================================== */
+.property-grid { grid-template-columns: minmax(0, 1fr); gap: 1px; }
+.numeric-field, .effect-param-field { grid-template-columns: minmax(0, 1fr) 24px; align-items: center; gap: 2px; margin-bottom: 0; }
+.numeric-field:not(:has(.keyframe-button)) { grid-template-columns: minmax(0, 1fr); }
+.param-scrub {
+  --label-w: 96px;
+  --value-w: 7ch;
+  height: 30px;
+  grid-template-columns: var(--label-w) minmax(0, 1fr) var(--value-w);
+  grid-template-rows: minmax(0, 1fr);
+  align-items: center;
+  align-content: normal;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+}
+.param-scrub:hover { background: #161615; }
+.param-scrub.is-scrubbing { background: #1a1918; }
+.param-scrub > span { grid-column: 1; color: var(--quiet); font-size: 11px; letter-spacing: 0; }
+.param-scrub:hover > span, .param-scrub.is-scrubbing > span { color: var(--ink); }
+.param-scrub input {
+  grid-column: 3;
+  justify-self: end;
+  width: var(--value-w);
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--ink);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.param-scrub.is-editing input { width: var(--value-w); padding: 0 4px; border-color: var(--line); background: #0b0b0a; }
+/* Trilha e preenchimento ocupam a coluna do meio. */
+.param-scrub::after,
+.param-scrub::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: 50%;
+  bottom: auto;
+  left: calc(8px + var(--label-w) + 8px);
+  height: 2px;
+  margin-top: -1px;
+  border: 0;
+  border-radius: 1px;
+  box-shadow: none;
+  pointer-events: none;
+}
+.param-scrub::after { right: calc(8px + var(--value-w) + 8px); background: #2b2a27; }
+.param-scrub::before {
+  width: calc((100% - var(--label-w) - var(--value-w) - 32px) * var(--value-ratio, 0));
+  max-width: none;
+  background: #8d8a82;
+  z-index: 1;
+}
+.param-scrub:hover::before { background: #bdb9b0; }
+.param-scrub.is-scrubbing::before { background: var(--red); }
+.keyframe-button {
+  width: 24px;
+  height: 30px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: #4a4945;
+  font-size: 10px;
+}
+.keyframe-button:hover { background: #161615; color: var(--quiet); }
+.keyframe-button.is-active { border: 0; color: var(--red); }
+.numeric-field:has(.keyframe-button.is-active) .param-scrub::before { background: var(--red); }
+.easing-select { height: 24px; margin: 2px 0 4px; border-color: #252523; border-radius: 3px; }
+/* Botões de seção como texto discreto. */
+.section-tools button, .axis-lock { height: 22px; border-color: transparent; border-radius: 3px; background: transparent; color: var(--quiet); }
+.section-tools button:hover:not(:disabled), .axis-lock:hover { background: #161615; color: var(--ink); }
+.axis-lock.is-active { border-color: transparent; color: var(--ink); }
+.property-group h3 { color: var(--quiet); letter-spacing: .04em; }
+.subsection-title { letter-spacing: .04em; }
+
+/* baseline-ui: sem gradientes nem glow como sinal; números tabulares. */
+.canvas-viewport { background: #10100f; }
+.video-clip-range { background: #241b14; }
+.record-button.is-active i, .status-dot.is-ready, .canvas-snap-guide { box-shadow: none; }
+.time-display, .time-ruler span, #frame-value, .timeline-header input, .project-title span { font-variant-numeric: tabular-nums; }
+@container (max-width: 300px) {
+  .param-scrub { --label-w: 68px; --value-w: 6ch; gap: 6px; padding: 0 6px; }
+  .param-scrub::after, .param-scrub::before { left: calc(6px + var(--label-w) + 6px); }
+  .param-scrub::after { right: calc(6px + var(--value-w) + 6px); }
+  .param-scrub::before { width: calc((100% - var(--label-w) - var(--value-w) - 24px) * var(--value-ratio, 0)); }
+}
+
+/* 0.7 — refinamento geral: menos bordas, botões ghost, cantos consistentes. */
+.tool-grid { gap: 4px; padding: 0 10px 10px; }
+.tool-grid button { border-color: #1f1f1d; border-radius: var(--radius-control); background: #121211; }
+.tool-list { gap: 2px; padding: 0 10px 10px; }
+.tool-list button, .tool-list button:last-child { border: 0; border-radius: var(--radius-control); background: transparent; }
+.tool-list button:hover, .tool-grid button:hover { border-color: #33322f; background: #191918; }
+.timeline-zoom-controls { border: 0; gap: 2px; }
+.timeline-zoom-controls button, .stage-zoom-controls > button { border-color: transparent; border-radius: var(--radius-control); background: transparent; }
+.timeline-zoom-controls button:hover, .stage-zoom-controls > button:hover { border-color: transparent; background: #1b1b19; }
+.snap-toggle, .preview-quality-control select, .curve-tools select, .duration-field select, .timeline-header .duration-field input { border-radius: var(--radius-control); }
+.transport .play-button { border-radius: var(--radius-control); }
+.layer-item { border-radius: var(--radius-control); }
+.inspector-actions button { border-radius: var(--radius-control); }

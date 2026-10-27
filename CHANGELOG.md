@@ -2,6 +2,19 @@
 
 ## 0.7.0 — legibilidade e equilíbrio da interface
 
+### Inspector minimalista (referência: ui-skills / baseline-ui)
+
+- Parâmetros viraram linhas finas no padrão de inspector profissional: nome à
+  esquerda, trilha de 2 px no meio, valor em números tabulares à direita e ◆
+  discreto. Sem caixas, bordas nem preenchimento em bloco.
+- Trilha neutra; o vermelho da marca só aparece ao arrastar ou quando o
+  parâmetro tem keyframe (um acento por vez).
+- Painel estreito compacta nome e valor; o nome completo fica no tooltip.
+- Botões de seção, zoom e lista de efeitos em estilo "ghost"; cantos
+  consistentes; sem gradientes nem glow como sinal (fundo do preview, clipe de
+  vídeo, REC, status); números tabulares em tempo, régua e duração.
+- Cores e fontes da marca mantidas.
+
 ### Ajustes de edição
 
 - Clipes que ocupam a composição inteira agora podem ser arrastados na
