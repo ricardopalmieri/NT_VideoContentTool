@@ -746,3 +746,64 @@ test('alça de fade arrastada a partir do canto cria rampa ancorada no clipe', a
     await context.close();
   }
 });
+
+test('corte no playhead divide o clipe na mesma faixa (S e botão de tesoura)', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await createScene(page);
+    const before = await page.locator('.timeline-track[data-track-id]').count();
+    await page.locator('[data-select-layer]').first().click();
+    const ruler = await page.locator('.time-ruler').boundingBox();
+    if (!ruler) throw new Error('Régua não está visível');
+    await page.mouse.click(ruler.x + ruler.width * .5, ruler.y + ruler.height / 2);
+    await page.locator('body').press('s');
+    await expect.poll(() => page.evaluate(() => (window as unknown as { vct: { getProject(): { layers: Array<{ id: string; trackId?: string }> } } }).vct
+      .getProject().layers.some((layer) => layer.trackId && layer.trackId !== layer.id))).toBe(true);
+    await expect(page.locator('.timeline-track[data-track-id]')).toHaveCount(before);
+    const split = await page.evaluate(() => {
+      const vct = (window as unknown as { vct: { getProject(): { layers: Array<{ id: string; trackId?: string; startTime: number; endTime: number }> } } }).vct;
+      const layers = vct.getProject().layers;
+      const second = layers.find((layer) => layer.trackId && layer.trackId !== layer.id)!;
+      const first = layers.find((layer) => layer.id === second.trackId)!;
+      return { first: [first.startTime, first.endTime], second: [second.startTime, second.endTime] };
+    });
+    expect(split.first[1]).toBeCloseTo(.5, 2);
+    expect(split.second[0]).toBeCloseTo(.5, 2);
+    const row = page.locator('.timeline-track[data-track-id]').filter({ has: page.locator('[data-move-layer-clip]').nth(1) });
+    await expect(row.first().locator('[data-move-layer-clip]')).toHaveCount(2);
+    await page.mouse.click(ruler.x + ruler.width * .25, ruler.y + ruler.height / 2);
+    await page.locator('#split-clip').click();
+    await expect(page.locator('.timeline-track[data-track-id]').first().locator('[data-move-layer-clip]')).toHaveCount(3);
+  } finally {
+    await context.close();
+  }
+});
+
+test('modo Sobrepor: arrastar um clipe sobre o anterior cria Dissolver na sobreposição', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await createScene(page);
+    await page.locator('[data-select-layer]').first().click();
+    const ruler = await page.locator('.time-ruler').boundingBox();
+    if (!ruler) throw new Error('Régua não está visível');
+    await page.mouse.click(ruler.x + ruler.width * .5, ruler.y + ruler.height / 2);
+    await page.locator('body').press('s');
+    await page.locator('#overlap-mode').click();
+    await expect(page.locator('#overlap-mode')).toHaveAttribute('aria-pressed', 'true');
+    const second = page.locator('.timeline-track[data-track-id]').first().locator('[data-move-layer-clip]').nth(1);
+    const box = await second.boundingBox();
+    if (!box) throw new Error('Segundo clipe não está visível');
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 - ruler.width * .25, box.y + box.height / 2, { steps: 6 });
+    await page.mouse.up();
+    await expect(page.locator('.transition-zone')).toHaveCount(1);
+    const clips = await page.evaluate(() => (window as unknown as { vct: { getProject(): { layers: Array<{ startTime: number; endTime: number; transition?: { type: string } }> } } }).vct
+      .getProject().layers.filter((layer) => layer.transition).map((layer) => ({ start: layer.startTime, type: layer.transition!.type })));
+    expect(clips).toHaveLength(1);
+    expect(clips[0].type).toBe('dissolve');
+    expect(clips[0].start).toBeLessThan(.5);
+  } finally {
+    await context.close();
+  }
+});

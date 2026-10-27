@@ -1,6 +1,7 @@
 import type { ProjectDocument, EffectNode, ProjectSettings } from "./types";
 import { clamp } from "./math";
 import { normalizeFades } from "../timeline/timing";
+import { isTransitionType } from "./transitions";
 
 // Normalização histórica in-place: a ordem e os operadores ||= e ??= são intencionais.
 export function migrateProject(project: ProjectDocument) {
@@ -38,6 +39,7 @@ export function migrateProject(project: ProjectDocument) {
     layer.fadeOutStart ??= layer.endTime;
     layer.fadeOutEnd ??= layer.endTime;
     normalizeFades(layer);
+    if (layer.transition && !isTransitionType(layer.transition.type)) delete layer.transition;
     layer.scaleLocked ??= true;
     layer.sizeLocked ??= true;
     if (legacyProject && layer.kind === "text") layer.sizeLocked = false;

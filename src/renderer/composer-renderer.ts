@@ -2,6 +2,8 @@ import { vertexSource, fragmentSource } from "./shaders";
 import { sourceTimeFor } from "./source-time";
 import { shouldSeekVideo } from "./video-seek";
 import { fadeEnvelope } from "../timeline/timing";
+import { visualTracks } from "../model/clip-tracks";
+import { transitionState, type TransitionState } from "../model/transitions";
 import type { EffectNode, Layer, ProjectDocument } from "../model/types";
 import { resolveAssetUrl } from "../io/web-platform";
 
@@ -124,10 +126,12 @@ export class ComposerRenderer {
     if (!source) return;
     const fitMedia = (sourceWidth: number, sourceHeight: number) => {
       if (!sourceWidth || !sourceHeight || !this.project) return;
-      // Mídia entra no tamanho real em pixels (1:1 com a composição). Só reduz se
-      // for maior que a composição; a imagem guia sempre ocupa a composição.
-      const fit = Math.min(this.project.settings.width / sourceWidth, this.project.settings.height / sourceHeight);
-      const scale = layer.kind === "guide" ? fit : Math.min(1, fit);
+      // Mídia entra no tamanho real em pixels (1:1 com a composição), mesmo que
+      // seja maior que ela (um 4K numa composição 1080p fica com o dobro do
+      // tamanho). Só a imagem guia é ajustada para ocupar a composição.
+      const scale = layer.kind === "guide"
+        ? Math.min(this.project.settings.width / sourceWidth, this.project.settings.height / sourceHeight)
+        : 1;
       layer.width = sourceWidth * scale;
       layer.height = sourceHeight * scale;
       onFitted?.();
@@ -755,7 +759,23 @@ export class ComposerRenderer {
     else gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   }
 
-  private compositeRaster(layer: Layer, effects: EffectNode[], time: number) {
+  // Faixa de baixo primeiro; dentro da faixa, o clipe que começa depois fica por
+  // cima (é o que entra numa transição com sobreposição).
+  private drawOrder() {
+    return visualTracks(this.project).reverse()
+      .flatMap((track) => [...track.clips].sort((a, b) => a.startTime - b.startTime));
+  }
+
+  // Cortina: apaga do raster a parte da composição que ainda não foi revelada.
+  private applyReveal(transition: TransitionState) {
+    if (!transition.reveal || transition.reveal.amount >= 1) return;
+    const { width, height } = this.raster;
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    if (transition.reveal.from === "left") this.ctx.clearRect(width * transition.reveal.amount, 0, width, height);
+    else this.ctx.clearRect(0, 0, width * (1 - transition.reveal.amount), height);
+  }
+
+  private compositeRaster(layer: Layer, effects: EffectNode[], time: number, transitionOpacity = 1) {
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
@@ -786,7 +806,7 @@ export class ComposerRenderer {
       }
     }
     this.blendFor(layer.blendMode);
-    const opacity = this.evaluated(layer, "opacity", time) * this.fadeEnvelope(layer, time);
+    const opacity = this.evaluated(layer, "opacity", time) * this.fadeEnvelope(layer, time) * transitionOpacity;
     this.drawPass(current, this.compTarget, null, time, undefined, undefined, opacity, layer.blendMode === "darken");
   }
 
@@ -803,14 +823,17 @@ export class ComposerRenderer {
     gl.clearColor(bg[0], bg[1], bg[2], bg[3]);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
-    for (const layer of [...this.project.layers].reverse()) {
+    for (const layer of this.drawOrder()) {
       if (!layer.visible || (exporting && !layer.exportable) || time < layer.startTime || time > layer.endTime) continue;
+      const transition = transitionState(this.project, layer, time);
+      if (transition.opacity <= .001 || (transition.reveal && transition.reveal.amount <= .001)) continue;
       const enabledEffects = layer.effects.filter((item) => item.enabled);
       const trail = enabledEffects.find((effect) => effect.kind === "feedback");
       const visualEffects = enabledEffects.filter((effect) => effect !== trail);
       if (!trail) {
-        const ready = await this.rasterize(layer, time, exporting);
-        if (ready) this.compositeRaster(layer, visualEffects, time);
+        const ready = await this.rasterize(layer, time, exporting, 1, transition.offsetX, 0);
+        if (ready) this.applyReveal(transition);
+        if (ready) this.compositeRaster(layer, visualEffects, time, transition.opacity);
         else if (exporting) throw new Error(`Não foi possível renderizar a mídia da layer "${layer.name}".`);
         continue;
       }
@@ -829,10 +852,11 @@ export class ComposerRenderer {
           sampleTime,
           exporting,
           Math.pow(decay, index),
-          offsetX * index,
+          offsetX * index + transition.offsetX,
           offsetY * index,
         );
-        if (ready) this.compositeRaster(layer, visualEffects, time);
+        if (ready) this.applyReveal(transition);
+        if (ready) this.compositeRaster(layer, visualEffects, time, transition.opacity);
         else if (exporting) throw new Error(`Não foi possível renderizar a mídia da layer "${layer.name}" no frame ${Math.round(sampleTime * this.project.settings.fps)}.`);
       }
     }

@@ -1066,3 +1066,21 @@ button { transition: color 120ms ease, background-color 120ms ease, border-color
 .transport .play-button { border-radius: var(--radius-control); }
 .layer-item { border-radius: var(--radius-control); }
 .inspector-actions button { border-radius: var(--radius-control); }
+
+/* 0.7 — faixas com vários clipes e corte. */
+.split-button { display: grid; width: 32px; height: 32px; place-items: center; padding: 0; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--quiet); }
+.split-button:hover { background: #1b1b19; color: var(--ink); }
+.split-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+.timeline-header .split-button { order: 1; }
+.timeline-clip-count { flex: none; min-width: 18px; padding: 0 4px; border-radius: 9px; background: #222120; color: var(--quiet); font-size: 11px; text-align: center; }
+.timeline-track.is-drop-target { background: rgba(206,17,27,.08); box-shadow: inset 0 0 0 1px rgba(228,71,77,.45); }
+.overlap-toggle.is-active { background: rgba(206,17,27,.14); color: var(--ink); box-shadow: inset 0 0 0 1px var(--red); }
+.visual-clip-range.is-multi { outline: 1px dashed #f0b76d; outline-offset: 1px; }
+.transition-zone { position: absolute; z-index: 3; top: 0; bottom: 0; left: 0; display: grid; place-items: center; overflow: hidden; border-right: 1px solid rgba(240,183,109,.7); background: repeating-linear-gradient(135deg, rgba(240,183,109,.28) 0 4px, rgba(240,183,109,.08) 4px 8px); pointer-events: none; }
+.transition-zone.is-overlap { border-right-style: dashed; }
+.transition-zone b { color: #f6d7a8; font-size: 11px; font-weight: 500; line-height: 1; }
+.transition-controls { display: grid; gap: 6px; }
+.transition-controls .select-field { margin-top: 0; }
+.transition-duration { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px; color: var(--quiet); font: 11px "IBM Plex Mono", monospace; }
+.transition-duration input { width: 7ch; height: 26px; padding: 0 6px; border: 1px solid var(--line); border-radius: 3px; background: #0b0b0a; color: var(--ink); font: 12px "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; text-align: right; }
+.transition-note { margin: 0; padding: 0 8px; color: var(--quiet); font: 11px "IBM Plex Mono", monospace; }

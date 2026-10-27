@@ -93,12 +93,18 @@ export interface Layer {
   sizeLocked: boolean;
   effects: EffectNode[];
   keyframes: Record<string, Keyframe[]>;
+  /** Faixa da timeline; sem valor, a layer é a própria faixa. */
+  trackId?: string;
+  /** Transição de entrada (ver src/model/transitions.ts). */
+  transition?: { type: "dissolve" | "dip" | "wipe-right" | "wipe-left" | "push-left"; duration: number };
 }
 
 export interface AudioTrack {
   id: string;
   name: string;
   asset: string;
+  /** Faixa de áudio; sem valor, o clipe é a própria faixa. */
+  laneId?: string;
   linkedLayerId?: string;
   linked: boolean;
   muted: boolean;

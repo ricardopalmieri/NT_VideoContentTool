@@ -1,6 +1,9 @@
 import { clamp } from "../model/math";
 import { normalizeFades, setFadeHandle } from "../timeline/timing";
 import { formatDurationValue, parseDurationValue, type DurationUnit } from "../timeline/timecode";
+import { sourceTimeFor } from "../renderer/source-time";
+import { audioLanes, clipNeighbors, copyClips, moveClipToTrack, pasteClips, placeTrack, rippleDelete, shiftClip, shiftTrack, splitClip, trackIdOf, visualTracks, type ClipboardClips } from "../model/clip-tracks";
+import { autoTransitionsForOverlap, DEFAULT_TRANSITION_DURATION, isTransitionType, syncTransitionAudioFades, transitionWindow, TRANSITION_TYPES, type TransitionType } from "../model/transitions";
 import { timelineSnapCandidates as collectTimelineSnapCandidates, snapTimelineTime as calculateTimelineSnap } from "../timeline/snapping";
 import { migrateProject } from "../model/migrate-project";
 import { UndoHistory } from "../model/undo-history";
@@ -108,6 +111,11 @@ let timelineLoop = false;
 let recordMode = false;
 let timelineZoomX = Number(localStorage.getItem("nt-vct-timeline-zoom-x")) || 1;
 let durationUnit: DurationUnit = localStorage.getItem("nt-vct-duration-unit") === "frames" ? "frames" : "tc";
+// Modo Sobrepor: clipes da mesma faixa podem se sobrepor; a sobreposição vira transição.
+let overlapMode = localStorage.getItem("nt-vct-overlap-mode") === "1";
+// Seleção múltipla de clipes (Ctrl/⌘/Shift+clique) para apagar, ripple e copiar.
+const selectedClipIds = new Set<string>();
+let clipClipboard: ClipboardClips | null = null;
 let timelineZoomY = Number(localStorage.getItem("nt-vct-timeline-zoom-y")) || 1;
 let videoTrackZoomY = Number(localStorage.getItem("nt-vct-video-track-zoom-y")) || 1;
 let audioTrackZoomY = Number(localStorage.getItem("nt-vct-audio-track-zoom-y")) || 1;
@@ -147,8 +155,14 @@ let notificationAudio: AudioContext | null = null;
 const audioEngine = new AudioTimelineEngine();
 type ClipboardSection = "transform" | "appearance" | "timing" | "effects" | "audio";
 let parameterClipboard: { section: ClipboardSection; data: unknown } | null = null;
+// Quadros de cada arquivo de vídeo (chave = asset), cobrindo a mídia inteira.
+// Cada clipe escolhe os quadros do próprio trecho de origem, então a faixa
+// acompanha trim, corte, velocidade e reverse sem gerar thumbnails de novo.
+const VIDEO_THUMBNAIL_FRAMES = 24;
 const videoThumbnailCache = new Map<string, string[]>();
+const videoThumbnailDuration = new Map<string, number>();
 const audioWaveformCache = new Map<string, number[]>();
+const audioWaveformDuration = new Map<string, number>();
 let videoThumbnailQueue = Promise.resolve();
 const logoSimple = new URL("logo-simple.png", document.baseURI).href;
 
@@ -166,12 +180,14 @@ function syncSelectionClasses() {
   app.querySelectorAll<HTMLElement>("[data-layer-id]").forEach((item) =>
     item.classList.toggle("is-selected", item.dataset.layerId === selectedLayerId));
   app.querySelectorAll<HTMLElement>("[data-label-layer], [data-track-layer], [data-clip-layer]").forEach((item) => {
+    const members = item.dataset.trackMembers?.split(" ");
     const id = item.dataset.labelLayer || item.dataset.trackLayer || item.dataset.clipLayer;
-    item.classList.toggle("is-selected", id === selectedLayerId);
+    item.classList.toggle("is-selected", members && !item.dataset.clipLayer ? members.includes(selectedLayerId) : id === selectedLayerId);
   });
   app.querySelectorAll<HTMLElement>("[data-timeline-order-audio], [data-audio-track], [data-move-audio-clip]").forEach((item) => {
+    const members = item.dataset.laneMembers?.split(" ");
     const id = item.dataset.timelineOrderAudio || item.dataset.audioTrack || item.dataset.moveAudioClip;
-    item.classList.toggle("is-selected", id === selectedAudioTrackId);
+    item.classList.toggle("is-selected", members && !item.dataset.moveAudioClip ? members.includes(selectedAudioTrackId) : id === selectedAudioTrackId);
   });
 }
 
@@ -921,6 +937,7 @@ function renderInspector() {
           ${numberField(language === "pt-BR" ? "FADE IN ATÉ" : "FADE IN UNTIL", "fadeInEnd", layer.fadeInEnd, 0, project.settings.duration, .01)}
           ${numberField(language === "pt-BR" ? "FADE OUT DESDE" : "FADE OUT FROM", "fadeOutStart", layer.fadeOutStart, 0, project.settings.duration, .01)}
         </div>
+        ${renderTransitionControls(layer)}
         ${layer.kind === "guide" ? `<label class="check-row"><input type="checkbox" data-layer-check="exportable" ${layer.exportable ? "checked" : ""}><span>EXPORT GUIDE</span></label>` : ""}
       </section>
       <section class="property-group"><div class="property-group-title"><h3>${t("effects")}</h3>${sectionTools("effects")}</div>${renderEffectChain(layer.effects)}</section>
@@ -1078,6 +1095,8 @@ function renderTimeline() {
         <button data-timeline-zoom="y:-1" title="${language === "pt-BR" ? "Reduzir zoom vertical" : "Zoom out vertically"}" aria-label="${language === "pt-BR" ? "Reduzir zoom vertical" : "Zoom out vertically"}"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="8" r="5"/><path d="M4.8 8h6.4M12 12l5 5"/></svg></button>
         <button data-timeline-zoom="y:1" title="${language === "pt-BR" ? "Ampliar zoom vertical" : "Zoom in vertically"}" aria-label="${language === "pt-BR" ? "Ampliar zoom vertical" : "Zoom in vertically"}"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="8" r="5"/><path d="M4.8 8h6.4M8 4.8v6.4M12 12l5 5"/></svg></button>
       </div>
+      <button class="split-button overlap-toggle ${overlapMode ? "is-active" : ""}" id="overlap-mode" aria-pressed="${overlapMode}" title="${language === "pt-BR" ? "Sobrepor: clipes da mesma faixa podem se sobrepor e a sobreposição vira transição" : "Overlap: clips on a track may overlap; the overlap becomes a transition"}" aria-label="${language === "pt-BR" ? "Modo Sobrepor" : "Overlap mode"}"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="5" width="9" height="10" rx="1.5"/><rect x="8.5" y="5" width="9" height="10" rx="1.5"/></svg></button>
+      <button class="split-button" id="split-clip" title="${language === "pt-BR" ? "Cortar no playhead (S)" : "Split at playhead (S)"}" aria-label="${language === "pt-BR" ? "Cortar no playhead" : "Split at playhead"}"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5.5" cy="5.5" r="2.5"/><circle cx="5.5" cy="14.5" r="2.5"/><path d="M7.6 7l9.4 8M7.6 13l9.4-8"/></svg></button>
       <button class="snap-toggle ${timelineSnap ? "is-active" : ""}" id="timeline-snap" title="${language === "pt-BR" ? "Snap em frames, bordas, clipes e keyframes" : "Snap to frames, edges, clips and keyframes"}">SNAP</button>
       <label class="duration-field">${t("duration").toUpperCase()} <input id="duration-input" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" value="${formatDurationValue(duration, project.settings.fps, durationUnit)}" title="${durationUnit === "frames" ? "Frames" : "HH:MM:SS:FF"}"><select id="duration-unit" aria-label="${language === "pt-BR" ? "Unidade da duração" : "Duration unit"}"><option value="tc" ${durationUnit === "tc" ? "selected" : ""}>HH:MM:SS:FF</option><option value="frames" ${durationUnit === "frames" ? "selected" : ""}>FRAMES</option></select></label>
       <span id="frame-value">${t("frame").toUpperCase()} ${Math.round(currentTime * project.settings.fps)}</span>
@@ -1098,21 +1117,25 @@ function renderTimeline() {
 
 type TimelineRow =
   | { type: "videoHeader" }
-  | { type: "layer"; layer: Layer }
+  | { type: "layer"; layer: Layer; clips: Layer[]; trackId: string }
   | { type: "effect"; layer: Layer; effect: EffectNode }
   | { type: "post"; effects: EffectNode[] }
   | { type: "postEffect"; effect: EffectNode }
   | { type: "audioHeader" }
-  | { type: "audio"; track: AudioTrack };
+  | { type: "audio"; track: AudioTrack; clips: AudioTrack[]; laneId: string };
 
 function timelineRows(): TimelineRow[] {
   if (!project) return [];
   const rows: TimelineRow[] = [];
   rows.push({ type: "videoHeader" });
-  for (const layer of project.layers) {
-    rows.push({ type: "layer", layer });
-    if (expandedTimelineLayers.has(layer.id)) {
-      for (const effect of layer.effects) rows.push({ type: "effect", layer, effect });
+  // Uma linha por faixa; a faixa mostra todos os seus clipes. O clipe selecionado
+  // (ou o primeiro) dá nome à linha.
+  for (const track of visualTracks(project)) {
+    const layer = track.clips.find((clip) => clip.id === selectedLayerId) || track.clips[0];
+    rows.push({ type: "layer", layer, clips: track.clips, trackId: track.id });
+    for (const clip of track.clips) {
+      if (!expandedTimelineLayers.has(clip.id)) continue;
+      for (const effect of clip.effects) rows.push({ type: "effect", layer: clip, effect });
     }
   }
   rows.push({ type: "post", effects: project.postEffects });
@@ -1120,7 +1143,10 @@ function timelineRows(): TimelineRow[] {
     for (const effect of project.postEffects) rows.push({ type: "postEffect", effect });
   }
   rows.push({ type: "audioHeader" });
-  for (const track of project.audioTracks) rows.push({ type: "audio", track });
+  for (const lane of audioLanes(project)) {
+    const track = lane.clips.find((clip) => clip.id === selectedAudioTrackId) || lane.clips[0];
+    rows.push({ type: "audio", track, clips: lane.clips, laneId: lane.id });
+  }
   return rows;
 }
 
@@ -1134,7 +1160,7 @@ function timelineThumbnail(layer: Layer) {
     return `<span class="timeline-thumb"><img src="${timelineAssetUrl(layer)}" alt=""></span>`;
   }
   if (layer.kind === "video") {
-    const thumbnail = videoThumbnailCache.get(layer.id)?.[0];
+    const thumbnail = clipThumbnailFrames(layer, 1)[0];
     return `<span class="timeline-thumb">${thumbnail ? `<img src="${thumbnail}" alt="">` : ""}<i>VID</i></span>`;
   }
   if (layer.kind === "text") return `<span class="timeline-thumb timeline-thumb-text">${escapeHtml((layer.text || "T").slice(0, 2))}</span>`;
@@ -1142,8 +1168,9 @@ function timelineThumbnail(layer: Layer) {
 }
 
 async function generateVideoThumbnails(layer: Layer) {
-  if (!layer.asset || videoThumbnailCache.has(layer.id)) return;
-  videoThumbnailCache.set(layer.id, []);
+  const asset = layer.asset;
+  if (!asset || videoThumbnailCache.has(asset)) return;
+  videoThumbnailCache.set(asset, []);
   const previousJob = videoThumbnailQueue.catch(() => undefined);
   let releaseQueue!: () => void;
   const queueGate = new Promise<void>((resolve) => releaseQueue = resolve);
@@ -1153,7 +1180,7 @@ async function generateVideoThumbnails(layer: Layer) {
   video.muted = true;
   video.preload = "auto";
   video.playsInline = true;
-  video.src = resolveAssetUrl(layer.asset);
+  video.src = resolveAssetUrl(asset);
   try {
     while (playing) await new Promise<void>((resolve) => window.setTimeout(resolve, 120));
     await new Promise<void>((resolve, reject) => {
@@ -1166,17 +1193,18 @@ async function generateVideoThumbnails(layer: Layer) {
     canvas.height = 68;
     const context = canvas.getContext("2d")!;
     const frames: string[] = [];
-    for (let index = 0; index < 6; index++) {
+    for (let index = 0; index < VIDEO_THUMBNAIL_FRAMES; index++) {
       while (playing) await new Promise<void>((resolve) => window.setTimeout(resolve, 120));
-      video.currentTime = Math.min(Math.max(0, video.duration - .02), video.duration * (index + .5) / 6);
+      video.currentTime = Math.min(Math.max(0, video.duration - .02), video.duration * (index + .5) / VIDEO_THUMBNAIL_FRAMES);
       await new Promise<void>((resolve) => video.addEventListener("seeked", () => resolve(), { once: true }));
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       frames.push(canvas.toDataURL("image/jpeg", .62));
     }
-    videoThumbnailCache.set(layer.id, frames);
+    videoThumbnailCache.set(asset, frames);
+    videoThumbnailDuration.set(asset, video.duration);
     requestTimelineRefresh();
   } catch {
-    videoThumbnailCache.delete(layer.id);
+    videoThumbnailCache.delete(asset);
   } finally {
     video.removeAttribute("src");
     video.load();
@@ -1190,7 +1218,7 @@ async function generateAudioWaveform(asset: string) {
   try {
     const buffer = await probeAudio(asset);
     const data = buffer.getChannelData(0);
-    const count = 180;
+    const count = 720;
     const peaks = Array.from({ length: count }, (_, index) => {
       const start = Math.floor(index / count * data.length);
       const end = Math.max(start + 1, Math.floor((index + 1) / count * data.length));
@@ -1200,19 +1228,49 @@ async function generateAudioWaveform(asset: string) {
     });
     const max = Math.max(.001, ...peaks);
     audioWaveformCache.set(asset, peaks.map((peak) => peak / max));
+    audioWaveformDuration.set(asset, buffer.duration);
     requestTimelineRefresh();
   } catch {
     audioWaveformCache.delete(asset);
   }
 }
 
+// Quadros do trecho que o clipe realmente mostra (respeita trim, velocidade e reverse).
+function clipThumbnailFrames(layer: Layer, count: number) {
+  const frames = layer.asset ? videoThumbnailCache.get(layer.asset) || [] : [];
+  const mediaDuration = layer.asset ? videoThumbnailDuration.get(layer.asset) || 0 : 0;
+  if (!frames.length || mediaDuration <= 0) return frames.slice(0, count);
+  const length = Math.max(.001, layer.endTime - layer.startTime);
+  return Array.from({ length: count }, (_, index) => {
+    const time = layer.startTime + length * (index + .5) / count;
+    const source = sourceTimeFor(layer, time, mediaDuration, layer.playbackRate);
+    const frame = Math.round(source / mediaDuration * frames.length - .5);
+    return frames[Math.max(0, Math.min(frames.length - 1, frame))];
+  });
+}
+
 function videoStrip(layer: Layer) {
-  const frames = videoThumbnailCache.get(layer.id) || [];
+  const frames = clipThumbnailFrames(layer, 6);
   return `<i class="clip-media-strip video-strip">${frames.map((source) => `<img src="${source}" alt="">`).join("")}</i>`;
 }
 
-function waveformSvg(track: AudioTrack) {
+// Onda só do trecho que o clipe toca (respeita trim, corte, velocidade e reverse).
+function clipWaveformPeaks(track: AudioTrack, count = 180) {
   const peaks = audioWaveformCache.get(track.asset) || [];
+  const mediaDuration = audioWaveformDuration.get(track.asset) || 0;
+  if (!peaks.length || mediaDuration <= 0) return peaks;
+  const sourceIn = Math.max(0, Math.min(mediaDuration, track.sourceIn));
+  const sourceOut = track.sourceOut > sourceIn ? Math.min(mediaDuration, track.sourceOut) : mediaDuration;
+  const played = Math.min(sourceOut - sourceIn, (track.endTime - track.startTime) * Math.max(.05, Math.abs(track.playbackRate || 1)));
+  return Array.from({ length: count }, (_, index) => {
+    const offset = played * (index + .5) / count;
+    const source = track.reverse ? sourceOut - offset : sourceIn + offset;
+    return peaks[Math.max(0, Math.min(peaks.length - 1, Math.floor(source / mediaDuration * peaks.length)))];
+  });
+}
+
+function waveformSvg(track: AudioTrack) {
+  const peaks = clipWaveformPeaks(track);
   if (!peaks.length) return `<i class="audio-waveform"></i>`;
   const waveform = peaks.map((peak, index) => {
     const x = index / Math.max(1, peaks.length - 1) * 100;
@@ -1256,20 +1314,20 @@ function renderTimelineLabel(row: TimelineRow) {
   const style = `style="--row-height:${timelineRowHeight(row)}px"`;
   if (row.type === "videoHeader") return `<div class="timeline-label-row media-group-label video-group-label" ${style}><strong>VIDEO</strong><span>${project?.layers.length || 0}</span><span class="group-height-controls"><button data-group-height="video:-1">−</button><button data-group-height="video:1">+</button></span></div>`;
   if (row.type === "audioHeader") return `<div class="timeline-label-row media-group-label audio-group-label" ${style}><strong>AUDIO</strong><span>${project?.audioTracks.length || 0}</span><span class="group-height-controls"><button data-group-height="audio:-1">−</button><button data-group-height="audio:1">+</button></span></div>`;
-  if (row.type === "audio") return `<div class="timeline-label-row audio-label ${row.track.id === selectedAudioTrackId ? "is-selected" : ""}" ${style} draggable="true" data-timeline-order-audio="${row.track.id}" data-select-audio-row="${row.track.id}">
+  if (row.type === "audio") return `<div class="timeline-label-row audio-label ${row.clips.some((clip) => clip.id === selectedAudioTrackId) ? "is-selected" : ""}" ${style} draggable="true" data-timeline-order-audio="${row.track.id}" data-select-audio-row="${row.track.id}" data-lane-members="${row.clips.map((clip) => clip.id).join(" ")}">
     <span class="timeline-order"><button data-move-audio-order="${row.track.id}" data-direction="-1">▲</button><button data-move-audio-order="${row.track.id}" data-direction="1">▼</button></span>
     <button class="audio-kind" data-select-audio="${row.track.id}" title="Audio">AUD</button>
-    <button class="timeline-label-name" data-select-audio="${row.track.id}">${escapeHtml(row.track.name)}</button>
+    <button class="timeline-label-name" data-select-audio="${row.track.id}">${escapeHtml(row.track.name)}</button>${row.clips.length > 1 ? `<span class="timeline-clip-count">${row.clips.length}</span>` : ""}
     ${row.track.linkedLayerId ? `<button class="audio-link ${row.track.linked ? "is-linked" : ""}" data-toggle-audio-link="${row.track.id}" title="${row.track.linked ? "Unlock audio" : "Link audio to video"}">${row.track.linked ? "▣" : "□"}</button>` : ""}
     <button class="audio-mute ${row.track.muted ? "is-muted" : ""}" data-toggle-audio-mute="${row.track.id}" title="Mute">${row.track.muted ? "M" : "A"}</button>
   </div>`;
   if (row.type === "layer") {
     const open = expandedTimelineLayers.has(row.layer.id);
-    return `<div class="timeline-label-row layer-label ${row.layer.id === selectedLayerId ? "is-selected" : ""}" ${style} data-label-layer="${row.layer.id}" data-select-layer-row="${row.layer.id}" draggable="true" data-timeline-order-layer="${row.layer.id}">
+    return `<div class="timeline-label-row layer-label ${row.clips.some((clip) => clip.id === selectedLayerId) ? "is-selected" : ""}" ${style} data-label-layer="${row.layer.id}" data-select-layer-row="${row.layer.id}" draggable="true" data-timeline-order-layer="${row.layer.id}" data-track-id="${row.trackId}" data-track-members="${row.clips.map((clip) => clip.id).join(" ")}">
       <span class="timeline-order"><button data-move-layer="${row.layer.id}" data-direction="-1">▲</button><button data-move-layer="${row.layer.id}" data-direction="1">▼</button></span>
       <button class="timeline-disclosure" data-toggle-timeline-layer="${row.layer.id}" ${row.layer.effects.length ? "" : "disabled"} title="Show effects">${row.layer.effects.length ? (open ? "▾" : "▸") : "·"}</button>
       ${timelineThumbnail(row.layer)}
-      <button class="timeline-label-name" data-select-layer="${row.layer.id}">${escapeHtml(row.layer.name)}</button>
+      <button class="timeline-label-name" data-select-layer="${row.layer.id}">${escapeHtml(row.layer.name)}</button>${row.clips.length > 1 ? `<span class="timeline-clip-count" title="${row.clips.length} ${language === "pt-BR" ? "clipes nesta faixa" : "clips on this track"}">${row.clips.length}</span>` : ""}
       ${row.layer.effects.length ? `<span class="timeline-fx-count">${row.layer.effects.length} FX</span>` : ""}
     </div>`;
   }
@@ -1292,25 +1350,37 @@ function timelineKeyDots(owner: string, effect: EffectNode) {
   })).join("");
 }
 
+function renderAudioClipSpan(track: AudioTrack, duration: number) {
+  return `<span class="clip-range audio-clip-range ${track.id === selectedAudioTrackId ? "is-selected" : ""} ${track.linked ? "is-linked" : ""} ${track.muted ? "is-muted" : ""}" data-move-audio-clip="${track.id}" style="left:${track.startTime / duration * 100}%;width:${(track.endTime - track.startTime) / duration * 100}%">
+      <button class="clip-trim-handle is-left" data-trim-audio="${track.id}" data-trim-edge="start" title="Trim audio start"></button>
+      ${waveformSvg(track)}<i class="fade-overlay fade-in" style="${fadeOverlayStyle(track, "in")}"></i><i class="fade-overlay fade-out" style="${fadeOverlayStyle(track, "out")}"></i>${fadeHandles(track, "audio", track.id)}<small>${track.reverse ? "REV " : ""}${Number(track.playbackRate.toFixed(2))}×</small>
+      <button class="clip-trim-handle is-right" data-trim-audio="${track.id}" data-trim-edge="end" title="Trim audio end"></button>
+    </span>`;
+}
+
+function renderLayerClipSpan(layer: Layer, duration: number) {
+  const window = project ? transitionWindow(project, layer) : null;
+  const clipLength = Math.max(.001, layer.endTime - layer.startTime);
+  const transitionZone = window
+    ? `<i class="transition-zone ${window.partner ? "is-overlap" : ""}" style="width:${(window.end - window.start) / clipLength * 100}%" title="${transitionLabel(layer.transition!.type)} · ${(window.end - window.start).toFixed(2)} s"><b>${transitionGlyph(layer.transition!.type)}</b></i>`
+    : "";
+  return `<span class="clip-range visual-clip-range ${layer.id === selectedLayerId ? "is-selected" : ""} ${selectedClipIds.size > 1 && selectedClipIds.has(layer.id) ? "is-multi" : ""} ${layer.kind}-clip-range ${layer.kind === "video" ? "video-clip-range" : ""}" data-clip-layer="${layer.id}" data-move-layer-clip="${layer.id}" ${layer.kind === "video" ? `data-move-video-clip="${layer.id}"` : ""} style="left:${layer.startTime / duration * 100}%;width:${(layer.endTime - layer.startTime) / duration * 100}%">
+      <button class="clip-trim-handle is-left" data-trim-clip="${layer.id}" data-trim-edge="start" title="Trim start"></button>${layerClipMedia(layer)}${transitionZone}<i class="fade-overlay fade-in" style="${fadeOverlayStyle(layer, "in")}"></i><i class="fade-overlay fade-out" style="${fadeOverlayStyle(layer, "out")}"></i>${fadeHandles(layer, "layer", layer.id)}<small>${layer.kind === "video" ? `${layer.reverse ? "REV " : ""}${Number(layer.playbackRate.toFixed(2))}×` : escapeHtml(layer.name)}</small><button class="clip-trim-handle is-right" data-trim-clip="${layer.id}" data-trim-edge="end" title="Trim end"></button>
+    </span>${Object.entries(layer.keyframes).flatMap(([property, keys]) => keys.map((key) => {
+      const ref = `${layer.id}|${property}|${key.time}`;
+      return `<button type="button" class="key-dot ${selectedKeyRef === ref ? "is-selected" : ""}" data-key-ref="${ref}" title="${property} ${key.value}" style="left:${key.time / duration * 100}%">◆</button>`;
+    })).join("")}`;
+}
+
 function renderTimelineTrack(row: TimelineRow, duration: number) {
   const style = `style="--row-height:${timelineRowHeight(row)}px"`;
   if (row.type === "videoHeader") return `<div class="timeline-track media-group-track video-group-track" ${style}></div>`;
   if (row.type === "audioHeader") return `<div class="timeline-track media-group-track audio-group-track" ${style}></div>`;
-  if (row.type === "audio") return `<div class="timeline-track audio-track-row ${row.track.id === selectedAudioTrackId ? "is-selected" : ""}" ${style} data-audio-track="${row.track.id}">
-    <span class="clip-range audio-clip-range ${row.track.id === selectedAudioTrackId ? "is-selected" : ""} ${row.track.linked ? "is-linked" : ""} ${row.track.muted ? "is-muted" : ""}" data-move-audio-clip="${row.track.id}" style="left:${row.track.startTime / duration * 100}%;width:${(row.track.endTime - row.track.startTime) / duration * 100}%">
-      <button class="clip-trim-handle is-left" data-trim-audio="${row.track.id}" data-trim-edge="start" title="Trim audio start"></button>
-      ${waveformSvg(row.track)}<i class="fade-overlay fade-in" style="${fadeOverlayStyle(row.track, "in")}"></i><i class="fade-overlay fade-out" style="${fadeOverlayStyle(row.track, "out")}"></i>${fadeHandles(row.track, "audio", row.track.id)}<small>${row.track.reverse ? "REV " : ""}${Number(row.track.playbackRate.toFixed(2))}×</small>
-      <button class="clip-trim-handle is-right" data-trim-audio="${row.track.id}" data-trim-edge="end" title="Trim audio end"></button>
-    </span>
+  if (row.type === "audio") return `<div class="timeline-track audio-track-row ${row.clips.some((clip) => clip.id === selectedAudioTrackId) ? "is-selected" : ""}" ${style} data-audio-track="${row.track.id}" data-lane-id="${row.laneId}" data-lane-members="${row.clips.map((clip) => clip.id).join(" ")}">
+    ${row.clips.map((clip) => renderAudioClipSpan(clip, duration)).join("")}
   </div>`;
-  if (row.type === "layer") return `<div class="timeline-track ${row.layer.id === selectedLayerId ? "is-selected" : ""}" ${style} data-track-layer="${row.layer.id}">
-    <span class="clip-range visual-clip-range ${row.layer.id === selectedLayerId ? "is-selected" : ""} ${row.layer.kind}-clip-range ${row.layer.kind === "video" ? "video-clip-range" : ""}" data-clip-layer="${row.layer.id}" data-move-layer-clip="${row.layer.id}" ${row.layer.kind === "video" ? `data-move-video-clip="${row.layer.id}"` : ""} style="left:${row.layer.startTime / duration * 100}%;width:${(row.layer.endTime - row.layer.startTime) / duration * 100}%">
-      <button class="clip-trim-handle is-left" data-trim-clip="${row.layer.id}" data-trim-edge="start" title="Trim start"></button>${layerClipMedia(row.layer)}<i class="fade-overlay fade-in" style="${fadeOverlayStyle(row.layer, "in")}"></i><i class="fade-overlay fade-out" style="${fadeOverlayStyle(row.layer, "out")}"></i>${fadeHandles(row.layer, "layer", row.layer.id)}<small>${row.layer.kind === "video" ? `${row.layer.reverse ? "REV " : ""}${Number(row.layer.playbackRate.toFixed(2))}×` : escapeHtml(row.layer.name)}</small><button class="clip-trim-handle is-right" data-trim-clip="${row.layer.id}" data-trim-edge="end" title="Trim end"></button>
-    </span>
-    ${Object.entries(row.layer.keyframes).flatMap(([property, keys]) => keys.map((key) => {
-      const ref = `${row.layer.id}|${property}|${key.time}`;
-      return `<button type="button" class="key-dot ${selectedKeyRef === ref ? "is-selected" : ""}" data-key-ref="${ref}" title="${property} ${key.value}" style="left:${key.time / duration * 100}%">◆</button>`;
-    })).join("")}
+  if (row.type === "layer") return `<div class="timeline-track ${row.clips.some((clip) => clip.id === selectedLayerId) ? "is-selected" : ""}" ${style} data-track-layer="${row.layer.id}" data-track-id="${row.trackId}" data-track-members="${row.clips.map((clip) => clip.id).join(" ")}">
+    ${row.clips.map((clip) => renderLayerClipSpan(clip, duration)).join("")}
   </div>`;
   if (row.type === "effect") return `<div class="timeline-track effect-track" ${style}>${timelineKeyDots(row.layer.id, row.effect)}</div>`;
   if (row.type === "post") return `<div class="timeline-track post-track" ${style}></div>`;
@@ -1775,6 +1845,26 @@ function bindDynamicControls(root: ParentNode = app) {
       if (input.dataset.layerText === "name") updateLayerStack();
     });
   });
+  root.querySelector<HTMLSelectElement>("[data-transition-type]")?.addEventListener("change", (event) => {
+    const layer = selectedLayer();
+    if (!layer || !project) return;
+    snapshot();
+    const value = (event.target as HTMLSelectElement).value;
+    if (isTransitionType(value)) layer.transition = { type: value, duration: layer.transition?.duration || DEFAULT_TRANSITION_DURATION };
+    else delete layer.transition;
+    afterClipEdit();
+    updateInspector();
+    updateTimeline();
+  });
+  root.querySelector<HTMLInputElement>("[data-transition-duration]")?.addEventListener("change", (event) => {
+    const layer = selectedLayer();
+    const value = Number((event.target as HTMLInputElement).value);
+    if (!layer?.transition || !Number.isFinite(value)) return;
+    snapshot();
+    layer.transition.duration = clamp(value, 1 / project!.settings.fps, Math.max(.05, layer.endTime - layer.startTime));
+    afterClipEdit();
+    updateTimeline();
+  });
   root.querySelectorAll<HTMLInputElement>("[data-layer-check]").forEach((input) => input.addEventListener("change", () => {
     const layer = selectedLayer();
     if (!layer || layer.locked) return;
@@ -2019,6 +2109,18 @@ async function addInput(kind: InputKind) {
     }
   }
   project.layers.unshift(layer);
+  // Mídia nova entra no playhead (em 0 continua igual: ocupa a composição).
+  if (currentTime > 0 && kind !== "guide") {
+    const at = Math.round(currentTime * project.settings.fps) / project.settings.fps;
+    if (kind === "video") shiftClip(project, layer, at);
+    else {
+      layer.startTime = at;
+      layer.endTime = Math.max(project.settings.duration, at + 3);
+      layer.fadeInStart = layer.fadeInEnd = at;
+      layer.fadeOutStart = layer.fadeOutEnd = layer.endTime;
+    }
+    extendDurationToContent();
+  }
   if (asset) rememberAssetSource(asset.relativePath, asset.sourceMetadata);
   selectedLayerId = layer.id;
   selectedAudioTrackId = "";
@@ -2103,7 +2205,6 @@ async function replaceLayerMedia(layerId: string) {
     layer.asset = asset.relativePath;
     rememberAssetSource(asset.relativePath, asset.sourceMetadata);
     renderer?.removeMedia(layer.id);
-    videoThumbnailCache.delete(layer.id);
     if (layer.kind === "video") {
       layer.sourceIn = 0;
       layer.sourceOut = mediaDuration;
@@ -2312,12 +2413,11 @@ function deleteLayer(layerId = selectedLayerId) {
 
 function moveLayer(layerId: string, direction: number) {
   if (!project) return;
-  const index = project.layers.findIndex((layer) => layer.id === layerId);
-  const target = clamp(index + direction, 0, project.layers.length - 1);
-  if (index < 0 || index === target) return;
+  const layer = project.layers.find((item) => item.id === layerId);
+  if (!layer) return;
+  // O undo ignora checkpoints sem alteração, então o snapshot antes é seguro.
   snapshot();
-  const [moved] = project.layers.splice(index, 1);
-  project.layers.splice(target, 0, moved);
+  if (!shiftTrack(project, trackIdOf(layer), direction)) return;
   syncLinkedAudioOrder();
   project.modifiedAt = new Date().toISOString();
   renderEditorPreservingCanvas();
@@ -2348,6 +2448,123 @@ function moveEffect(effectId: string, direction: number) {
   list.splice(target, 0, moved);
   project.modifiedAt = new Date().toISOString();
   renderEditorPreservingCanvas();
+}
+
+function transitionLabel(type: TransitionType) {
+  const pt = language === "pt-BR";
+  return ({
+    dissolve: pt ? "Dissolver" : "Dissolve",
+    dip: pt ? "Fade pelo fundo" : "Dip to background",
+    "wipe-right": pt ? "Cortina →" : "Wipe →",
+    "wipe-left": pt ? "Cortina ←" : "Wipe ←",
+    "push-left": pt ? "Empurrar" : "Push",
+  } as Record<TransitionType, string>)[type];
+}
+
+function transitionGlyph(type: TransitionType) {
+  return ({ dissolve: "◐", dip: "◑", "wipe-right": "▷", "wipe-left": "◁", "push-left": "⇤" } as Record<TransitionType, string>)[type];
+}
+
+function renderTransitionControls(layer: Layer) {
+  if (!project) return "";
+  const window = transitionWindow(project, layer);
+  const options = [`<option value="">${language === "pt-BR" ? "Nenhuma" : "None"}</option>`,
+    ...TRANSITION_TYPES.map((type) => `<option value="${type}" ${layer.transition?.type === type ? "selected" : ""}>${transitionLabel(type)}</option>`)].join("");
+  const duration = layer.transition
+    ? window?.partner
+      ? `<p class="transition-note">${language === "pt-BR" ? "Duração = sobreposição" : "Duration = overlap"} · ${(window.end - window.start).toFixed(2)} s</p>`
+      : `<label class="transition-duration"><span>${language === "pt-BR" ? "DURAÇÃO (s)" : "DURATION (s)"}</span><input type="number" data-transition-duration min="0.05" step="0.05" value="${Number(layer.transition.duration.toFixed(3))}"></label>`
+    : "";
+  return `<h4 class="subsection-title">${language === "pt-BR" ? "TRANSIÇÃO DE ENTRADA" : "TRANSITION IN"}</h4>
+    <div class="transition-controls"><label class="select-field"><select data-transition-type aria-label="${language === "pt-BR" ? "Transição de entrada" : "Transition in"}">${options}</select></label>${duration}</div>`;
+}
+
+// Depois de mover/aparar: no modo Sobrepor, sobreposições ganham Dissolver; o
+// áudio vinculado segue o crossfade das transições com sobreposição.
+function afterClipEdit() {
+  if (!project) return;
+  if (overlapMode) autoTransitionsForOverlap(project);
+  syncTransitionAudioFades(project);
+  markProjectModified();
+  void renderFrame();
+}
+
+function selectionIds() {
+  if (!project) return [];
+  const ids = selectedClipIds.size ? [...selectedClipIds] : selectedLayerId ? [selectedLayerId] : [];
+  return ids.filter((id) => project!.layers.some((layer) => layer.id === id));
+}
+
+function deleteSelection() {
+  const ids = selectionIds();
+  if (!project || !ids.length) return;
+  if (ids.length === 1) return deleteLayer(ids[0]);
+  snapshot();
+  for (const id of ids) renderer?.removeMedia(id);
+  project.layers = project.layers.filter((layer) => !ids.includes(layer.id));
+  project.audioTracks = project.audioTracks.filter((track) => !(track.linked && ids.includes(track.linkedLayerId || "")));
+  selectedClipIds.clear();
+  selectedLayerId = project.layers[0]?.id || "";
+  markProjectModified();
+  renderEditorPreservingCanvas();
+}
+
+function rippleDeleteSelection() {
+  const ids = selectionIds();
+  if (!project || !ids.length) return;
+  snapshot();
+  for (const id of ids) renderer?.removeMedia(id);
+  rippleDelete(project, ids);
+  selectedClipIds.clear();
+  selectedLayerId = project.layers[0]?.id || "";
+  afterClipEdit();
+  renderEditorPreservingCanvas();
+  setStatus(language === "pt-BR" ? "APAGADO COM RIPPLE · espaço fechado" : "RIPPLE DELETE · gap closed");
+}
+
+function pasteClipboard() {
+  if (!project || !clipClipboard) return;
+  snapshot();
+  const pasted = pasteClips(project, clipClipboard, Math.round(currentTime * project.settings.fps) / project.settings.fps);
+  if (!pasted.length) return;
+  extendDurationToContent();
+  syncLinkedAudioOrder();
+  selectedClipIds.clear();
+  pasted.forEach((layer) => selectedClipIds.add(layer.id));
+  selectedLayerId = pasted[0].id;
+  afterClipEdit();
+  renderEditorPreservingCanvas();
+  setStatus(language === "pt-BR" ? `${pasted.length} CLIPE(S) COLADO(S) NO PLAYHEAD` : `${pasted.length} CLIP(S) PASTED AT PLAYHEAD`);
+}
+
+// Corta no playhead: o clipe selecionado, ou o clipe da faixa selecionada sob o
+// playhead. O áudio vinculado é cortado junto.
+function splitAtPlayhead() {
+  if (!project || exportInProgress) return;
+  const selected = selectedLayer();
+  const fps = project.settings.fps;
+  const time = Math.round(currentTime * fps) / fps;
+  const covers = (layer: Layer) => time > layer.startTime + .5 / fps && time < layer.endTime - .5 / fps;
+  const target = selected && covers(selected)
+    ? selected
+    : project.layers.find((layer) => selected && trackIdOf(layer) === trackIdOf(selected) && covers(layer))
+      || (!selected ? project.layers.find(covers) : undefined);
+  if (!target) {
+    setStatus(language === "pt-BR" ? "CORTE · posicione o playhead sobre o clipe selecionado" : "SPLIT · place the playhead over the selected clip");
+    return;
+  }
+  stopPlayback();
+  snapshot();
+  const mediaDuration = renderer?.mediaDuration(target.id) || 0;
+  const result = splitClip(project, target.id, time, mediaDuration, .5 / fps);
+  if (!result) return;
+  selectedLayerId = result.second.id;
+  selectedAudioTrackId = "";
+  selectedEffectId = "";
+  selectedKeyRef = "";
+  markProjectModified();
+  renderEditorPreservingCanvas();
+  setStatus(language === "pt-BR" ? "CLIPE CORTADO" : "CLIP SPLIT");
 }
 
 function duplicateLayer() {
@@ -2503,6 +2720,15 @@ function snapClipStart(value: number, length: number, scrubArea: HTMLElement, ex
 
 function bindTimeline() {
   app.querySelector("#play")?.addEventListener("click", togglePlayback);
+  app.querySelector("#split-clip")?.addEventListener("click", splitAtPlayhead);
+  app.querySelector("#overlap-mode")?.addEventListener("click", () => {
+    overlapMode = !overlapMode;
+    localStorage.setItem("nt-vct-overlap-mode", overlapMode ? "1" : "0");
+    setStatus(overlapMode
+      ? (language === "pt-BR" ? "SOBREPOR LIGADO · sobreposição na mesma faixa vira transição" : "OVERLAP ON · overlaps on a track become transitions")
+      : (language === "pt-BR" ? "SOBREPOR DESLIGADO" : "OVERLAP OFF"));
+    updateTimeline();
+  });
   app.querySelector("#to-start")?.addEventListener("click", () => {
     stopPlayback();
     setTime(0);
@@ -2671,6 +2897,7 @@ function bindTimeline() {
     const speed = Math.max(.05, Math.abs(layer.playbackRate || 1));
     const minLength = 1 / Math.max(1, project.settings.fps);
     const clip = app.querySelector<HTMLElement>(`[data-clip-layer="${layer.id}"]`);
+    const neighbors = overlapMode ? { previousEnd: 0, nextStart: Number.POSITIVE_INFINITY } : clipNeighbors(project, layer.id);
     handle.setPointerCapture(event.pointerId);
     const pointerTime = (moveEvent: PointerEvent) => {
       return snapTimelineTime(timelineTimeFromPointer(moveEvent, scrubArea), scrubArea, layer.id, "", moveEvent.altKey);
@@ -2678,7 +2905,7 @@ function bindTimeline() {
     const move = (moveEvent: PointerEvent) => {
       const time = pointerTime(moveEvent);
       if (edge === "start") {
-        const nextStart = clamp(time, 0, initialEnd - minLength);
+        const nextStart = clamp(time, neighbors.previousEnd, initialEnd - minLength);
         const delta = nextStart - initialStart;
         layer.startTime = nextStart;
         if (layer.kind === "video") {
@@ -2686,7 +2913,7 @@ function bindTimeline() {
           else layer.sourceIn = clamp(initialSourceIn + delta * speed, 0, initialSourceOut - .001);
         }
       } else {
-        layer.endTime = clamp(time, initialStart + minLength, project!.settings.duration);
+        layer.endTime = clamp(time, initialStart + minLength, Math.min(project!.settings.duration, neighbors.nextStart));
         if (layer.kind === "video") {
           const naturalTimelineDuration = (initialSourceOut - layer.sourceIn) / speed;
           layer.loop = layer.endTime - layer.startTime > naturalTimelineDuration + minLength / 2;
@@ -2710,6 +2937,7 @@ function bindTimeline() {
       handle.removeEventListener("pointercancel", stop);
       if (handle.hasPointerCapture(upEvent.pointerId)) handle.releasePointerCapture(upEvent.pointerId);
       project!.modifiedAt = new Date().toISOString();
+      afterClipEdit();
       updateInspector();
       updateTimeline();
     };
@@ -2727,6 +2955,15 @@ function bindTimeline() {
     const layer = videoId ? project.layers.find((item) => item.id === videoId) : undefined;
     const track = audioId ? project.audioTracks.find((item) => item.id === audioId) : undefined;
     if (!layer && !track) return;
+    if (layer && (event.ctrlKey || event.metaKey || event.shiftKey)) {
+      if (!selectedClipIds.size && selectedLayerId) selectedClipIds.add(selectedLayerId);
+      if (selectedClipIds.has(layer.id)) selectedClipIds.delete(layer.id);
+      else selectedClipIds.add(layer.id);
+      selectLayerById(layer.id, false);
+      updateTimeline();
+      return;
+    }
+    selectedClipIds.clear();
     const linkedLayer = track?.linked && track.linkedLayerId
       ? project.layers.find((item) => item.id === track.linkedLayerId && item.kind === "video")
       : undefined;
@@ -2748,11 +2985,26 @@ function bindTimeline() {
     const startX = event.clientX;
     const timelinePixelWidth = timelineContentRect(scrubArea).width;
     clip.setPointerCapture(event.pointerId);
+    // Na própria faixa, o clipe só anda no espaço livre entre os vizinhos.
+    const neighbors = layer && !overlapMode ? clipNeighbors(project, layer.id) : { previousEnd: 0, nextStart: Number.POSITIVE_INFINITY };
+    const minStart = neighbors.previousEnd;
+    const maxStart = Math.min(MAX_TIMELINE_SECONDS, neighbors.nextStart) - length;
+    // Arrastar na vertical sobre outra faixa visual muda o clipe de faixa ao soltar.
+    let dropTrackId = "";
+    const markDropTarget = (moveEvent: PointerEvent) => {
+      if (!layer) return;
+      const row = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest<HTMLElement>(".timeline-track[data-track-id]");
+      const candidate = row?.dataset.trackId || "";
+      dropTrackId = candidate && candidate !== trackIdOf(layer) ? candidate : "";
+      app.querySelectorAll(".timeline-track.is-drop-target").forEach((item) => item.classList.remove("is-drop-target"));
+      if (dropTrackId) row!.classList.add("is-drop-target");
+    };
     const move = (moveEvent: PointerEvent) => {
+      markDropTarget(moveEvent);
       const delta = (moveEvent.clientX - startX) / Math.max(1, timelinePixelWidth) * project!.settings.duration;
       // O clipe pode passar do fim da composição; a duração é estendida ao soltar.
-      const nextStart = clamp(initialStart + delta, 0, MAX_TIMELINE_SECONDS - length);
-      const snapped = clamp(snapClipStart(nextStart, length, scrubArea, layer?.id || "", track?.id || "", moveEvent.altKey), 0, MAX_TIMELINE_SECONDS - length);
+      const nextStart = clamp(initialStart + delta, minStart, maxStart);
+      const snapped = clamp(snapClipStart(nextStart, length, scrubArea, layer?.id || "", track?.id || "", moveEvent.altKey), minStart, maxStart);
       if (layer) {
         layer.startTime = snapped;
         layer.endTime = snapped + length;
@@ -2808,6 +3060,13 @@ function bindTimeline() {
       if (clip.hasPointerCapture(upEvent.pointerId)) clip.releasePointerCapture(upEvent.pointerId);
       project!.modifiedAt = new Date().toISOString();
       extendDurationToContent();
+      if (layer && dropTrackId) {
+        if (moveClipToTrack(project!, layer.id, dropTrackId, overlapMode)) syncLinkedAudioOrder();
+        else setStatus(language === "pt-BR" ? "FAIXA OCUPADA NESSE TRECHO" : "TRACK IS OCCUPIED AT THAT TIME");
+      }
+      app.querySelectorAll(".timeline-track.is-drop-target").forEach((item) => item.classList.remove("is-drop-target"));
+      afterClipEdit();
+      updateLayerStack();
       updateInspector();
       updateTimeline();
       updateTransformBox();
@@ -2978,9 +3237,14 @@ function bindTimelineOrderDrag() {
       const target = list.findIndex((entry) => entry.id === targetId);
       if (source < 0 || target < 0) return;
       snapshot();
-      const [moved] = list.splice(source, 1);
-      list.splice(target, 0, moved as never);
-      if (draggedType === "layer") syncLinkedAudioOrder();
+      if (draggedType === "layer") {
+        // Arrastar a linha move a faixa inteira para antes/depois da faixa alvo.
+        placeTrack(project, trackIdOf(project.layers[source]), trackIdOf(project.layers[target]), source < target);
+        syncLinkedAudioOrder();
+      } else {
+        const [moved] = list.splice(source, 1);
+        list.splice(target, 0, moved as never);
+      }
       project.modifiedAt = new Date().toISOString();
       updateLayerStack();
       updateTimeline();
@@ -3056,13 +3320,11 @@ function bindDragAndDrop(root: ParentNode = app) {
       event.preventDefault();
       if (!project || !draggedLayer || draggedLayer === item.dataset.layerId) return;
       snapshot();
-      const source = project.layers.findIndex((layer) => layer.id === draggedLayer);
-      const targetId = item.dataset.layerId!;
+      const dragged = project.layers.find((layer) => layer.id === draggedLayer);
+      const targetLayer = project.layers.find((layer) => layer.id === item.dataset.layerId);
       const rect = item.getBoundingClientRect();
       const after = event.clientY >= rect.top + rect.height / 2;
-      const [moved] = project.layers.splice(source, 1);
-      const target = project.layers.findIndex((layer) => layer.id === targetId);
-      project.layers.splice(target + (after ? 1 : 0), 0, moved);
+      if (dragged && targetLayer) placeTrack(project, trackIdOf(dragged), trackIdOf(targetLayer), after);
       syncLinkedAudioOrder();
       project.modifiedAt = new Date().toISOString();
       renderEditorPreservingCanvas();
@@ -3959,6 +4221,15 @@ window.addEventListener("keydown", (event) => {
     event.preventDefault();
     event.shiftKey ? redo() : undo();
   }
+  // Corte no playhead: S (sem modificador) ou Ctrl/⌘+B, fora de campos de texto.
+  const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement
+    || event.target instanceof HTMLSelectElement || (event.target as HTMLElement | null)?.isContentEditable;
+  if (project && !typing && ((event.key.toLowerCase() === "s" && !event.ctrlKey && !event.metaKey && !event.altKey)
+    || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "b"))) {
+    event.preventDefault();
+    splitAtPlayhead();
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "d" && project) {
     event.preventDefault();
     duplicateLayer();
@@ -3967,7 +4238,18 @@ window.addEventListener("keydown", (event) => {
     event.preventDefault();
     togglePlayback();
   }
-  if ((event.key === "Delete" || event.key === "Backspace") && project && document.activeElement?.tagName === "BODY") deleteLayer();
+  if ((event.key === "Delete" || event.key === "Backspace") && project && document.activeElement?.tagName === "BODY") {
+    if (event.shiftKey) rippleDeleteSelection();
+    else deleteSelection();
+  }
+  if (project && !typing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c" && selectionIds().length) {
+    clipClipboard = copyClips(project, selectionIds());
+    setStatus(language === "pt-BR" ? `${clipClipboard.layers.length} CLIPE(S) COPIADO(S)` : `${clipClipboard.layers.length} CLIP(S) COPIED`);
+  }
+  if (project && !typing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v" && clipClipboard) {
+    event.preventDefault();
+    pasteClipboard();
+  }
   if (project && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key) && document.activeElement?.tagName === "BODY") {
     const layer = selectedLayer();
     if (!layer || layer.locked) return;
