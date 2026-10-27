@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { strFromU8, unzipSync } from "fflate";
 
-const archivePath = new URL("../release/NoisetupiVideoContentToolWeb-Hostinger-0.7.0.zip", import.meta.url);
+const { version: expectedVersion } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+const archivePath = new URL(`../release/NoisetupiVideoContentToolWeb-Hostinger-${expectedVersion}.zip`, import.meta.url);
 const archive = unzipSync(new Uint8Array(await readFile(archivePath)));
 const index = strFromU8(archive["index.html"] || new Uint8Array());
 const version = JSON.parse(strFromU8(archive["version.json"] || new Uint8Array()));
@@ -14,8 +15,8 @@ const checks = [
   [Boolean(archive["LICENSES/MPL-2.0.txt"] && archive["LICENSES/fflate-MIT.txt"]), "textos completos MPL e MIT"],
   [["ibm-plex-mono", "ibm-plex-sans", "inter", "space-grotesk", "syne"].every((font) => Boolean(archive[`LICENSES/${font}-OFL-1.1.txt`])), "cinco avisos OFL"],
   [script.includes("Copyright Ricardo Palmieri / Noisetupi") && script.includes("Mozilla Public"), "comentários legais preservados no JavaScript"],
-  [version.version === "0.7.0", "version.json 0.7.0"],
-  [index.includes('application-version" content="0.7.0'), "index identificado como 0.7.0"],
+  [version.version === expectedVersion, `version.json ${expectedVersion}`],
+  [index.includes(`application-version" content="${expectedVersion}`), `index identificado como ${expectedVersion}`],
   [index.includes(scriptPath), "index aponta para o bundle atual"],
   [script.includes("data-add-audio"), "botão de inserir áudio"],
   [script.includes("data-move-video-clip"), "arraste de clipe de vídeo"],
@@ -40,7 +41,7 @@ const checks = [
   [script.includes("data-replace-layer-media") && script.includes("data-replace-audio-media"), "substituição de mídia"],
   [script.includes("data-transform-handle") && script.includes("transform-box"), "caixa de transformação no canvas"],
   [script.includes("audio-waveform-svg") && script.includes('x1="0"'), "waveform centralizada na track"],
-  [script.includes("0.7.0") && script.includes("BUILD"), "identificação visível do build"],
+  [script.includes(expectedVersion) && script.includes("BUILD"), "identificação visível do build"],
   [version.rendererFix === "nonblocking-missing-video", "renderer não bloqueia em vídeo sem mídia"],
   [version.playbackFix === "stable-video-frame-cache", "preview de vídeo sem intermitência"],
   [version.selectionModel === "unified-sticky-layer-selection", "seleção unificada de layers"],

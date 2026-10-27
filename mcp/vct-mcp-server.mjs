@@ -136,7 +136,7 @@ const forward = (method, params) => callPage(method, params).then(asText, asErro
 const commandSchema = z.array(z.record(z.string(), z.unknown())).min(1).max(100)
   .describe("Comandos VCT (veja vct_describe). Tempos em segundos, alinhados a frames.");
 
-const server = new McpServer({ name: "noisetupi-vct", version: "0.7.0" }, {
+const server = new McpServer({ name: "noisetupi-vct", version: "0.7.1" }, {
   instructions: "Edite vídeos no Noisetupi Video Content Tool aberto no navegador do usuário. "
     + "Fluxo: vct_describe (uma vez) → vct_get_timeline → planeje → vct_dry_run → vct_apply (um lote por intenção, com label) "
     + "→ vct_capture_frame para conferir → ajuste. Prefira vct_get_timeline a vct_get_project. "

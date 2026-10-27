@@ -16,7 +16,10 @@ async function collect(directory) {
   }
 }
 
+const { version } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+const archiveName = `NoisetupiVideoContentToolWeb-Hostinger-${version}.zip`;
+
 await collect(source);
 await mkdir(outputDirectory, { recursive: true });
-await writeFile(new URL("NoisetupiVideoContentToolWeb-Hostinger-0.7.0.zip", outputDirectory), zipSync(files, { level: 6 }));
-console.log("Created release/NoisetupiVideoContentToolWeb-Hostinger-0.7.0.zip");
+await writeFile(new URL(archiveName, outputDirectory), zipSync(files, { level: 6 }));
+console.log(`Created release/${archiveName}`);

@@ -72,7 +72,7 @@ import {
 } from "../model/types";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
-const APP_VERSION = "0.7.0";
+const APP_VERSION = "0.7.1";
 const COMPOSITION_PRESETS = [
   { group: "Instagram", label: "FEED SQUARE", width: 1080, height: 1080 },
   { group: "Instagram", label: "FEED PORTRAIT", width: 1080, height: 1350 },

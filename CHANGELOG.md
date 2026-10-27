@@ -1,6 +1,12 @@
 # Histórico de alterações
 
-## Rodada 6 — edição com IA (MCP)
+## 0.7.1 — edição com IA (Rodada 6) e Rodada 2
+
+Esta versão publica a Rodada 6 e a Rodada 2 (abaixo). Os scripts de
+empacotamento e verificação do release passam a ler a versão do
+`package.json`.
+
+### Rodada 6 — edição com IA
 
 - **Editar com IA pelo navegador:** o botão da barra superior abre um passo a
   passo para usar o Claude in Chrome (ou outro agente que execute JavaScript na
@@ -17,12 +23,10 @@
   cortar, mover (inclusive entre faixas), duplicar, remover (com ripple) e
   definir transição. Também `describe`, `getTimeline` (compacta), `dryRun`,
   `undo`/`redo` e `captureFrame` (JPEG pequeno do quadro).
-- **Servidor MCP local** (`npm run mcp`, `.mcp.json` para o Claude Code): as
-  ferramentas `vct_*` repassam para a página por WebSocket em 127.0.0.1, com
-  código, lista de origens permitidas e lista fechada de métodos.
-- **Botão Agente** na barra superior: diálogo com endereço e código
-  (pré-preenchidos pelo link do servidor) e faixa "agente conectado" com
-  Desconectar. Cada lote do agente é um passo de desfazer.
+- **Servidor MCP local, só no repositório** (`npm run mcp`): as ferramentas
+  `vct_*` numa ponte WebSocket em 127.0.0.1, com código, lista de origens
+  permitidas e lista fechada de métodos. A interface publicada não oferece mais
+  a conexão com esse servidor; o código fica para testes e uso futuro.
 - **WebMCP:** registra as ferramentas quando o navegador oferece
   `navigator.modelContext`.
 - **Prompt portátil e skills** (`agents/`): fluxo econômico em tokens e
@@ -31,9 +35,9 @@
   de referência, o VCT via MCP usou ~2,6× menos tokens que reescrever o
   projeto e ~25× menos que operar a interface por screenshots.
 
-## Rodada 2 — edição com vários clipes por faixa
+### Rodada 2 — edição com vários clipes por faixa
 
-### Transições e modo Sobrepor
+#### Transições e modo Sobrepor
 
 - **Modo Sobrepor** (botão de dois retângulos na barra da timeline, a escolha
   fica salva): clipes da mesma faixa podem se sobrepor; ao soltar, a
@@ -47,7 +51,7 @@
   duração no tooltip. Funciona no preview e na exportação.
 - Áudio vinculado faz crossfade na mesma janela da transição.
 
-### Edição
+#### Edição
 
 - **Ripple delete:** Shift+Delete apaga o clipe e puxa os seguintes da faixa,
   com keyframes, fades e áudio vinculado.

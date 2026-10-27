@@ -173,6 +173,28 @@ contratos de domínio necessários e confirmar compatibilidade v2.
 5. **Documentação em inglês** (última).
 - **Rodada 4 — modo pedagógico: em espera.**
 
+## Checkpoint — release 0.7.1 (27/10/2026)
+
+- A 0.7.1 publica a Rodada 2 e a Rodada 6: comandos de edição no `window.vct`,
+  `window.vct.guide()`, importar vários arquivos e o passo a passo "Editar com
+  IA" para o Claude in Chrome. A conexão com o servidor MCP local saiu da
+  interface; `mcp/` continua no repositório para testes e uso futuro.
+- `package-hostinger.mjs` e `verify-release.mjs` leem a versão do
+  `package.json`. A versão ainda aparece fixa em `index.html`,
+  `public/version.json`, `public/manifest.webmanifest`, `src/ui/editor.ts` e
+  `mcp/vct-mcp-server.mjs`.
+- `npm run check`: legado íntegro, 16 arquivos/108 testes unitários,
+  typecheck, build e 16/16 cenários Playwright. Na primeira execução,
+  "mover áudio vinculado" falhou uma vez (trim do áudio sem bounding box);
+  passou 3/3 isolado e na segunda execução completa. Tratar como teste
+  intermitente a investigar.
+- Pacote: `release/NoisetupiVideoContentToolWeb-Hostinger-0.7.1.zip`, com as
+  37 verificações de `verify:release` aprovadas. O upload para a Hostinger é
+  manual.
+- Pendências: teste de ponta a ponta com o Claude in Chrome no site publicado;
+  o restante da Rodada 6 (JSON Schema, CLI, `vct_evaluate`, skills `/vct-*`);
+  depois as Rodadas 3 e 5.
+
 ## Checkpoint — revisão final da 0.7.0 (26/10/2026)
 
 - Congelamento funcional mantido. Correções listadas antes de implementar:

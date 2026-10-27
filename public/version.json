@@ -1,6 +1,6 @@
 {
   "name": "Noisetupi Video Content Tool Web",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "rendererFix": "nonblocking-missing-video",
   "playbackFix": "stable-video-frame-cache",
   "selectionModel": "unified-sticky-layer-selection",
