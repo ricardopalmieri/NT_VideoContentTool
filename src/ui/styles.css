@@ -907,3 +907,49 @@ button { transition: color 120ms ease, background-color 120ms ease, border-color
 .top-actions button span { display: none; }
 .top-actions button svg { width: 18px; height: 18px; }
 .top-actions .export-button { width: 52px; flex-basis: 52px; }
+
+/* 0.7 — campos numéricos como slider: nome e valor numa linha, trilha fina com
+   preenchimento embaixo. Arrastar não seleciona texto; duplo clique edita. */
+.param-scrub {
+  height: 40px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px 7px;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.param-scrub::after { content: ""; position: absolute; z-index: -2; right: 9px; bottom: 7px; left: 9px; height: 3px; border-radius: 2px; background: #2a2926; }
+.param-scrub::before {
+  top: auto;
+  bottom: 7px;
+  left: 9px;
+  width: var(--value-fill, 0%);
+  max-width: calc(100% - 18px);
+  height: 3px;
+  border-right: 0;
+  border-radius: 2px;
+  background: var(--red);
+  box-shadow: 3px 0 0 -0.5px #f4f0e7;
+}
+.param-scrub.is-scrubbing::before { background: var(--red-soft); }
+.param-scrub > span { align-self: center; }
+.param-scrub input { width: 7ch; min-width: 0; max-width: none; height: 22px; text-align: right; font-size: 12px; user-select: none; -webkit-user-select: none; }
+.param-scrub.is-editing input { width: 9ch; user-select: text; -webkit-user-select: text; }
+.keyframe-button { height: 40px; }
+
+/* 0.7 — duração em timecode ou frames. */
+.duration-field { display: inline-flex; align-items: center; gap: 6px; }
+.timeline-header .duration-field input { width: 104px; height: 28px; margin-left: 0; padding: 0 6px; text-align: center; letter-spacing: .02em; }
+.duration-field select { height: 28px; padding: 0 4px; border: 1px solid #34332f; background: #111110; color: var(--quiet); font: 11px "IBM Plex Mono", monospace; }
+@media (min-width: 861px) and (max-width: 1180px) {
+  .timeline-header .duration-field input { width: 96px; }
+}
+/* Nome em cima, valor embaixo, trilha do slider na base: nada é cortado. */
+.param-scrub { height: 50px; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; align-content: start; gap: 0; padding: 6px 9px 10px; }
+.param-scrub > span { align-self: auto; }
+.param-scrub input { justify-self: end; height: 18px; }
+.param-scrub::after, .param-scrub::before { bottom: 6px; }
+.keyframe-button { height: 50px; }

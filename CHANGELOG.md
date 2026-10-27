@@ -2,6 +2,22 @@
 
 ## 0.7.0 — legibilidade e equilíbrio da interface
 
+### Ajustes de edição
+
+- Clipes que ocupam a composição inteira agora podem ser arrastados na
+  timeline: o clipe pode passar do fim, e a duração da composição é estendida
+  ao soltar (antes o arrasto ficava preso entre 0 e o fim).
+- Campos numéricos viraram sliders: nome em cima, valor embaixo e trilha fina
+  com preenchimento. Arrastar não seleciona mais o texto do campo; duplo
+  clique continua abrindo a edição.
+- Mídia importada entra no tamanho real em pixels (1:1 com a composição); só
+  é reduzida se for maior que a composição. A imagem guia ocupa a composição.
+- Duração da composição em timecode `HH:MM:SS:FF` ou em frames (escolha
+  salva no navegador), no lugar de segundos. Valor inválido é recusado com
+  aviso na barra de status.
+
+### Interface
+
 - Tipografia mínima de 11 px em toda a interface (antes havia textos de 4 a
   9 px); só as setas ▲▼ de ordenação ficam em 9 px.
 - Barra superior compacta (44 px, antes 56 px no desktop e 96 px no tablet),

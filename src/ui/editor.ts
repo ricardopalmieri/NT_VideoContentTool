@@ -1,5 +1,6 @@
 import { clamp } from "../model/math";
 import { normalizeFades, setFadeHandle } from "../timeline/timing";
+import { formatDurationValue, parseDurationValue, type DurationUnit } from "../timeline/timecode";
 import { timelineSnapCandidates as collectTimelineSnapCandidates, snapTimelineTime as calculateTimelineSnap } from "../timeline/snapping";
 import { migrateProject } from "../model/migrate-project";
 import { UndoHistory } from "../model/undo-history";
@@ -106,6 +107,7 @@ let lastPreviewScaleChangeAt = 0;
 let timelineLoop = false;
 let recordMode = false;
 let timelineZoomX = Number(localStorage.getItem("nt-vct-timeline-zoom-x")) || 1;
+let durationUnit: DurationUnit = localStorage.getItem("nt-vct-duration-unit") === "frames" ? "frames" : "tc";
 let timelineZoomY = Number(localStorage.getItem("nt-vct-timeline-zoom-y")) || 1;
 let videoTrackZoomY = Number(localStorage.getItem("nt-vct-video-track-zoom-y")) || 1;
 let audioTrackZoomY = Number(localStorage.getItem("nt-vct-audio-track-zoom-y")) || 1;
@@ -916,8 +918,8 @@ function renderInspector() {
           </div>` : ""}
         <h4 class="subsection-title">${layer.kind === "video" ? "VIDEO FADES" : "FADES"}</h4>
         <div class="property-grid fade-grid">
-          ${numberField(language === "pt-BR" ? "FIM DO FADE IN" : "FADE IN END", "fadeInEnd", layer.fadeInEnd, 0, project.settings.duration, .01)}
-          ${numberField(language === "pt-BR" ? "INÍCIO DO FADE OUT" : "FADE OUT START", "fadeOutStart", layer.fadeOutStart, 0, project.settings.duration, .01)}
+          ${numberField(language === "pt-BR" ? "FADE IN ATÉ" : "FADE IN UNTIL", "fadeInEnd", layer.fadeInEnd, 0, project.settings.duration, .01)}
+          ${numberField(language === "pt-BR" ? "FADE OUT DESDE" : "FADE OUT FROM", "fadeOutStart", layer.fadeOutStart, 0, project.settings.duration, .01)}
         </div>
         ${layer.kind === "guide" ? `<label class="check-row"><input type="checkbox" data-layer-check="exportable" ${layer.exportable ? "checked" : ""}><span>EXPORT GUIDE</span></label>` : ""}
       </section>
@@ -947,8 +949,8 @@ function renderAudioInspector(track: AudioTrack) {
         </div>
         <h4 class="subsection-title">FADES</h4>
         <div class="property-grid fade-grid">
-          ${audioNumberField(language === "pt-BR" ? "FIM DO FADE IN" : "FADE IN END", "fadeInEnd", track.fadeInEnd, 0, project.settings.duration, .01)}
-          ${audioNumberField(language === "pt-BR" ? "INÍCIO DO FADE OUT" : "FADE OUT START", "fadeOutStart", track.fadeOutStart, 0, project.settings.duration, .01)}
+          ${audioNumberField(language === "pt-BR" ? "FADE IN ATÉ" : "FADE IN UNTIL", "fadeInEnd", track.fadeInEnd, 0, project.settings.duration, .01)}
+          ${audioNumberField(language === "pt-BR" ? "FADE OUT DESDE" : "FADE OUT FROM", "fadeOutStart", track.fadeOutStart, 0, project.settings.duration, .01)}
         </div>
         <div class="video-mode-row audio-mode-row">
           <label class="check-row"><input type="checkbox" data-audio-check="muted" ${track.muted ? "checked" : ""}><span>MUTE</span></label>
@@ -1077,7 +1079,7 @@ function renderTimeline() {
         <button data-timeline-zoom="y:1" title="${language === "pt-BR" ? "Ampliar zoom vertical" : "Zoom in vertically"}" aria-label="${language === "pt-BR" ? "Ampliar zoom vertical" : "Zoom in vertically"}"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="8" r="5"/><path d="M4.8 8h6.4M8 4.8v6.4M12 12l5 5"/></svg></button>
       </div>
       <button class="snap-toggle ${timelineSnap ? "is-active" : ""}" id="timeline-snap" title="${language === "pt-BR" ? "Snap em frames, bordas, clipes e keyframes" : "Snap to frames, edges, clips and keyframes"}">SNAP</button>
-      <label>${t("duration").toUpperCase()} <input id="duration-input" type="number" min=".1" max="7200" step=".1" value="${duration}"> SEC</label>
+      <label class="duration-field">${t("duration").toUpperCase()} <input id="duration-input" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" value="${formatDurationValue(duration, project.settings.fps, durationUnit)}" title="${durationUnit === "frames" ? "Frames" : "HH:MM:SS:FF"}"><select id="duration-unit" aria-label="${language === "pt-BR" ? "Unidade da duração" : "Duration unit"}"><option value="tc" ${durationUnit === "tc" ? "selected" : ""}>HH:MM:SS:FF</option><option value="frames" ${durationUnit === "frames" ? "selected" : ""}>FRAMES</option></select></label>
       <span id="frame-value">${t("frame").toUpperCase()} ${Math.round(currentTime * project.settings.fps)}</span>
     </header>
     <div class="timeline-body" style="--track-height:${Math.round(25 * timelineZoomY)}px">
@@ -1611,6 +1613,9 @@ function bindDynamicControls(root: ParentNode = app) {
     });
     scrub.addEventListener("pointerdown", (event) => {
       if (event.button !== 0 || !input.readOnly) return;
+      // Sem isso o arrasto seleciona o texto do campo; o duplo clique ainda abre a edição.
+      event.preventDefault();
+      window.getSelection()?.removeAllRanges();
       const startX = event.clientX;
       const startValue = input.valueAsNumber;
       const step = Number(input.step) || 1;
@@ -2019,7 +2024,9 @@ async function addInput(kind: InputKind) {
   renderEditorPreservingCanvas();
   if (layer.asset) {
     renderer?.removeMedia(layer.id);
-    renderer?.preload(layer, true);
+    renderer?.preload(layer, true, () => {
+      if (selectedLayerId === layer.id) updateInspector();
+    });
   }
   if (layer.kind === "video") {
     void generateVideoThumbnails(layer);
@@ -2432,6 +2439,17 @@ function updateTimelineClipStyles(id: string, start: number, end: number, audio 
   clip.style.width = `${(end - start) / project.settings.duration * 100}%`;
 }
 
+const MAX_TIMELINE_SECONDS = 7200;
+
+// Estende a duração da composição até o fim do último clipe (arrastar além do fim).
+function extendDurationToContent() {
+  if (!project) return;
+  const fps = project.settings.fps;
+  const contentEnd = Math.max(0, ...project.layers.map((layer) => layer.endTime), ...project.audioTracks.map((track) => track.endTime));
+  if (contentEnd <= project.settings.duration + 1e-6) return;
+  project.settings.duration = Math.min(MAX_TIMELINE_SECONDS, Math.ceil(contentEnd * fps - 1e-6) / fps);
+}
+
 function updateFadeClipVisuals(clip: HTMLElement, item: Pick<Layer, "startTime" | "endTime" | "fadeInStart" | "fadeInEnd" | "fadeOutStart" | "fadeOutEnd">) {
   const duration = Math.max(.001, item.endTime - item.startTime);
   const fadeIn = clip.querySelector<HTMLElement>(".fade-overlay.fade-in");
@@ -2548,11 +2566,29 @@ function bindTimeline() {
   }));
   bindTimelineOrderDrag();
   bindCurveTools();
+  app.querySelector<HTMLSelectElement>("#duration-unit")?.addEventListener("change", (event) => {
+    durationUnit = (event.target as HTMLSelectElement).value === "frames" ? "frames" : "tc";
+    localStorage.setItem("nt-vct-duration-unit", durationUnit);
+    const input = app.querySelector<HTMLInputElement>("#duration-input");
+    if (input && project) {
+      input.value = formatDurationValue(project.settings.duration, project.settings.fps, durationUnit);
+      input.title = durationUnit === "frames" ? "Frames" : "HH:MM:SS:FF";
+    }
+  });
   app.querySelector<HTMLInputElement>("#duration-input")?.addEventListener("change", (event) => {
     if (!project) return;
     snapshot();
+    const input = event.target as HTMLInputElement;
+    const parsed = parseDurationValue(input.value, project.settings.fps, durationUnit);
+    if (parsed === null || parsed <= 0) {
+      input.value = formatDurationValue(project.settings.duration, project.settings.fps, durationUnit);
+      setStatus(language === "pt-BR"
+        ? `DURAÇÃO INVÁLIDA · use ${durationUnit === "frames" ? "um número de frames" : "HH:MM:SS:FF"}`
+        : `INVALID DURATION · use ${durationUnit === "frames" ? "a frame count" : "HH:MM:SS:FF"}`);
+      return;
+    }
     const previous = project.settings.duration;
-    const value = clamp(Number((event.target as HTMLInputElement).value), .1, 7200);
+    const value = clamp(parsed, 1 / project.settings.fps, MAX_TIMELINE_SECONDS);
     project.settings.duration = value;
     for (const layer of project.layers) if (Math.abs(layer.endTime - previous) < .001) {
       const shift = value - previous;
@@ -2711,8 +2747,9 @@ function bindTimeline() {
     clip.setPointerCapture(event.pointerId);
     const move = (moveEvent: PointerEvent) => {
       const delta = (moveEvent.clientX - startX) / Math.max(1, timelinePixelWidth) * project!.settings.duration;
-      const nextStart = clamp(initialStart + delta, 0, project!.settings.duration - length);
-      const snapped = clamp(snapClipStart(nextStart, length, scrubArea, layer?.id || "", track?.id || "", moveEvent.altKey), 0, project!.settings.duration - length);
+      // O clipe pode passar do fim da composição; a duração é estendida ao soltar.
+      const nextStart = clamp(initialStart + delta, 0, MAX_TIMELINE_SECONDS - length);
+      const snapped = clamp(snapClipStart(nextStart, length, scrubArea, layer?.id || "", track?.id || "", moveEvent.altKey), 0, MAX_TIMELINE_SECONDS - length);
       if (layer) {
         layer.startTime = snapped;
         layer.endTime = snapped + length;
@@ -2721,11 +2758,11 @@ function bindTimeline() {
         layer.fadeInEnd = initialFades.fadeInEnd + shift;
         layer.fadeOutStart = initialFades.fadeOutStart + shift;
         layer.fadeOutEnd = initialFades.fadeOutEnd + shift;
-        for (const [property, times] of layerKeyTimes || []) layer.keyframes[property].forEach((key, index) => key.time = clamp(times[index] + shift, 0, project!.settings.duration));
+        for (const [property, times] of layerKeyTimes || []) layer.keyframes[property].forEach((key, index) => key.time = clamp(times[index] + shift, 0, MAX_TIMELINE_SECONDS));
         for (const effect of layer.effects) {
           const sourceTimes = effectKeyTimes?.get(effect.id);
           if (!sourceTimes) continue;
-          for (const [property, times] of sourceTimes) effect.keyframes[property].forEach((key, index) => key.time = clamp(times[index] + shift, 0, project!.settings.duration));
+          for (const [property, times] of sourceTimes) effect.keyframes[property].forEach((key, index) => key.time = clamp(times[index] + shift, 0, MAX_TIMELINE_SECONDS));
         }
         if (layer.kind === "video") {
           syncLinkedAudio(layer);
@@ -2748,11 +2785,11 @@ function bindTimeline() {
           linkedLayer.fadeInEnd = track.fadeInEnd;
           linkedLayer.fadeOutStart = track.fadeOutStart;
           linkedLayer.fadeOutEnd = track.fadeOutEnd;
-          for (const [property, times] of layerKeyTimes || []) linkedLayer.keyframes[property].forEach((key, index) => key.time = clamp(times[index] + shift, 0, project!.settings.duration));
+          for (const [property, times] of layerKeyTimes || []) linkedLayer.keyframes[property].forEach((key, index) => key.time = clamp(times[index] + shift, 0, MAX_TIMELINE_SECONDS));
           for (const effect of linkedLayer.effects) {
             const sourceTimes = effectKeyTimes?.get(effect.id);
             if (!sourceTimes) continue;
-            for (const [property, times] of sourceTimes) effect.keyframes[property].forEach((key, index) => key.time = clamp(times[index] + shift, 0, project!.settings.duration));
+            for (const [property, times] of sourceTimes) effect.keyframes[property].forEach((key, index) => key.time = clamp(times[index] + shift, 0, MAX_TIMELINE_SECONDS));
           }
           syncLinkedAudio(linkedLayer);
           updateTimelineClipStyles(linkedLayer.id, linkedLayer.startTime, linkedLayer.endTime);
@@ -2767,6 +2804,7 @@ function bindTimeline() {
       clip.removeEventListener("pointercancel", stop);
       if (clip.hasPointerCapture(upEvent.pointerId)) clip.releasePointerCapture(upEvent.pointerId);
       project!.modifiedAt = new Date().toISOString();
+      extendDurationToContent();
       updateInspector();
       updateTimeline();
       updateTransformBox();

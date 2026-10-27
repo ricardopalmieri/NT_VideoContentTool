@@ -115,7 +115,7 @@ export class ComposerRenderer {
     return resolveAssetUrl(relative);
   }
 
-  preload(layer: Layer, fitToCanvas = false) {
+  preload(layer: Layer, fitToCanvas = false, onFitted?: () => void) {
     if (!layer.asset || this.media.has(layer.id)) return;
     const source = this.assetUrl(layer.asset);
     // A lightweight project may be opened before its external media is relinked.
@@ -124,13 +124,13 @@ export class ComposerRenderer {
     if (!source) return;
     const fitMedia = (sourceWidth: number, sourceHeight: number) => {
       if (!sourceWidth || !sourceHeight || !this.project) return;
-      const coverage = layer.kind === "guide" ? 1 : .8;
-      const scale = Math.min(
-        this.project.settings.width * coverage / sourceWidth,
-        this.project.settings.height * coverage / sourceHeight,
-      );
+      // Mídia entra no tamanho real em pixels (1:1 com a composição). Só reduz se
+      // for maior que a composição; a imagem guia sempre ocupa a composição.
+      const fit = Math.min(this.project.settings.width / sourceWidth, this.project.settings.height / sourceHeight);
+      const scale = layer.kind === "guide" ? fit : Math.min(1, fit);
       layer.width = sourceWidth * scale;
       layer.height = sourceHeight * scale;
+      onFitted?.();
     };
     if (layer.kind === "video") {
       const video = document.createElement("video");
