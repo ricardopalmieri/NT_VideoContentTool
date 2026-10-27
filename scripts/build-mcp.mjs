@@ -14,6 +14,8 @@ const guides = {
   "PROMPT.md": await read("agents/PROMPT.md"),
   "skills/vct-edit/SKILL.md": await read("agents/skills/vct-edit/SKILL.md"),
   "skills/vct-critique/SKILL.md": await read("agents/skills/vct-critique/SKILL.md"),
+  "skills/vct-template/SKILL.md": await read("agents/skills/vct-template/SKILL.md"),
+  "skills/vct-how-to/SKILL.md": await read("agents/skills/vct-how-to/SKILL.md"),
 };
 
 await rm(work, { recursive: true, force: true });

@@ -1,6 +1,7 @@
 // Contact sheets for agents: many frames in one image, each with its time, so
 // reviewing costs one screenshot instead of one per frame.
 import { resolveAssetUrl } from "../io/web-platform";
+import { loadImage } from "../ui/media-probe";
 
 export interface SheetFrame {
   image: CanvasImageSource;
@@ -77,9 +78,7 @@ export async function assetFrames(asset: string, options: { count?: number; time
   const url = resolveAssetUrl(asset);
   if (!url) throw new Error(`Arquivo não carregado nesta sessão: ${asset}. Peça ao usuário para reimportar ou relinkar.`);
   if (!/\.(mp4|webm|mov|m4v)$/i.test(asset)) {
-    const image = new Image();
-    image.src = url;
-    await image.decode();
+    const image = await loadImage(url);
     return [{ image, width: image.naturalWidth, height: image.naturalHeight, label: "imagem" }];
   }
   const video = document.createElement("video");

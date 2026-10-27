@@ -1,6 +1,6 @@
 # Histórico de alterações
 
-## Não lançado — batches 0 a 4 de `docs/PLANO-DE-ACAO.md`
+## Não lançado — batches 0 a 4 e 7 de `docs/PLANO-DE-ACAO.md`
 
 ### Batch 0 — arrumação
 
@@ -68,6 +68,19 @@
 - Macros: `loop.seam`, `fx.stutter`, `fx.strobe`, `fx.spike`, `text.animate`,
   `text.fromSrt`. Cada macro mostra a expansão em comandos base.
 - `vct.analyzeVideo()`: cortes de cena, brilho, cor e movimento por trecho.
+
+### Batch 7 — legenda automática
+
+- Botão **Legendar automaticamente** na aba Mídia: Whisper (Transformers.js, WebGPU
+  com fallback WASM) num Web Worker; o áudio não sai da máquina. Modelos Rápido
+  (`whisper-base`, cerca de 80 MB) e Preciso (`whisper-small`, cerca de 252 MB).
+- Aviso antes do primeiro download (nome, tamanho, fonte); depois fica no cache
+  do navegador. Rede restrita: pasta `models/` do servidor (`npm run models:whisper`)
+  ou arquivos do modelo escolhidos à mão. Runtime do ONNX em `ort/`, sem CDN.
+- Revisão do SRT (editável), **Inserir na timeline** (`text.fromSrt`, um passo de
+  desfazer) e **Baixar .srt**. Legendas de até 2 linhas de 42 caracteres e 6 s,
+  com tempos por palavra e alinhados a frames.
+- `vct.transcribe()`, `vct.transcript()` e linha de legenda em `vct.status()`.
 
 ## 0.7.1 — edição com IA (Rodada 6) e Rodada 2
 

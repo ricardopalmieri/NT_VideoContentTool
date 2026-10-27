@@ -56,3 +56,37 @@ test('agente edita só por window.vct: montar, revisar, desfazer', async ({ brow
     await context.close();
   }
 });
+
+// A pessoa vê quando a IA edita, pode parar, e decide o que a IA salva ou exporta.
+test('faixa IA editando: parar bloqueia edições, pedidos esperam a pessoa', async ({ browser }, info) => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  try {
+    await page.goto('http://127.0.0.1:4174/current/');
+    await page.locator('[data-language="pt-BR"]').click();
+    await page.locator('#new-project').click();
+    await page.locator('#setup-form button[type="submit"]').click();
+    await page.evaluate(() => window.vct.batch([{ type: 'layer.create', layerId: 'oi', kind: 'text', name: 'Oi', startTime: 0, endTime: 1 }] as never, { label: 'Texto da IA' }));
+    const strip = page.locator('.agent-strip-row').first();
+    await expect(strip).toContainText('Texto da IA');
+    await page.screenshot({ path: info.outputPath('faixa.png') });
+    await page.locator('[data-agent-action="stop"]').click();
+    const blocked = await page.evaluate(() => {
+      try { window.vct.batch([{ type: 'layer.setName', layerId: 'oi', name: 'x' }] as never); return 'passou'; } catch (error) { return (error as Error).message; }
+    });
+    expect(blocked).toContain('Pausado pelo usuário');
+    expect(await page.evaluate(() => window.vct.summary())).toContain('oi');
+    await page.locator('[data-agent-action="resume"]').click();
+
+    const answer = await page.evaluate(() => window.vct.request('import', { message: '<b>Importe</b> a trilha' }));
+    expect(answer).not.toMatch(/[?&=]/);
+    const request = page.locator('.agent-strip-row.is-request');
+    await expect(request).toContainText('<b>Importe</b> a trilha');
+    // O script do agente não consegue aprovar o próprio pedido.
+    await page.evaluate(() => document.querySelector<HTMLElement>('.agent-strip-row.is-request button')?.click());
+    expect(await page.evaluate(() => window.vct.status())).toMatch(/import/i);
+    await expect(request).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});

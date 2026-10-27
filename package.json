@@ -11,13 +11,15 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:parity": "playwright test",
+    "test:browsers": "playwright test -c playwright.browsers.config.ts",
     "verify:legacy": "node scripts/verify-legacy.mjs",
     "check": "npm run verify:legacy && npm run test && npm run build && npm run test:parity",
     "package:hostinger": "npm run build && node scripts/package-hostinger.mjs && npm run verify:release",
     "verify:release": "node scripts/verify-release.mjs",
     "mcp": "node mcp/vct-mcp-server.mjs",
     "benchmark:tokens": "vitest run tests/unit/token-benchmark.test.ts",
-    "build:mcp": "node scripts/build-mcp.mjs"
+    "build:mcp": "node scripts/build-mcp.mjs",
+    "models:whisper": "node scripts/fetch-whisper-model.mjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "5.3.0",
@@ -25,6 +27,7 @@
     "@fontsource/inter": "5.3.0",
     "@fontsource/space-grotesk": "5.3.0",
     "@fontsource/syne": "5.3.0",
+    "@huggingface/transformers": "4.3.1",
     "fflate": "0.8.3",
     "mediabunny": "1.52.3"
   },

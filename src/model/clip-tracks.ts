@@ -181,7 +181,7 @@ type Timed = Pick<Layer, "startTime" | "endTime" | "sourceIn" | "sourceOut" | "p
 // reiniciam o loop na segunda parte.
 function splitTiming(first: Timed, second: Timed, time: number, mediaDuration: number, adjustSource = true) {
   const fadeOut = first.fadeOutEnd - first.fadeOutStart;
-  const sourceIn = first.sourceIn || first.sourceOffset || 0;
+  const sourceIn = first.sourceIn ?? first.sourceOffset ?? 0;
   const sourceOut = first.sourceOut > sourceIn ? first.sourceOut : mediaDuration;
   const elapsed = Math.max(0, time - first.startTime) * Math.max(.05, Math.abs(first.playbackRate || 1));
   first.endTime = time;

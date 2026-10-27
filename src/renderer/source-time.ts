@@ -1,8 +1,8 @@
 import type { Layer } from "../model/types";
 
-// TODO(rodada1): zero em sourceIn ainda usa sourceOffset, como na versão 0.6.2.
+// sourceOffset só vale para projetos antigos sem sourceIn; zero em sourceIn é um corte no início.
 export function sourceTimeFor(layer: Layer, timelineTime: number, mediaDuration: number, evaluatedPlaybackRate: number) {
-    const sourceIn = Math.max(0, Math.min(mediaDuration, layer.sourceIn || layer.sourceOffset || 0));
+    const sourceIn = Math.max(0, Math.min(mediaDuration, layer.sourceIn ?? layer.sourceOffset ?? 0));
     const configuredOut = layer.sourceOut > sourceIn ? layer.sourceOut : mediaDuration;
     const sourceOut = Math.max(sourceIn, Math.min(mediaDuration, configuredOut));
     const span = Math.max(.001, sourceOut - sourceIn);

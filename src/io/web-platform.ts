@@ -22,7 +22,10 @@ interface RecoverySnapshotRecord {
 
 interface RecoveryAssetRecord {
   reference: string;
-  blob: Blob;
+  blob?: Blob;
+  /** Safari em navegação privada recusa Blob no IndexedDB; aí guardamos os bytes. */
+  bytes?: ArrayBuffer;
+  type?: string;
 }
 
 export interface ProjectRecovery {
@@ -148,7 +151,32 @@ export function projectAssetReferences(project: ProjectDocument) {
   return [...new Set([...usedAssetReferences(project), ...Object.keys(project.assetMetadata || {})])];
 }
 
-export async function saveProjectRecovery(project: ProjectDocument) {
+let recoveryStoresBytes = false;
+
+export async function saveProjectRecovery(project: ProjectDocument): Promise<void> {
+  try {
+    await writeProjectRecovery(project, recoveryStoresBytes);
+  } catch (error) {
+    if (recoveryStoresBytes) throw error;
+    // Mesmo truque do localForage: se o Blob não entra, tenta de novo com ArrayBuffer.
+    recoveryStoresBytes = true;
+    persistedAssetRevisions.clear();
+    await writeProjectRecovery(project, true);
+  }
+}
+
+async function writeProjectRecovery(project: ProjectDocument, asBytes: boolean) {
+  const byteRecords = new Map<string, RecoveryAssetRecord>();
+  if (asBytes) {
+    // IndexedDB fecha a transação num await; os bytes são lidos antes de abri-la.
+    for (const reference of projectAssetReferences(project)) {
+      const blob = assetBlobs.get(reference);
+      const revision = assetRevisions.get(reference) || 0;
+      if (blob && persistedAssetRevisions.get(reference) !== revision) {
+        byteRecords.set(reference, { reference, bytes: await blob.arrayBuffer(), type: blob.type });
+      }
+    }
+  }
   const database = await openRecoveryDatabase();
   try {
     const references = projectAssetReferences(project);
@@ -168,7 +196,9 @@ export async function saveProjectRecovery(project: ProjectDocument) {
       if (!blob) continue;
       const revision = assetRevisions.get(reference) || 0;
       if (persistedAssetRevisions.get(reference) !== revision || !existingKeys.includes(reference)) {
-        assets.put({ reference, blob } satisfies RecoveryAssetRecord);
+        const record = asBytes ? byteRecords.get(reference) : ({ reference, blob } satisfies RecoveryAssetRecord);
+        if (!record) continue;
+        assets.put(record);
         revisionsToPersist.set(reference, revision);
       }
     }
@@ -212,7 +242,8 @@ export async function readProjectRecovery(): Promise<ProjectRecovery | null> {
         request.addEventListener("error", () => reject(request.error || new Error(`Could not restore media ${reference}.`)), { once: true });
       });
       await transactionComplete(assetTransaction);
-      return value?.blob instanceof Blob ? [reference, value.blob] : null;
+      if (value?.blob instanceof Blob) return [reference, value.blob];
+      return value?.bytes ? [reference, new Blob([value.bytes], { type: value.type || "" })] : null;
     }));
     return {
       project: record.project,

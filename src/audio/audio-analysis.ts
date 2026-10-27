@@ -58,11 +58,16 @@ export function detectOnsets(channels: readonly Float32Array[], sampleRate: numb
   const signal = mono(channels, 0, channels[0]?.length ?? 0);
   const env = envelope(signal, sampleRate, hop);
   const flux = new Float32Array(env.length);
-  for (let index = 1; index < env.length; index++) flux[index] = Math.max(0, env[index] - env[index - 1]);
+  // Silêncio antes do primeiro quadro: um golpe em 0 s também conta.
+  for (let index = 0; index < env.length; index++) flux[index] = Math.max(0, env[index] - (env[index - 1] ?? 0));
+  // Piso absoluto: ondulação de graves e ruído em trechos calmos não viram ataques.
+  let peak = 0;
+  for (const value of flux) peak = Math.max(peak, value);
+  const floor = peak * .15;
   const onsets: number[] = [];
   const window = Math.max(1, Math.round(.1 / hop));
   let last = -Infinity;
-  for (let index = 1; index < flux.length - 1; index++) {
+  for (let index = 0; index < flux.length - 1; index++) {
     let mean = 0;
     let count = 0;
     for (let offset = -window; offset <= window; offset++) {
@@ -71,7 +76,7 @@ export function detectOnsets(channels: readonly Float32Array[], sampleRate: numb
     }
     mean /= Math.max(1, count);
     const time = index * hop;
-    if (flux[index] > mean * 1.6 + 1e-4 && flux[index] >= flux[index - 1] && flux[index] >= flux[index + 1] && time - last > .07) {
+    if (flux[index] > Math.max(mean * 1.6 + 1e-4, floor) && flux[index] >= (flux[index - 1] ?? 0) && flux[index] >= flux[index + 1] && time - last > .07) {
       onsets.push(+time.toFixed(3));
       last = time;
     }

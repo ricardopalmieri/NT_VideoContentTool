@@ -66,7 +66,8 @@ it('tempo de mídia e fade coincidem com os métodos originais em casos de borda
   const settings = { name: 'Oráculo', width: 320, height: 180, fps: 30, duration: 10, background: '#000000', transparent: true };
   for (const loop of [false, true]) for (const reverse of [false, true]) {
     for (const sourceIn of [0, 1, 3]) for (const speed of [0, .01, -2, 1, 4]) {
-      const layer = createLayer('video', settings, { loop, reverse, sourceIn, sourceOffset: 2, sourceOut: 8, startTime: 1, fadeInStart: 1, fadeInEnd: 3, fadeOutStart: 6, fadeOutEnd: 8 });
+      // Desvio intencional da 0.6.2: sourceIn 0 não cai mais para sourceOffset (ver timing.test.ts).
+      const layer = createLayer('video', settings, { loop, reverse, sourceIn, sourceOffset: sourceIn ? 2 : 0, sourceOut: 8, startTime: 1, fadeInStart: 1, fadeInEnd: 3, fadeOutStart: 6, fadeOutEnd: 8 });
       for (const time of [-1, 0, 1, 2.5, 3, 6, 7.5, 8, 20]) for (const duration of [0, .001, 4, 10]) {
         expect(sourceTimeFor(layer, time, duration, speed)).toBe(sourceOracle.call({ evaluated: () => speed }, layer, time, duration));
         expect(fadeEnvelope(layer, time)).toBe(fadeOracle.call({}, layer, time));

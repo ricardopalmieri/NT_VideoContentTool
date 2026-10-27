@@ -32,4 +32,21 @@ describe("audio analysis", () => {
     expect(Math.abs(tempo.bpm - 120)).toBeLessThan(3);
     expect(Math.abs(tempo.offset - .25)).toBeLessThan(.05);
   });
+  it("ignora a ondulação de um grave contínuo e acha o golpe em 0 s", () => {
+    // Cliques a 120 BPM a partir de 0 s sobre um drone de 110 Hz (achado na revisão no navegador).
+    const length = rate * 8;
+    const signal = new Float32Array(length);
+    for (let index = 0; index < length; index++) {
+      const time = index / rate;
+      const beat = time % .5;
+      signal[index] = (beat < .05 ? Math.sin(2 * Math.PI * 880 * time) * (1 - beat / .05) * .8 : 0) + Math.sin(2 * Math.PI * 110 * time) * .15;
+    }
+    const { onsets, flux, hop } = detectOnsets([signal], rate);
+    expect(onsets).toHaveLength(16);
+    expect(onsets[0]).toBeLessThan(.02);
+    const tempo = estimateTempo(flux, hop, onsets)!;
+    expect(Math.abs(tempo.bpm - 120)).toBeLessThan(3);
+    expect(Math.min(tempo.offset, .5 - tempo.offset)).toBeLessThan(.03);
+    expect(tempo.confidence).toBeGreaterThan(.8);
+  });
 });

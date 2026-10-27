@@ -2,15 +2,28 @@ Options -Indexes
 
 <IfModule mod_mime.c>
   AddType application/manifest+json .webmanifest
+  # Legenda automática: o ONNX Runtime é importado como módulo (.mjs) e compilado como WebAssembly.
+  AddType text/javascript .mjs
+  AddType application/wasm .wasm
 </IfModule>
 
 <IfModule mod_headers.c>
   Header always set X-Content-Type-Options "nosniff"
   Header always set Referrer-Policy "strict-origin-when-cross-origin"
-  <FilesMatch "\.(js|css)$">
+  # Arquivos de assets/ têm hash no nome: um deploy novo gera nomes novos.
+  <If "%{REQUEST_URI} =~ m#/assets/#">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </If>
+  # Runtime do ONNX Runtime (ort/) e modelos Whisper (models/): grandes e só mudam com um deploy.
+  <If "%{REQUEST_URI} =~ m#/(ort|models)/#">
+    Header set Cache-Control "public, max-age=86400"
+  </If>
+  <FilesMatch "^sw.js$">
     Header set Cache-Control "no-cache, max-age=0, must-revalidate"
-    Header set Expires "0"
   </FilesMatch>
+  # CSP: tudo do próprio site; WebAssembly e workers para a legenda automática;
+  # Hugging Face só para baixar o modelo de transcrição (quando não vem do servidor).
+  Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' data: blob: https://huggingface.co https://*.huggingface.co https://*.hf.co; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'"
   <FilesMatch "\.(woff2?|png|webp)$">
     Header set Cache-Control "public, max-age=86400"
   </FilesMatch>

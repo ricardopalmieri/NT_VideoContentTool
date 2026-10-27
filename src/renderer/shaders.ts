@@ -206,3 +206,23 @@ void main() {
   outColor = c;
 }`;
 
+
+// Passe sem efeito (composite da layer, cópia, saída final): as mesmas contas de
+// fragmentSource quando u_effect == 0, sem o resto do shader de efeitos, que na GPU
+// de software custa caro por pixel.
+export const compositeFragmentSource = `#version 300 es
+precision highp float;
+uniform sampler2D u_texture;
+uniform float u_opacity;
+// Compõe sobre branco para o MIN do blend "darken".
+uniform float u_darken;
+in vec2 v_uv;
+out vec4 outColor;
+
+void main() {
+  vec4 c = vec4(0.0);
+  if (!(v_uv.x < 0.0 || v_uv.x > 1.0 || v_uv.y < 0.0 || v_uv.y > 1.0)) c = texture(u_texture, v_uv);
+  c = clamp(c, 0.0, 1.0) * u_opacity;
+  if (u_darken > 0.5) c = vec4(c.rgb + (1.0 - c.a), 1.0);
+  outColor = c;
+}`;

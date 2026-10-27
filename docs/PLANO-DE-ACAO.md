@@ -9,7 +9,7 @@ referência. A especificação técnica da API do agente está em
 
 ## Estado em 27/10/2026
 
-Batches 0 a 4 implementados e testados, sem commit: 0 erros de tipo,
+Batches 0 a 4 implementados, testados e enviados (`4a844a7`): 0 erros de tipo,
 162 testes unitários, build, 35 testes Playwright (inclui E2E do agente só
 por `window.vct` e dois testes em tablet 1024×1366 com toque). Detalhes no
 `CHANGELOG.md` ("Não lançado") e na referência gerada `docs/API-AGENTE.md`.
@@ -28,6 +28,17 @@ Decisões tomadas durante a execução (revisar):
 - **Áudio de vídeos acima de 400 MB:** "tem áudio" fica desconhecido no import
   (decodificar tudo gastaria memória demais).
 - Não testado: pinça em tela real, iPad físico, Safari/Firefox.
+
+**Ordem a partir daqui (decidida em 27/10/2026):**
+1. **Revisão forte** na interface e com o agente, antes de subir para o
+   servidor: confirmar as decisões acima, criar as skills que faltaram do
+   Batch 4, corrigir os testes instáveis (export de frames, áudio vinculado,
+   `TODO(rodada1)`) e testar Firefox, WebKit/iPad emulado e pinça.
+2. **Batch 5.**
+3. **Batch 7** (legenda automática).
+4. Parada para testes do usuário e commit.
+
+Depois: 8 → 9 → 10 → 6.
 
 ---
 
@@ -208,6 +219,11 @@ A ordem **0 → 1 → 2** é fixa. Do 3 em diante dá para trocar a ordem.
   salvar ou exportar; abrir, salvar e pedir importação pela API; modelo de
   confiança. Decidir entre reativar e remover a ponte MCP. CLI e modo arquivo,
   se a ponte ficar.
+  - Decisão: a ponte MCP fica dormente no repositório (fora da interface);
+    o canal principal é o Claude in Chrome com `window.vct`.
+  - Feito: faixa "IA editando" com Parar/Retomar, `vct.request` (`save`,
+    `export`, `import`, `open`) sem espera e `vct.status()`; confiança por
+    tipo só na memória da sessão.
 - **Export:** resolução de saída, dimensões pares, `document.fonts.load()`
   antes de exportar, export em streaming no disco e PNG com alpha.
 - **Desempenho (R7):** textura por camada, cache de `evaluated()`; PWA offline.
@@ -223,6 +239,49 @@ A ordem **0 → 1 → 2** é fixa. Do 3 em diante dá para trocar a ordem.
 - Tela Sobre/Créditos.
 - Docs finais bilíngues: guia do usuário, guia do professor, glossário,
   atalhos, formato `.ntvct`, `README.en.md`.
+
+### Batch 7: legenda automática
+
+- **Whisper no navegador** (Transformers.js, WebGPU com fallback WASM), num
+  Web Worker. O áudio nunca sai da máquina.
+- **Aviso antes do primeiro download** do modelo, com tamanho. Baixou uma vez,
+  fica no cache do navegador e não baixa de novo.
+- **Rede restrita:** o modelo e os arquivos WASM podem vir do próprio servidor
+  (pasta `models/` no deploy), da internet (Hugging Face) ou de um pacote
+  importado à mão a partir de um arquivo local.
+- Resultado vira SRT e entra pela macro `text.fromSrt`; tempos por palavra
+  permitem legenda estilo karaokê. IA: `vct.transcribe()` em texto curto.
+  - Feito (27/10/2026): botão na aba Mídia, worker `src/transcribe/`, aviso e
+    cache, três fontes do modelo (cache, `models/`, arquivos escolhidos à mão),
+    revisão do SRT, `vct.transcribe()`/`vct.transcript()`/`vct.status()`.
+    Detalhes em `docs/AUTOMACAO.md`. Falta o karaokê (os tempos por palavra só
+    quebram as legendas por enquanto) e testar Firefox/Safari com Whisper real.
+
+### Batch 8: transparência e mídia animada
+
+- GIF, APNG e WebP animado seguindo a timeline (`ImageDecoder`, com gifuct-js
+  de reserva), com loop.
+- Vídeo com alpha: WebM VP9 (Chrome, Firefox) e HEVC (Safari), alpha
+  detectado na importação e marcado no bin; instrução de conversão para
+  ProRes 4444.
+- Sequência de PNG importada como um clipe.
+- Testar export WebM com alpha pelo Mediabunny; o usuário decide se reabre.
+
+### Batch 9: biblioteca de mídia livre
+
+- Botão "Mídia livre" no bin: Openverse, Wikimedia Commons, Internet Archive,
+  NASA, ccMixter e Freesound (com chave do usuário).
+- O arquivo é baixado e vira mídia local, com licença, autor e link guardados.
+- ND escondido, NC com aviso, BY gera créditos; aviso de crédito faltando.
+- Teste de CORS por fonte; decidir entre proxy PHP no Hostinger com lista de
+  fontes permitidas e "baixar e arrastar".
+
+### Batch 10: animação estilo After Effects
+
+- Parentesco, ponto de âncora e caminho de movimento (recortes de PNG).
+- Máscaras e track matte (saem do Batch 6).
+- `wiggle` e `loop` nas keyframes; pré-composições.
+- Importar Lottie (Bodymovin) como camada, via lottie-web.
 
 ## 6. Itens que acompanham todos os batches
 

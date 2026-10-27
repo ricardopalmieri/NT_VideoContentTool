@@ -1,6 +1,8 @@
 import { AsyncZipDeflate, Zip, ZipPassThrough } from "fflate";
-import { AudioBufferSource, BufferTarget, CanvasSource, Mp4OutputFormat, Output, Quality } from "mediabunny";
+import { AudioBufferSource, BufferTarget, CanvasSource, Mp4OutputFormat, Output, Quality, StreamTarget } from "mediabunny";
 import { downloadBlob } from "../io/web-platform";
+import type { StreamTargetChunk } from "mediabunny";
+import type { ExportFileSink } from "./export-file";
 
 export interface BrowserExportOptions {
   fileName: string;
@@ -19,15 +21,24 @@ function canvasBlob(canvas: HTMLCanvasElement, type = "image/png", quality?: num
 }
 
 export class Mp4BrowserExporter {
-  private target = new BufferTarget();
-  private output: Output<Mp4OutputFormat, BufferTarget>;
+  private target: BufferTarget | StreamTarget;
+  private output: Output<Mp4OutputFormat, BufferTarget | StreamTarget>;
   private source: CanvasSource;
   private audioSource: AudioBufferSource | null = null;
 
-  constructor(canvas: HTMLCanvasElement, private readonly options: BrowserExportOptions, private readonly audio: AudioBuffer | null = null) {
+  /** With a `sink` the file is written to disk as it is encoded; without one it is built in memory and downloaded. */
+  constructor(
+    canvas: HTMLCanvasElement,
+    private readonly options: BrowserExportOptions,
+    private readonly audio: AudioBuffer | null = null,
+    private readonly sink: ExportFileSink | null = null,
+  ) {
     const pixelsPerSecond = options.width * options.height * options.fps;
     const bitrate = Math.round(Math.max(1_500_000, pixelsPerSecond * (.055 + options.quality / 1000)));
-    this.output = new Output({ format: new Mp4OutputFormat(), target: this.target });
+    // fastStart false (moov at the end) keeps memory flat and plays everywhere; 'in-memory' would hold the whole
+    // file and 'fragmented' is not read by every editor. The seekable file lets mediabunny patch the mdat header.
+    this.target = sink ? new StreamTarget(sink.stream, { chunked: true, chunkSize: 8 * 1024 * 1024 }) : new BufferTarget();
+    this.output = new Output({ format: sink ? new Mp4OutputFormat({ fastStart: false }) : new Mp4OutputFormat(), target: this.target });
     this.source = new CanvasSource(canvas, {
       codec: "avc",
       quality: new Quality({ bitrate }),
@@ -53,13 +64,15 @@ export class Mp4BrowserExporter {
 
   async finish() {
     await this.output.finalize();
-    if (!this.target.buffer) throw new Error("O encoder não produziu um arquivo MP4.");
+    if (this.sink) return this.sink.bytesWritten();
+    if (!(this.target instanceof BufferTarget) || !this.target.buffer) throw new Error("O encoder não produziu um arquivo MP4.");
     const blob = new Blob([this.target.buffer as BlobPart], { type: "video/mp4" });
     downloadBlob(blob, `${this.options.fileName}.mp4`);
     return blob.size;
   }
 
   async cancel() {
+    await this.sink?.abort();
     await this.output.cancel();
   }
 }
@@ -71,8 +84,18 @@ export class PngSequenceBrowserExporter {
   private completed: Promise<void>;
   private resolveCompleted!: () => void;
   private rejectCompleted!: (error: Error) => void;
+  // Streaming to disk: writes run one after another, and addFrame waits on them for backpressure.
+  private writer: WritableStreamDefaultWriter<StreamTargetChunk> | null = null;
+  private writes: Promise<void> = Promise.resolve();
+  private position = 0;
 
-  constructor(private readonly canvas: HTMLCanvasElement, private readonly options: BrowserExportOptions) {
+  /** With a `sink` the ZIP is written to disk chunk by chunk; without one it is built in memory and downloaded. */
+  constructor(
+    private readonly canvas: HTMLCanvasElement,
+    private readonly options: BrowserExportOptions,
+    private readonly sink: ExportFileSink | null = null,
+  ) {
+    this.writer = sink ? sink.stream.getWriter() : null;
     this.completed = new Promise<void>((resolve, reject) => {
       this.resolveCompleted = resolve;
       this.rejectCompleted = reject;
@@ -83,7 +106,16 @@ export class PngSequenceBrowserExporter {
         this.rejectCompleted(error);
         return;
       }
-      this.chunks.push(chunk);
+      if (this.writer) {
+        const data = chunk as Uint8Array<ArrayBuffer>;
+        const position = this.position;
+        this.position += data.byteLength;
+        const writer = this.writer;
+        this.writes = this.writes.then(() => this.error ? undefined : writer.write({ type: "write", data, position })).catch((writeError) => {
+          this.error = writeError instanceof Error ? writeError : new Error(String(writeError));
+          this.rejectCompleted(this.error);
+        });
+      } else this.chunks.push(chunk);
       if (final) this.resolveCompleted();
     });
   }
@@ -101,19 +133,27 @@ export class PngSequenceBrowserExporter {
     const file = new ZipPassThrough(`frames/frame-${String(index + 1).padStart(6, "0")}.png`);
     this.zip.add(file);
     file.push(new Uint8Array(await blob.arrayBuffer()), true);
+    if (this.writer) await this.writes;
     if (this.error) throw this.error;
   }
 
   async finish() {
     this.zip.end();
     await this.completed;
+    if (this.writer && this.sink) {
+      await this.writes;
+      if (this.error) throw this.error;
+      await this.writer.close();
+      return this.sink.bytesWritten();
+    }
     const blob = new Blob(this.chunks as BlobPart[], { type: "application/zip" });
     downloadBlob(blob, `${this.options.fileName}-png-sequence.zip`);
     return blob.size;
   }
 
-  cancel() {
+  async cancel() {
     this.zip.terminate();
+    await this.sink?.abort();
   }
 }
 

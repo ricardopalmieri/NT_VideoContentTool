@@ -83,6 +83,7 @@ export function renderMediaBin(project: ProjectDocument, view: BinView, language
       <button type="button" data-add-input="geometry">${pt ? "Forma" : "Shape"}</button>
       <button type="button" data-add-input="guide">${pt ? "Guia" : "Guide"}</button>
       <button type="button" data-import-srt>${pt ? "Importar legendas (SRT)" : "Import subtitles (SRT)"}</button>
+      <button type="button" data-auto-subtitles>${pt ? "Legendar automaticamente" : "Auto subtitles"}</button>
     </div>
   </section>`;
 }

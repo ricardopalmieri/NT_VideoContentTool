@@ -4,10 +4,13 @@ import { describeCommand, describeCommandsText, isConsequential } from "../model
 import { validateProjectDocument } from "../model/validate-project";
 import type { ProjectDocument } from "../model/types";
 import { audioLanes, trackName, visualTracks } from "../model/clip-tracks";
-import { assetsText } from "../model/media-assets";
+import { assetsText, listAssets } from "../model/media-assets";
 import { timelineText } from "../model/timeline-text";
 import { lintText } from "../model/lint";
 import { AGENT_GUIDE } from "./agent-guide";
+import { isTranscribeLanguage, isWhisperSize, type TranscribeLanguage, type WhisperSize } from "../transcribe/model-catalog";
+import { BUSY_PHASES, transcribeStatusText, transcribeStore } from "../transcribe/transcribe-state";
+import { agentStatusText, createAgentSession, type AgentRequest, type AgentRequestKind, type AgentRequestOptions, type AgentSession } from "./agent-session";
 
 function timelineSummary(project: ProjectDocument) {
   return structuredClone({
@@ -44,16 +47,20 @@ const SEMANTICS = [
 const PAGE = 900;
 let pending = "";
 
+/** User text (clip names, titles) may contain ? & =; full-width forms read the same. */
+function safeText(raw: string) {
+  return raw.replace(/[?&=]/g, (character) => ({ "?": "？", "&": "＆", "=": "＝" })[character]!);
+}
+
 /** Long text comes back in pages of 900 characters; call more() for the rest. */
 function paged(raw: string) {
-  // User text (clip names, titles) may contain them; full-width forms read the same.
-  const text = raw.replace(/[?&=]/g, (character) => ({ "?": "？", "&": "＆", "=": "＝" })[character]!);
+  const text = safeText(raw);
   if (text.length <= PAGE) { pending = ""; return text; }
   pending = text.slice(PAGE);
   return `${text.slice(0, PAGE)}\n[continua: vct.more()]`;
 }
 
-const METHODS = ['guide', 'describe', 'more', 'assets', 'summary', 'lint', 'plan', 'contactSheet', 'assetSheet', 'hideSheet', 'analyzeMix', 'analyzeAudio', 'analyzeVideo', 'getTimeline', 'getProject', 'query', 'validate', 'listCatalog', 'dryRun', 'dispatch', 'batch', 'undo', 'redo', 'captureFrame', 'onChange'];
+const METHODS = ['guide', 'describe', 'more', 'assets', 'summary', 'lint', 'plan', 'contactSheet', 'assetSheet', 'hideSheet', 'analyzeMix', 'analyzeAudio', 'analyzeVideo', 'getTimeline', 'getProject', 'query', 'validate', 'listCatalog', 'dryRun', 'dispatch', 'batch', 'undo', 'redo', 'captureFrame', 'request', 'status', 'transcribe', 'transcript', 'onChange'];
 
 export interface VctChangeEvent {
   revision: number;
@@ -93,6 +100,21 @@ export interface VctApi {
   dryRun(commands: readonly VctCommand[]): { results: readonly unknown[]; timeline: ReturnType<typeof timelineSummary>; requiresConfirmation: boolean };
   undo(): boolean;
   redo(): boolean;
+  /**
+   * Pede algo que depende da pessoa: salvar, exportar ({ format, scale }), importar ou abrir
+   * ({ message }). Devolve na hora; a pessoa responde na tela. Confira o resultado em status().
+   */
+  request(kind: AgentRequestKind, options?: AgentRequestOptions): string;
+  /** Pausa, pedido pendente, resultado do último pedido, legenda automática e passo de desfazer, em poucas linhas. */
+  status(): string;
+  /**
+   * Legenda automática (Whisper local no navegador): transcreve a mixagem ("mix", padrão) ou uma mídia do bin
+   * (caminho de assets()). Devolve na hora; sem o modelo no navegador a pessoa vê o aviso de download e decide.
+   * Acompanhe em status(); o SRT sai em transcript().
+   */
+  transcribe(options?: { source?: "mix" | string; language?: TranscribeLanguage; model?: WhisperSize }): Promise<string>;
+  /** SRT da última legenda automática, em páginas (more()). */
+  transcript(): string;
   /** Quadro renderizado da composição (JPEG pequeno) para o agente conferir o resultado. */
   captureFrame(options?: { time?: number; maxWidth?: number }): Promise<VctFrame>;
   validate(): ReturnType<typeof validateProjectDocument>;
@@ -113,6 +135,13 @@ export interface VctApiHost {
   assertCanEdit?(): void;
   undo?(): boolean;
   redo?(): boolean;
+  /** Nome do passo que o próximo desfazer reverte ("" se não houver). */
+  undoLabel?(): string;
+  projectName?(): string;
+  /** Começa a legenda automática (source: "mix" ou "asset:<caminho>"); devolve texto curto sem esperar a pessoa. */
+  startTranscribe?(choices: { source: string; language?: TranscribeLanguage; model?: WhisperSize }): Promise<string>;
+  /** Executa um pedido depois que a pessoa permitiu; devolve um detalhe curto (nome do arquivo). */
+  runRequest?(request: AgentRequest): Promise<string | void>;
   captureFrame?(time: number | undefined, maxWidth: number): Promise<VctFrame>;
   /** Renders a still that waits for decode; returns a canvas copy and layers that failed. */
   stillFrame?(time: number, maxWidth: number): Promise<{ canvas: HTMLCanvasElement; notReady: string[] }>;
@@ -188,7 +217,7 @@ async function sheetResult(frames: Array<{ image: CanvasImageSource; width: numb
   return { ...base, dataUrl: canvas.toDataURL('image/jpeg', .8), note: caption };
 }
 
-export function createVctApi(host: VctApiHost): VctApi {
+export function createVctApi(host: VctApiHost, session: AgentSession = createAgentSession()): VctApi {
   const listeners = new Set<(event: VctChangeEvent) => void>();
   let revision = 0;
   const api: VctApi = {
@@ -203,7 +232,9 @@ export function createVctApi(host: VctApiHost): VctApi {
         "Campos com ! são obrigatórios. Detalhe e exemplo: describe(tipo).",
         ...SEMANTICS.map((line) => `- ${line}`),
         describeCommandsText(),
-        "Limites: projeto aberto pela pessoa; a API não importa mídia, não salva e não exporta.",
+        "Legenda automática: vct.transcribe começa na hora (Whisper local; o áudio não sai da máquina). Sem o modelo no navegador a pessoa vê o aviso de download. Confira status, leia o SRT com vct.transcript e aplique com text.fromSrt.",
+        "Limites: projeto aberto pela pessoa. Salvar, exportar, importar e abrir só com vct.request (a pessoa confirma na tela); depois confira vct.status().",
+        "Se a pessoa pausar o agente, batch plan dispatch undo redo e request falham até ela clicar em Retomar; leituras seguem.",
       ].join("\n"));
     },
     more: () => paged(pending),
@@ -219,7 +250,11 @@ export function createVctApi(host: VctApiHost): VctApi {
       if (options.every !== undefined && !(options.every > 0)) throw new Error('every deve ser maior que zero.');
       const last = end - 1 / project.settings.fps;
       const every = options.every ?? Math.max(1 / project.settings.fps, (last - start) / 11);
-      const times = (options.times?.length ? options.times : Array.from({ length: Math.min(48, Math.floor((last - start) / every + 1e-9) + 1) }, (_, index) => Math.min(last, start + index * every)))
+      const requested = Math.floor((last - start) / every + 1e-9) + 1;
+      // Acima de 48 quadros a folha se espalha pelo trecho todo em vez de parar no meio.
+      const spread = !options.times?.length && requested > 48;
+      const step = spread ? (last - start) / 47 : every;
+      const times = (options.times?.length ? options.times : Array.from({ length: Math.min(48, requested) }, (_, index) => Math.min(last, start + index * step)))
         .filter((time) => Number.isFinite(time) && time >= 0 && time <= project.settings.duration).slice(0, 48);
       if (!times.length) throw new Error('Nenhum tempo válido para a folha.');
       const size = Math.max(80, Math.min(480, Math.round(options.size ?? 240)));
@@ -230,7 +265,7 @@ export function createVctApi(host: VctApiHost): VctApi {
         if (still.notReady.length) notReady.push(`${time.toFixed(2)} s: ${still.notReady.join(' ')}`);
         frames.push({ image: still.canvas, width: still.canvas.width, height: still.canvas.height, label: `${time.toFixed(2)} s`, warning: still.notReady.length > 0 });
       }
-      return sheetResult(frames, options, size, notReady, `Composição: ${times.length} quadros`);
+      return sheetResult(frames, options, size, notReady, `Composição: ${times.length} quadros${spread ? ` a cada ${step.toFixed(2)} s (limite de 48; pedido: ${requested})` : ''}`);
     },
     assetSheet: async (asset, options = {}) => {
       const project = activeProject(host);
@@ -275,8 +310,10 @@ export function createVctApi(host: VctApiHost): VctApi {
       });
       const report = { results, summary: paged(timelineText(draft)), lint: lintText(draft) };
       if (options.dryRun) return report;
+      session.assertRunning();
       host.assertCanEdit?.();
       const label = options.label?.trim() || "Plano do agente";
+      session.touch(label);
       if (requiresConfirmation(commands) && !host.confirmConsequential(`Confirmar remoção de clipe/efeito no plano "${label}"?`)) {
         throw new Error("Plano cancelado pelo usuário.");
       }
@@ -296,12 +333,16 @@ export function createVctApi(host: VctApiHost): VctApi {
       return { results: result.results, timeline: timelineSummary(result.project), requiresConfirmation: requiresConfirmation(result.commands) };
     },
     undo: () => {
+      session.assertRunning();
       activeProject(host); host.assertCanEdit?.();
+      session.touch("Desfazer");
       if (!host.undo) throw new Error('Undo indisponível neste host.');
       return host.undo();
     },
     redo: () => {
+      session.assertRunning();
       activeProject(host); host.assertCanEdit?.();
+      session.touch("Refazer");
       if (!host.redo) throw new Error('Redo indisponível neste host.');
       return host.redo();
     },
@@ -327,6 +368,7 @@ export function createVctApi(host: VctApiHost): VctApi {
       return api.batch([command], { label })[0];
     },
     batch: (commands, options = {}) => {
+      session.assertRunning();
       host.assertCanEdit?.();
       const project = activeProject(host);
       if (!Array.isArray(commands)) throw new Error("commands deve ser uma lista.");
@@ -334,6 +376,7 @@ export function createVctApi(host: VctApiHost): VctApi {
       if (labelValue !== undefined && typeof labelValue !== "string") throw new Error("O nome do lote deve ser texto.");
       const label = labelValue?.trim() || "VCT automation";
       if (label.length > 120) throw new Error("O nome do lote deve ter até 120 caracteres.");
+      session.touch(label);
       const result = runProjectCommands(project, commands, host.keyframeTolerance());
       const before = JSON.stringify(project);
       if (JSON.stringify(result.project) === before) return result.results;
@@ -353,6 +396,38 @@ export function createVctApi(host: VctApiHost): VctApi {
         }
       }
       return result.results;
+    },
+    request: (kind, options) => {
+      session.assertRunning();
+      if (!host.runRequest) throw new Error("Pedidos indisponíveis neste host.");
+      // Salvar, exportar e importar precisam de projeto; abrir funciona sem ele.
+      if (kind !== "open") activeProject(host);
+      const run = host.runRequest.bind(host);
+      return safeText(session.submit(kind, options, host.projectName?.() ?? "", run));
+    },
+    status: () => {
+      const job = transcribeStore.get();
+      return safeText([agentStatusText(session.view(), host.undoLabel?.() ?? ""), job.phase === "idle" ? "" : transcribeStatusText(job)].filter(Boolean).join("\n"));
+    },
+    transcribe: async (options = {}) => {
+      session.assertRunning();
+      const project = activeProject(host);
+      if (!host.startTranscribe) throw new Error("Legenda automática indisponível neste host.");
+      if (!options || typeof options !== "object" || Array.isArray(options)) throw new Error("As opções devem ser um objeto.");
+      const { source = "mix", language, model } = options;
+      if (typeof source !== "string") throw new Error("source deve ser mix ou o caminho de uma mídia (veja assets()).");
+      if (source !== "mix" && !listAssets(project).some((entry) => entry.id === source && (entry.kind === "audio" || entry.kind === "video"))) {
+        throw new Error("source deve ser mix ou o caminho de um áudio ou vídeo do bin (veja assets()).");
+      }
+      if (language !== undefined && !isTranscribeLanguage(language)) throw new Error("language deve ser pt, en, es ou auto.");
+      if (model !== undefined && !isWhisperSize(model)) throw new Error("model deve ser base (rápido, 80 MB) ou small (preciso, 252 MB).");
+      if (BUSY_PHASES.includes(transcribeStore.get().phase)) throw new Error("Já existe uma legenda automática em andamento. Confira vct.status().");
+      session.touch("Legenda automática");
+      return safeText(await host.startTranscribe({ source: source === "mix" ? "mix" : `asset:${source}`, language, model }));
+    },
+    transcript: () => {
+      const { srt } = transcribeStore.get();
+      return srt ? paged(srt) : "Nenhuma legenda automática pronta. Chame vct.transcribe() e confira vct.status().";
     },
     onChange: (listener) => {
       if (typeof listener !== "function") throw new Error("O listener de mudanças precisa ser uma função.");

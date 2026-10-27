@@ -44,6 +44,15 @@ describe("musical grid", () => {
     expect(project.settings.grid).toEqual({ bpm: 120, offset: 0, beatsPerBar: 4 });
     expect(project.layers[0]).toMatchObject({ startTime: 2, endTime: 6 });
   });
+
+  it("accepts musical times inside fx.strobe times (found in the agent review)", () => {
+    const { project } = run(fixture(), [
+      { type: "composition.set", props: { grid: { bpm: 120 } } },
+      { type: "fx.strobe", times: ["beat:1", "beat:3", 2.5], frames: 2 },
+    ]);
+    const flashes = project.layers.filter((layer) => layer.id !== "t").map((layer) => layer.startTime).sort((a, b) => a - b);
+    expect(flashes).toEqual([.5, 1.5, 2.5]);
+  });
 });
 
 describe("keyframes relative to the clip and bezier strength", () => {

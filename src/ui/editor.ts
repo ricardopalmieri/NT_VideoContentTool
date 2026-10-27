@@ -3,6 +3,9 @@ import { normalizeFades, setFadeHandle } from "../timeline/timing";
 import { formatDurationValue, parseDurationValue, type DurationUnit } from "../timeline/timecode";
 import { formatRulerTime, rulerTicks } from "../timeline/ruler";
 import { exportRange } from "../export/export-range";
+import { openExportSink } from "../export/export-file";
+import { loadProjectFonts } from "../export/export-fonts";
+import { EXPORT_SCALES, exportScaleLabel, exportSize, parseExportScale, type ExportFormat, type ExportScalable } from "../export/export-size";
 import { openShortcutsPanel, openWarningsPanel, renderWarningsButton } from "./info-panels";
 import { sourceTimeFor } from "../renderer/source-time";
 import { installAgentAutomation, openAgentPanel } from "../automation/agent-panel";
@@ -22,6 +25,10 @@ import {
   type EffectParameterDefinition,
 } from "../model/effect-catalog";
 import { createVctApi, type VctApi } from "../automation/window-vct";
+import type { TranscribeChoices, TranscribeHost } from "../transcribe/transcribe-dialog";
+import { createAgentSession, type AgentRequest } from "../automation/agent-session";
+import { installAgentStrip } from "../automation/agent-strip";
+import { escapeHtml } from "./escape-html";
 import { runProjectCommands, type VctCommand } from "../model/commands";
 import { keyframeAt as findKeyframeAt } from "../model/keyframes";
 import { translate, type TranslationKey } from "../i18n";
@@ -45,12 +52,6 @@ import {
   saveProjectRecovery,
   saveWebProject,
 } from "../io/web-platform";
-import {
-  copyFrame,
-  createExportCanvas,
-  Mp4BrowserExporter,
-  PngSequenceBrowserExporter,
-} from "../export/browser-export";
 import {
   createProject,
   uid,
@@ -150,6 +151,8 @@ let renderer: ComposerRenderer | null = null;
 let zoom = 1;
 let exportCancelled = false;
 let exportInProgress = false;
+/** Resultado da última exportação, para o pedido do agente (vct.request export) devolver o nome do arquivo. */
+let lastExportResult: { ok: boolean; detail: string } | null = null;
 let exportSessionId: string | null = null;
 type ActiveExporter = {
   start(): Promise<void>;
@@ -245,12 +248,6 @@ function bindBrandLink() {
     event.preventDefault();
     openNoisetupiSite();
   });
-}
-
-function escapeHtml(value: unknown) {
-  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;",
-  })[character]!);
 }
 
 function snapshot(label = "") {
@@ -715,6 +712,12 @@ async function chooseOpenProject() {
   } catch (error) {
     window.alert(String(error));
   }
+}
+
+async function openAnotherProject() {
+  if (!await offerSave(language === "pt-BR" ? "antes de abrir outro projeto" : "before opening another project")) return false;
+  await chooseOpenProject();
+  return true;
 }
 
 function projectMediaReferences() {
@@ -1544,11 +1547,33 @@ function renderEffectInspector(layer: Layer, effect: EffectNode) {
     <div class="inspector-actions"><button class="danger" data-remove-effect="${effect.id}">${t("delete")}</button></div>`;
 }
 
+/** Content width the ruler labels were spaced for; see syncRuler. */
+let rulerPixels = 0;
+
+/**
+ * Re-spaces the ruler labels for the real timeline width. The first render only
+ * guesses (800 px), and a narrower window or panel made the labels overlap.
+ */
+function syncRuler() {
+  if (!project) return;
+  const scroll = app.querySelector<HTMLElement>(".timeline-scroll");
+  const ruler = scroll?.querySelector<HTMLElement>(".time-ruler");
+  if (!scroll || !ruler || !scroll.clientWidth) return;
+  const pixels = scroll.clientWidth * timelineZoomX;
+  if (Math.abs(pixels - rulerPixels) / pixels < .05) return;
+  rulerPixels = pixels;
+  const duration = project.settings.duration;
+  const band = ruler.querySelector(".work-area-band")?.outerHTML ?? "";
+  ruler.innerHTML = band + rulerTicks(duration, project.settings.fps, pixels)
+    .map((tick) => `<span style="left:${tick.time / duration * 100}%">${tick.label}</span>`).join("");
+}
+
 function renderTimeline() {
   if (!project) return "";
   const duration = project.settings.duration;
   const viewportWidth = app.querySelector<HTMLElement>(".timeline-scroll")?.clientWidth || 800;
-  const ticks = rulerTicks(duration, project.settings.fps, viewportWidth * timelineZoomX);
+  rulerPixels = viewportWidth * timelineZoomX;
+  const ticks = rulerTicks(duration, project.settings.fps, rulerPixels);
   const rows = timelineRows();
   const area = project.settings.workArea;
   const areaBand = area ? `<i class="work-area-band" style="left:${area.in / duration * 100}%;width:${(area.out - area.in) / duration * 100}%"></i>` : "";
@@ -1953,7 +1978,13 @@ function uiIcon(name: "library" | "inspector" | "new" | "open" | "save" | "colle
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name]}</svg>`;
 }
 
+// Panel drags and window resizes change the timeline width without a re-render.
+const rulerObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => syncRuler());
+
 function bindEditor() {
+  rulerObserver?.disconnect();
+  const timelinePanel = app.querySelector(".timeline-panel");
+  if (timelinePanel) rulerObserver?.observe(timelinePanel);
   bindBrandLink();
   app.querySelector("#open-warnings")?.addEventListener("click", openWarnings);
   bindLeftPanel();
@@ -1971,10 +2002,7 @@ function bindEditor() {
     renderer = null;
     renderProjectSetup();
   })());
-  app.querySelector("#open-project")?.addEventListener("click", () => void (async () => {
-    if (!await offerSave(language === "pt-BR" ? "antes de abrir outro projeto" : "before opening another project")) return;
-    await chooseOpenProject();
-  })());
+  app.querySelector("#open-project")?.addEventListener("click", () => void openAnotherProject());
   app.querySelector("#save-project")?.addEventListener("click", () => void saveProject());
   app.querySelector("#toggle-library")?.addEventListener("click", () => {
     const editor = app.querySelector<HTMLElement>(".editor-app");
@@ -2688,6 +2716,7 @@ function updateTimeline() {
     nextScroll.scrollTop = scrollTop;
   }
   syncMinimap();
+  syncRuler();
 }
 
 function requestTimelineRefresh() {
@@ -2780,6 +2809,7 @@ function bindLeftBody() {
   }));
   body.querySelectorAll<HTMLElement>("[data-add-input]").forEach((button) => button.addEventListener("click", () => void addInput(button.dataset.addInput as "text" | "geometry" | "guide")));
   body.querySelector("[data-import-srt]")?.addEventListener("click", () => void importSubtitles());
+  body.querySelector("[data-auto-subtitles]")?.addEventListener("click", () => void openAutoSubtitles());
   body.querySelectorAll<HTMLElement>("[data-add-effect]").forEach((button) => button.addEventListener("click", () => addEffect(button.dataset.addEffect as EffectKind, false)));
   body.querySelectorAll<HTMLElement>("[data-add-post]").forEach((button) => button.addEventListener("click", () => addEffect(button.dataset.addPost as EffectKind, true)));
   if (leftTab !== "media") return;
@@ -2973,16 +3003,60 @@ async function importSubtitles() {
     setStatus(`${editLabel("LEGENDAS", "SUBTITLES")} · ${errorMessage(error)}`);
     return;
   }
+  const { created, skipped } = insertSubtitles(target, srt, editLabel("Importar legendas", "Import subtitles"));
+  if (created < 0) return;
+  setStatus(language === "pt-BR"
+    ? `LEGENDAS · ${created} IMPORTADA${created === 1 ? "" : "S"}${skipped > 0 ? ` · ${skipped} FORA DA COMPOSIÇÃO OU VAZIA${skipped === 1 ? "" : "S"}` : ""}`
+    : `SUBTITLES · ${created} IMPORTED${skipped > 0 ? ` · ${skipped} OUTSIDE THE COMPOSITION OR EMPTY` : ""}`);
+}
+
+/** SRT -> camadas de texto (macro text.fromSrt) num passo de desfazer. created é -1 se a edição foi recusada. */
+function insertSubtitles(target: ProjectDocument, srt: string, label: string) {
   let prefix = "legenda";
   for (let n = 2; target.layers.some((layer) => layer.id.startsWith(prefix)) || target.tracks?.some((track) => track.id.startsWith(prefix)); n++) prefix = `legenda${n}_`;
   const before = target.layers.length;
   const cues = (srt.match(/-->/g) || []).length;
-  if (!applyCommands([{ type: "text.fromSrt", srt, idPrefix: prefix }], editLabel("Importar legendas", "Import subtitles"))) return;
+  if (!applyCommands([{ type: "text.fromSrt", srt, idPrefix: prefix }], label)) return { created: -1, skipped: 0 };
   const created = project ? project.layers.length - before : 0;
-  const skipped = cues - created;
-  setStatus(language === "pt-BR"
-    ? `LEGENDAS · ${created} IMPORTADA${created === 1 ? "" : "S"}${skipped > 0 ? ` · ${skipped} FORA DA COMPOSIÇÃO OU VAZIA${skipped === 1 ? "" : "S"}` : ""}`
-    : `SUBTITLES · ${created} IMPORTED${skipped > 0 ? ` · ${skipped} OUTSIDE THE COMPOSITION OR EMPTY` : ""}`);
+  return { created, skipped: cues - created };
+}
+
+// ---- Legenda automática (Whisper no navegador). O diálogo e o motor só carregam quando a pessoa pede.
+
+const transcribeHost: TranscribeHost = {
+  language: () => language,
+  project: () => project,
+  say: setStatus,
+  selectedSource() {
+    const layer = selectedLayer();
+    const audio = selectedAudioTrack();
+    const clip = layer?.kind === "video" && layer.asset ? layer : null;
+    const item = clip ?? audio;
+    if (!item || !item.asset) return null;
+    const rate = Math.max(.05, Math.abs(item.playbackRate || 1));
+    const from = Math.max(0, item.sourceIn ?? 0);
+    const span = item.sourceOut > from ? item.sourceOut - from : Infinity;
+    return {
+      asset: item.asset, label: clip ? clip.name : audio!.name, from,
+      length: Math.min(span, (item.endTime - item.startTime) * rate), offset: item.startTime, scale: 1 / rate,
+    };
+  },
+  insertSrt(srt) {
+    if (!project || exportInProgress) return 0;
+    const { created } = insertSubtitles(project, srt, editLabel("Legenda automática", "Auto subtitles"));
+    return Math.max(0, created);
+  },
+};
+
+async function openAutoSubtitles(choices: TranscribeChoices = {}) {
+  if (!project || exportInProgress) return;
+  const { openTranscribeDialog } = await import("../transcribe/transcribe-dialog");
+  openTranscribeDialog(transcribeHost, choices);
+}
+
+async function startAgentTranscription(choices: TranscribeChoices) {
+  const { startAgentTranscription: start } = await import("../transcribe/transcribe-dialog");
+  return start(transcribeHost, choices);
 }
 
 async function chooseAndImportMedia() {
@@ -5641,6 +5715,8 @@ function showExportModal() {
   if (!project) return;
   const defaultFormat = project.settings.transparent ? "png-sequence" : "mp4-h264";
   const defaultName = project.settings.name.replace(/[^a-zA-Z0-9._ -]+/g, "_") || "noisetupi-render";
+  let savedExportScale = 1;
+  try { savedExportScale = parseExportScale(localStorage.getItem("nt-vct-export-scale")); } catch { /* storage unavailable */ }
   const root = app.querySelector<HTMLDivElement>("#modal-root")!;
   root.innerHTML = `
     <div class="modal-backdrop">
@@ -5651,8 +5727,9 @@ function showExportModal() {
             <option value="mp4-h264" ${defaultFormat === "mp4-h264" ? "selected" : ""}>MP4 H.264</option>
             <option value="png-sequence" ${defaultFormat === "png-sequence" ? "selected" : ""}>PNG SEQUENCE + ALPHA (.ZIP)</option>
           </select></label>
-          <label class="field"><span>${t("width")} PX</span><input id="export-width" type="number" value="${project.settings.width}" min="16" max="8192"></label>
-          <label class="field"><span>${t("height")} PX</span><input id="export-height" type="number" value="${project.settings.height}" min="16" max="8192"></label>
+          <label class="select-field resolution-field"><span>${language === "pt-BR" ? "Resolução" : "Resolution"}</span><select id="export-scale">
+            ${EXPORT_SCALES.map((scale) => `<option value="${scale}" ${scale === savedExportScale ? "selected" : ""}></option>`).join("")}
+          </select></label>
           <label class="field"><span>FPS</span><input id="export-fps" type="number" value="${project.settings.fps}" min="1" max="240"></label>
           <label class="field"><span>${t("quality")}</span><input id="export-quality" type="number" value="82" min="1" max="100"></label>
           <label class="toggle-field"><input id="export-alpha" type="checkbox" ${defaultFormat === "png-sequence" ? "checked" : ""} disabled><span class="toggle"></span><span>ALPHA ${language === "pt-BR" ? "DISPONÍVEL NA SEQUÊNCIA PNG" : "AVAILABLE IN PNG SEQUENCE"}</span></label>
@@ -5672,15 +5749,27 @@ function showExportModal() {
     const scope = area
       ? `${language === "pt-BR" ? "Região de trabalho" : "Work area"} ${formatRulerTime(range.start, fps)} – ${formatRulerTime(range.end, fps)}`
       : language === "pt-BR" ? "Composição inteira" : "Whole composition";
+    const scaleSelect = root.querySelector<HTMLSelectElement>("#export-scale");
+    const outputFormat = (root.querySelector<HTMLSelectElement>("#export-format")?.value ?? defaultFormat) as ExportFormat;
+    // O rótulo mostra o tamanho final; no MP4 os lados ficam pares.
+    scaleSelect?.querySelectorAll("option").forEach((option) => {
+      option.textContent = exportScaleLabel(project!.settings, Number(option.value), outputFormat);
+    });
+    const size = exportSize(project.settings, parseExportScale(scaleSelect?.value), outputFormat);
     const summary = root.querySelector("#export-summary");
-    if (summary) summary.textContent = `${range.frameCount} FRAMES · ${formatTime(range.duration)} · ${scope}`;
+    if (summary) summary.textContent = `${size.width}×${size.height} PX · ${range.frameCount} FRAMES · ${formatTime(range.duration)} · ${scope}`;
   };
   updateSummary();
   root.querySelector("#export-fps")?.addEventListener("input", updateSummary);
+  root.querySelector("#export-scale")?.addEventListener("change", (event) => {
+    try { localStorage.setItem("nt-vct-export-scale", String(parseExportScale((event.target as HTMLSelectElement).value))); } catch { /* storage unavailable */ }
+    updateSummary();
+  });
   const format = root.querySelector<HTMLSelectElement>("#export-format")!;
   const alpha = root.querySelector<HTMLInputElement>("#export-alpha")!;
   format.addEventListener("change", () => {
     alpha.checked = format.value === "png-sequence";
+    updateSummary();
   });
   root.querySelector("#close-export")?.addEventListener("click", closeExportModal);
   root.querySelector("#cancel-export")?.addEventListener("click", () => void cancelExport());
@@ -5705,45 +5794,64 @@ async function startExport() {
 
 async function runExport() {
   if (!project || !renderer) return;
-  notificationAudio ||= new AudioContext();
-  void notificationAudio.resume();
-  stopPlayback();
-  while (renderInFlight) {
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  // Sem Web Audio (alguns WebKit) o export segue, só sem o aviso sonoro.
+  const AudioContextClass = globalThis.AudioContext ?? (globalThis as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (AudioContextClass) {
+    notificationAudio ||= new AudioContextClass();
+    void notificationAudio.resume();
   }
+  stopPlayback();
   const format = app.querySelector<HTMLSelectElement>("#export-format")!.value;
   const hasVideoEncoder = typeof (globalThis as typeof globalThis & { VideoEncoder?: unknown }).VideoEncoder !== "undefined";
   if (format === "mp4-h264" && !hasVideoEncoder) {
     globalThis.alert(language === "pt-BR"
       ? "Este navegador não oferece o encoder de vídeo necessário. Use Chrome ou Edge atualizado em uma conexão HTTPS."
       : "This browser does not provide the required video encoder. Use an up-to-date Chrome or Edge over HTTPS.");
+    lastExportResult = { ok: false, detail: "sem encoder de vídeo neste navegador" };
     return;
   }
   const fps = Number(app.querySelector<HTMLInputElement>("#export-fps")!.value);
   const range = exportRange({ fps, duration: project.settings.duration, workArea: project.settings.workArea });
   const total = range.frameCount;
+  const scale = parseExportScale(app.querySelector<HTMLSelectElement>("#export-scale")?.value);
+  const size = exportSize(project.settings, scale, format as ExportFormat);
   const options = {
     fileName: app.querySelector<HTMLInputElement>("#export-output")!.value.trim().replace(/\.(mp4|zip)$/i, "") || "noisetupi-render",
-    width: Number(app.querySelector<HTMLInputElement>("#export-width")!.value),
-    height: Number(app.querySelector<HTMLInputElement>("#export-height")!.value),
+    width: size.width,
+    height: size.height,
     fps,
     quality: Number(app.querySelector<HTMLInputElement>("#export-quality")!.value),
   };
+  // O seletor de arquivo precisa do clique que iniciou a exportação, então abre antes de qualquer espera longa.
+  // Sem seletor (Firefox, Safari) ou se o usuário cancelar, o arquivo é montado em memória e baixado como antes.
+  const sink = await openExportSink(
+    format === "png-sequence" ? `${options.fileName}-png-sequence.zip` : `${options.fileName}.mp4`,
+    format === "png-sequence" ? "zip" : "mp4",
+  );
+  while (renderInFlight) {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  }
   exportCancelled = false;
   const start = app.querySelector<HTMLButtonElement>("#start-export")!;
   start.disabled = true;
   app.querySelector<HTMLButtonElement>("#close-export")!.disabled = true;
   const previousTime = currentTime;
+  // Mediabunny só é baixado na primeira exportação: a abertura do editor fica mais leve.
+  const { copyFrame, createExportCanvas, Mp4BrowserExporter, PngSequenceBrowserExporter } = await import("../export/browser-export");
   const exportCanvas = createExportCanvas(options.width, options.height);
   try {
+    setExportProgress(0, language === "pt-BR" ? "CARREGANDO FONTES" : "LOADING FONTS");
+    await loadProjectFonts(project);
     const fullMix = format === "mp4-h264" ? await mixProjectAudio(project) : null;
     // A mixagem cobre a composição inteira; com região de trabalho, só o trecho dela segue para o arquivo.
     const mixedAudio = fullMix && project.settings.workArea ? sliceAudioBuffer(fullMix, range.start, range.duration) : fullMix;
     activeExporter = format === "png-sequence"
-      ? new PngSequenceBrowserExporter(exportCanvas, options)
-      : new Mp4BrowserExporter(exportCanvas, options, mixedAudio);
+      ? new PngSequenceBrowserExporter(exportCanvas, options, sink)
+      : new Mp4BrowserExporter(exportCanvas, options, mixedAudio, sink);
     exportSessionId = "browser-export";
     await activeExporter.start();
+    // Renderer que sabe desenhar direto na resolução de saída; sem isso ele desenha cheio e copyFrame reduz.
+    (renderer as ExportScalable).setExportScale?.(scale);
     for (let frame = 0; frame < total; frame++) {
       if (exportCancelled) throw new Error(language === "pt-BR" ? "Exportação cancelada" : "Export cancelled");
       currentTime = range.start + frame / fps;
@@ -5760,8 +5868,9 @@ async function runExport() {
     activeExporter = null;
     setExportProgress(100, t("complete").toUpperCase());
     const log = app.querySelector("#export-log")!;
-    const downloadedName = format === "png-sequence" ? `${options.fileName}-png-sequence.zip` : `${options.fileName}.mp4`;
+    const downloadedName = sink?.name ?? (format === "png-sequence" ? `${options.fileName}-png-sequence.zip` : `${options.fileName}.mp4`);
     log.innerHTML = `<span class="status-dot is-ready"></span><span>${escapeHtml(downloadedName)} · ${(sizeBytes / 1048576).toFixed(1)} MB</span>`;
+    lastExportResult = { ok: true, detail: `${downloadedName} · ${(sizeBytes / 1048576).toFixed(1)} MB` };
     app.querySelector<HTMLButtonElement>("#close-export")!.disabled = false;
     const cancel = app.querySelector<HTMLButtonElement>("#cancel-export")!;
     cancel.textContent = language === "pt-BR" ? "Fechar" : "Close";
@@ -5770,13 +5879,16 @@ async function runExport() {
     if (activeExporter) {
       try { await activeExporter.cancel(); } catch { /* exporter is already closed */ }
     }
+    await sink?.abort();
     exportSessionId = null;
     activeExporter = null;
+    lastExportResult = { ok: false, detail: String(error).replace(/^Error: /, "") };
     setExportProgress(0, String(error));
     start.disabled = false;
     app.querySelector<HTMLButtonElement>("#close-export")!.disabled = false;
   } finally {
     currentTime = previousTime;
+    (renderer as ExportScalable).setExportScale?.(1);
     renderer.setPlaybackState(false, currentTime);
     renderer.setPreviewScale(1);
     try {
@@ -5923,9 +6035,49 @@ window.addEventListener("beforeunload", (event) => {
   event.returnValue = "";
 });
 
+// Pedidos do agente (vct.request): rodam só depois do sim da pessoa na faixa, dentro do clique dela.
+async function runAgentRequest(request: AgentRequest): Promise<string> {
+  const pt = language === "pt-BR";
+  if (request.kind === "open") {
+    const before = project;
+    if (!await openAnotherProject()) return pt ? "cancelado ao salvar" : "cancelled while saving";
+    return project && project !== before ? project.settings.name : pt ? "nenhum arquivo escolhido" : "no file chosen";
+  }
+  if (!project) throw new Error(pt ? "Nenhum projeto está aberto." : "No project is open.");
+  if (request.kind === "save") {
+    if (!await saveProject()) throw new Error(pt ? "salvamento cancelado ou falhou" : "save cancelled or failed");
+    return projectJsonPath || project.settings.name;
+  }
+  if (request.kind === "import") {
+    const files = await chooseFiles(IMPORT_ACCEPT);
+    if (!files.length) return pt ? "nenhum arquivo escolhido" : "no files chosen";
+    await importMediaFiles(files);
+    return `${files.length} ${pt ? "arquivo(s)" : "file(s)"}`;
+  }
+  if (exportInProgress) throw new Error(pt ? "Já há uma exportação em andamento." : "An export is already running.");
+  showExportModal();
+  // Os campos do modal são a fonte da exportação; o evento change do formato atualiza o resumo (o da resolução gravaria a preferência da pessoa).
+  const format = app.querySelector<HTMLSelectElement>("#export-format")!;
+  if (request.options.scale) app.querySelector<HTMLSelectElement>("#export-scale")!.value = String(request.options.scale);
+  if (request.options.format) format.value = request.options.format;
+  format.dispatchEvent(new Event("change"));
+  lastExportResult = null;
+  await startExport();
+  if (!lastExportResult) throw new Error(pt ? "A exportação não começou." : "The export did not start.");
+  const result: { ok: boolean; detail: string } = lastExportResult;
+  if (!result.ok) throw new Error(result.detail);
+  return result.detail;
+}
+
+const agentSession = createAgentSession();
+installAgentStrip(agentSession, () => language);
 automationApi = createVctApi({
   getProject: () => project,
   keyframeTolerance,
+  undoLabel: () => (project ? history.undoLabel(JSON.stringify(project)) : ""),
+  projectName: () => project?.settings.name ?? "",
+  runRequest: runAgentRequest,
+  startTranscribe: startAgentTranscription,
   assertCanEdit: () => {
     if (exportInProgress) throw new Error('Aguarde a exportação antes de editar.');
   },
@@ -5958,7 +6110,7 @@ automationApi = createVctApi({
     commitDocument(next);
     setStatus(`VCT · ${label}`);
   },
-});
+}, agentSession);
 installAgentAutomation(automationApi, () => language);
 Object.defineProperty(window, "vct", { value: automationApi, configurable: true, enumerable: false });
 

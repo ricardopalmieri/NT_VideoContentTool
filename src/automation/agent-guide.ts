@@ -19,6 +19,7 @@ para editar: a API é exata, desfazível e gasta muito menos tokens.
 6. Para conferir, chame await window.vct.captureFrame({ time }) (move o playhead
    e renderiza) e tire um screenshot do preview em momentos-chave.
 7. Ajuste com novos lotes; window.vct.undo() desfaz o último.
+8. Para salvar, exportar ou importar use vct.request e confira vct.status().
 
 ## Regras do editor
 - Tempos em segundos, alinhados a frames (frame / fps da composição).
@@ -28,8 +29,31 @@ para editar: a API é exata, desfazível e gasta muito menos tokens.
 - Remover clipes pede confirmação ao usuário.
 - Propriedades: layer.set, audio.set (volume, mudo) e composition.set (duração,
   tamanho) mudam várias de uma vez.
-- Você não importa mídia, não salva nem exporta: peça ao usuário (ele pode
-  arrastar vários arquivos de uma vez para o editor).
+- Salvar, exportar, importar e abrir dependem da pessoa: vct.request("save"),
+  vct.request("export", { format: "mp4-h264", scale: 0.5 }) (format também
+  "png-sequence"; scale 1, 0.75, 0.5 ou 0.25), vct.request("import", { message })
+  e vct.request("open", { message }). A chamada volta na hora (a pessoa
+  responde na tela, não espere): confira vct.status() de poucos em poucos
+  segundos até aparecer done, refused ou failed. Peça uma vez só e diga à
+  pessoa o que ela deve clicar.
+- A pessoa pode pausar você pela faixa "IA editando" (botão Parar). Em pausa,
+  batch, plan, dispatch, undo, redo e request falham com a mensagem "Pausado
+  pelo usuário"; leituras seguem. Pare e peça que ela clique em Retomar.
+
+## Legenda automática
+- await window.vct.transcribe({ source: "mix", language: "pt", model: "base" })
+  transcreve no navegador (Whisper local; o áudio não sai da máquina). source:
+  "mix" (mixagem da timeline, padrão) ou o caminho de uma mídia do bin (veja
+  vct.assets(); os tempos são os do arquivo). language: pt, en, es ou auto.
+  model: base (rápido, 80 MB) ou small (preciso, 252 MB). Volta na hora.
+- Se o modelo ainda não está neste navegador, a pessoa vê um aviso de download
+  e decide: diga o que ela deve clicar e confira vct.status() de poucos em
+  poucos segundos (baixando, transcrevendo, pronta, cancelada ou falhou).
+- Pronta: vct.transcript() devolve o SRT em páginas (more()). Aplique com
+  batch([{ type: "text.fromSrt", srt, idPrefix: "leg" }], { label: "Legenda
+  automática" }). Os caracteres de pergunta, e comercial e igual saem em
+  versão larga neste texto; a pessoa também pode usar o botão Inserir na
+  timeline do diálogo, que usa o texto original.
 
 ## Motion design
 - Corte no tempo forte: a 120 BPM, 1 tempo dura 0,5 s e 1 compasso 4/4 dura 2 s.

@@ -61,7 +61,11 @@ export function checkField(name: string, spec: FieldSpec, value: unknown) {
 /** Rejects unknown fields, checks required ones and validates each value. */
 export function parseFields(value: Record<string, unknown>, fields: FieldMap, context = "comando") {
   for (const key of Object.keys(value)) {
-    if (key !== "type" && !Object.hasOwn(fields, key)) throw new Error(`Campo desconhecido no ${context}: ${key}.`);
+    if (key !== "type" && !Object.hasOwn(fields, key)) {
+      // A lista de campos válidos poupa ao agente uma chamada a describe() só para corrigir o nome.
+      const valid = Object.entries(fields).map(([name, spec]) => name + (spec.required ? "!" : "")).join(" ");
+      throw new Error(`Campo desconhecido no ${context}: ${key}. Campos: ${valid}.`);
+    }
   }
   for (const [name, spec] of Object.entries(fields)) {
     if (!(name in value) || value[name] === undefined) {

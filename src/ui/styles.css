@@ -591,6 +591,7 @@ body.is-resizing-timeline { cursor: row-resize; user-select: none; }
 .export-modal > header button { border: 0; background: transparent; color: var(--muted); font-size: 20px; }
 .export-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 22px 24px 10px; }
 .export-grid .select-field { grid-column: 1 / -1; margin: 0; }
+.export-grid .select-field.resolution-field { grid-column: span 2; }
 .export-grid .toggle-field { grid-column: 1 / -1; min-height: 28px; }
 .output-picker { display: grid; gap: 7px; margin: 10px 24px; color: var(--quiet); font: 12px "IBM Plex Mono", monospace; }
 .output-picker input { min-width: 0; height: 40px; padding: 0 10px; border: 1px solid var(--line); outline: 0; background: #0b0b0a; font-family: "IBM Plex Mono", monospace; font-size: 12px; }
@@ -1307,7 +1308,7 @@ kbd { padding: 1px 5px; border: 1px solid #3a3a37; border-radius: 3px; backgroun
 .bin-used, .import-progress-bar, .level-meter, .timeline-minimap i, .timeline-minimap b { border-radius: var(--radius-control); }
 .bin-create { flex-wrap: wrap; gap: var(--space-1); padding: var(--space-2); }
 .bin-create span { margin-right: var(--space-1); }
-.bin-create [data-import-srt] { flex: 1 1 100%; }
+.bin-create [data-import-srt], .bin-create [data-auto-subtitles] { flex: 1 1 100%; }
 .timeline-track.empty-track { background: #ffffff05; }
 .warnings-button { height: 22px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .warnings-button:hover { border-color: #5a5953; color: var(--ink); }
@@ -1325,4 +1326,72 @@ kbd { padding: 1px 5px; border: 1px solid #3a3a37; border-radius: 3px; backgroun
   .timeline-corner.area-tools { width: 100%; min-width: 0; padding: 0; overflow: hidden; }
   .timeline-corner.area-tools button { flex: 1 1 0; min-width: 0; padding: 0; }
   .timeline-header .curve-tools select, .timeline-header .snap-toggle, .info-list button { min-height: 44px; }
+}
+
+/* Painel Mídia estreito (tablet, coluna recolhida): cartões viram linhas compactas
+   e a busca ganha a linha dela, em vez de cartões enormes e uma busca espremida. */
+.media-bin { container: bin / inline-size; }
+@container bin (max-width: 300px) {
+  .bin-toolbar { grid-template-columns: minmax(0, 1fr) auto; }
+  .bin-toolbar [data-bin-search] { grid-column: 1 / -1; order: 3; }
+  .bin-grid { grid-template-columns: 1fr; }
+  .bin-card { grid-template-columns: 72px minmax(0, 1fr); align-items: center; }
+  .bin-thumb { aspect-ratio: 1; }
+  .bin-card-actions { grid-column: 1 / -1; }
+}
+
+/* Batch 5: faixa "IA editando" e pedidos do agente (salvar, exportar, importar, abrir). */
+.agent-strip { position: relative; z-index: 45; flex: none; border-bottom: 1px solid #3f6b55; background: #101512; color: #b8d9c8; font: 12px "IBM Plex Mono", monospace; }
+.agent-strip[hidden] { display: none; }
+body.has-agent-strip { display: flex; flex-direction: column; }
+body.has-agent-strip #app { flex: 1; min-height: 0; height: auto; }
+.agent-strip-row { display: flex; min-height: 30px; align-items: center; gap: 10px; padding: 3px 12px; }
+.agent-strip-row + .agent-strip-row { border-top: 1px solid #2f3a33; }
+.agent-strip-row.is-paused { background: #1d1708; color: var(--focus-ring); }
+.agent-strip-row.is-request { flex-wrap: wrap; background: #14110a; color: var(--ink); }
+.agent-strip-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--accent-green); animation: agent-strip-pulse 1.4s ease-in-out infinite; }
+.is-paused .agent-strip-dot { background: var(--focus-ring); animation: none; }
+.agent-strip-text { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.is-request .agent-strip-text { flex: 0 1 auto; white-space: normal; }
+.agent-strip-message { min-width: 0; flex: 1 1 200px; overflow-wrap: anywhere; color: var(--muted); }
+.agent-strip-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.agent-strip button { flex: none; height: 24px; padding: 0 10px; border: 1px solid #3f6b55; border-radius: var(--radius-control); background: transparent; color: var(--ink); font: inherit; }
+.agent-strip button.primary { border-color: var(--red); background: var(--red); }
+.agent-strip button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+@keyframes agent-strip-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .agent-strip-dot { animation: none; } }
+@media (pointer: coarse) { .agent-strip-row { min-height: 44px; } .agent-strip button { min-width: 44px; height: 44px; } }
+
+/* Legenda automática (Whisper local): aviso de download, progresso e revisão do SRT. */
+.transcribe-modal { display: flex; width: min(640px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); flex-direction: column; overflow: auto; }
+.transcribe-body { display: grid; gap: var(--space-3); padding: 20px 24px 8px; color: var(--muted); font-size: var(--text-sm); line-height: 1.5; }
+.transcribe-body p { margin: 0; }
+.transcribe-fields { display: grid; gap: var(--space-3); }
+.transcribe-fields .select-field { margin: 0; }
+.transcribe-fields select { min-height: 40px; padding: 0 10px; border: 1px solid var(--line); background: #0b0b0a; color: var(--ink); font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+.transcribe-note { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-control); background: #0b0b0a; }
+.transcribe-note.is-warning { border-color: var(--focus-ring); }
+.transcribe-note strong { color: var(--ink); font-weight: 500; }
+.transcribe-note dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 8px 0; font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+.transcribe-note dt { color: var(--quiet); }
+.transcribe-note dd { margin: 0; color: var(--ink); }
+.transcribe-manual { display: grid; gap: var(--space-2); padding: 10px 12px; border: 1px dashed #3a3a37; border-radius: var(--radius-control); }
+.transcribe-manual[hidden] { display: none; }
+.transcribe-manual ul { margin: 0; padding-left: 18px; font-size: 12px; }
+.transcribe-manual small { color: var(--quiet); }
+.transcribe-manual-buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.transcribe-manual-buttons button, .transcribe-modal > footer > button { min-height: 40px; border: 1px solid var(--line); border-radius: var(--radius-control); background: transparent; color: var(--ink); font-size: 12px; }
+.transcribe-manual-buttons button { padding: 0 12px; }
+.transcribe-modal > footer { flex-wrap: wrap; }
+.transcribe-modal > footer > button { min-width: 0; padding: 0 14px; }
+.transcribe-modal > footer .primary-button { border-color: var(--red); background: var(--red); }
+.transcribe-modal > footer .primary-button:disabled { opacity: .5; }
+.transcribe-phase { color: var(--ink); font-size: var(--text-md); }
+.transcribe-track { margin: 0; }
+.transcribe-detail { color: var(--quiet); font-family: "IBM Plex Mono", monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
+.transcribe-srt { box-sizing: border-box; width: 100%; min-height: 260px; resize: vertical; padding: 10px; border: 1px solid var(--line); background: #0b0b0a; color: var(--ink); font-family: "IBM Plex Mono", monospace; font-size: 12px; line-height: 1.5; }
+.transcribe-modal button:focus-visible, .transcribe-modal select:focus-visible, .transcribe-srt:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+@media (pointer: coarse) {
+  .transcribe-modal button, .transcribe-modal select { min-height: 44px; }
+  .transcribe-modal > header button { width: 44px; }
 }

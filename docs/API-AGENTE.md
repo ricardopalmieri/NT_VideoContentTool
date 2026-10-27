@@ -6,7 +6,7 @@ Gerado do registro de comandos (`src/model/command-registry.ts`). É o mesmo tex
 
 ```text
 VCT API 1 · lote 1 a 500 comandos, tudo ou nada, um passo de desfazer
-Métodos: guide describe more assets summary lint plan contactSheet assetSheet hideSheet analyzeMix analyzeAudio analyzeVideo getTimeline getProject query validate listCatalog dryRun dispatch batch undo redo captureFrame onChange
+Métodos: guide describe more assets summary lint plan contactSheet assetSheet hideSheet analyzeMix analyzeAudio analyzeVideo getTimeline getProject query validate listCatalog dryRun dispatch batch undo redo captureFrame request status transcribe transcript onChange
 Campos com ! são obrigatórios. Detalhe e exemplo: describe(tipo).
 - Tempos em segundos da composição, alinhados a frames (frame dividido por fps).
 - Fluxo curto: assets() e summary() para ler; clip.place para montar; dryRun ou plan com dryRun; batch ou plan; lint(); captureFrame para conferir.
@@ -80,5 +80,7 @@ name:string text:string fontFamily:string fontSize:number 4..2000 fontWeight:num
 name:string asset:string volume:number 0..2 muted:boolean startTime:number 0..7200 endTime:number 0.001..7200 sourceIn:number 0..7200 sourceOut:number 0..7200 playbackRate:number 0.05..8 reverse:boolean loop:boolean fadeInStart:number 0..7200 fadeInEnd:number 0..7200 fadeOutStart:number 0..7200 fadeOutEnd:number 0..7200
 ## props composition
 name:string width:int 16..8192 height:int 16..8192 fps:int 1..240 duration:number 0.1..7200 background:color transparent:boolean workArea:object grid:object
-Limites: projeto aberto pela pessoa; a API não importa mídia, não salva e não exporta.
+Legenda automática: vct.transcribe começa na hora (Whisper local; o áudio não sai da máquina). Sem o modelo no navegador a pessoa vê o aviso de download. Confira status, leia o SRT com vct.transcript e aplique com text.fromSrt.
+Limites: projeto aberto pela pessoa. Salvar, exportar, importar e abrir só com vct.request (a pessoa confirma na tela); depois confira vct.status().
+Se a pessoa pausar o agente, batch plan dispatch undo redo e request falham até ela clicar em Retomar; leituras seguem.
 ```

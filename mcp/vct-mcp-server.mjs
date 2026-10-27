@@ -168,6 +168,26 @@ server.registerPrompt("vct-critique", {
 }, async () => ({ messages: [{ role: "user", content: { type: "text",
   text: `${stripFrontMatter(await guide("skills/vct-critique/SKILL.md"))}\n\n${await guide("PROMPT.md")}` } }] }));
 
+server.registerPrompt("vct-template", {
+  title: "Montar um vídeo a partir de um modelo",
+  description: "Reels vertical, loop de VJ no BPM, lower third ou slideshow, com a mídia do bin.",
+  argsSchema: { pedido: z.string().describe("Modelo e ajustes, em linguagem natural.") },
+}, async ({ pedido }) => ({ messages: [{ role: "user", content: { type: "text",
+  text: `${stripFrontMatter(await guide("skills/vct-template/SKILL.md"))}
+
+${await guide("PROMPT.md")}
+
+Pedido do usuário: ${pedido}` } }] }));
+
+server.registerPrompt("vct-how-to", {
+  title: "Como fazer no VCT",
+  description: "Explica em passos curtos como fazer algo na interface ou pela API, sem editar.",
+  argsSchema: { pergunta: z.string().describe("A dúvida do usuário.") },
+}, async ({ pergunta }) => ({ messages: [{ role: "user", content: { type: "text",
+  text: `${stripFrontMatter(await guide("skills/vct-how-to/SKILL.md"))}
+
+Pergunta: ${pergunta}` } }] }));
+
 server.registerTool("vct_guide", {
   description: "Guia do VCT para agentes (fluxo, regras, motion design e VJ). Leia antes da primeira edição se o cliente não carregou o recurso vct://guia.",
   annotations: { readOnlyHint: true },

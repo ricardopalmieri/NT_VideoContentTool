@@ -100,6 +100,82 @@ A lista completa de comandos, campos, limites e regras de tempo está em
 6. `vct.lint()`, `vct.analyzeMix()` e `vct.contactSheet({ show: true })` para
    revisar.
 
+## Sessão do agente: pausa e pedidos à pessoa
+
+- **Faixa "IA editando":** toda chamada que muda o projeto (`batch`, `plan`,
+  `dispatch`, `undo`, `redo` e `request`) mostra uma faixa no topo do editor
+  com o nome do último lote e o botão **Parar**. Ela some 20 s depois da
+  última chamada.
+- **Parar** pausa o agente: as chamadas que mudam o projeto lançam `Pausado
+  pelo usuário. Peça para ele clicar em Retomar.` e a faixa fica na tela com
+  **Retomar**. Leituras (`describe`, `summary`, `assets`, `lint`,
+  `captureFrame`, `contactSheet`, `analyze*`, `status`, `dryRun`) seguem
+  funcionando.
+- **`vct.request(tipo, opções)`** pede algo que só a pessoa pode autorizar e
+  volta na hora (a ferramenta de JavaScript do agente expira em cerca de
+  45 s, então nenhuma chamada espera um clique):
+  - `"save"`: confirmação "A IA quer salvar o projeto …" com Permitir,
+    Permitir sempre nesta sessão e Recusar.
+  - `"export"`, `{ format: "mp4-h264" | "png-sequence", scale: 1 | .75 | .5 | .25 }`:
+    mesma confirmação; ao permitir, roda a exportação do editor com essas opções.
+  - `"import"` e `"open"`, `{ message }`: a faixa mostra a mensagem do agente
+    (como texto) e um botão **Importar mídia** ou **Abrir projeto**, que abre
+    o seletor de arquivos; **Agora não** dispensa.
+- **Confiança:** "Permitir sempre nesta sessão" vale por tipo (só salvar e
+  exportar), fica na memória da página e some ao recarregar. Sem ela, nenhum
+  pedido roda sozinho. Só cliques reais da pessoa valem: um clique simulado
+  por script é ignorado.
+- **`vct.status()`** devolve poucas linhas: pausado ou não, pedido pendente
+  (tipo e tempo), resultado do último pedido (`allowed`, `refused`, `done` ou
+  `failed` com um detalhe, como o nome do arquivo exportado) e o passo de
+  desfazer. O agente consulta de poucos em poucos segundos.
+- Tudo que o agente escreve (rótulos, `message`) é exibido como texto, nunca
+  como HTML.
+
+## Legenda automática (Whisper local)
+
+A aba **Mídia** tem o botão **Legendar automaticamente**. O áudio é decodificado
+no navegador, convertido para 16 kHz mono e transcrito por um Whisper rodando
+num Web Worker (Transformers.js; WebGPU quando há adaptador, senão WebAssembly).
+O áudio nunca sai da máquina. O resultado vira SRT, a pessoa revisa e edita o
+texto e **Inserir na timeline** aplica `text.fromSrt` num passo de desfazer
+("Legenda automática"); **Baixar .srt** salva o arquivo.
+
+- **Entrada:** o clipe selecionado (áudio, ou o áudio de um vídeo), uma mídia
+  do painel ou a mixagem da timeline. **Idioma:** Português (padrão), English,
+  Español ou detectar. **Modelo:** Rápido (`whisper-base`, cerca de 80 MB) ou
+  Preciso (`whisper-small`, cerca de 252 MB, melhor em português).
+- **De onde vem o modelo**, nesta ordem:
+  1. **Cache do navegador:** depois do primeiro download (Cache Storage
+     `transformers-cache`) não há mais aviso nem download.
+  2. **Pasta `models/` do servidor**, ao lado do `index.html`: nada vem da
+     internet. Depois de `npm run build`, rode `npm run models:whisper -- base`
+     (ou `small`); ele grava `dist/models/onnx-community/whisper-<tamanho>/…`.
+     Envie a pasta `models/` para o servidor (ex.: `public_html/models/`).
+     O pacote do Hostinger (`package:hostinger`) não inclui os modelos, que são grandes.
+  3. **Hugging Face:** se o modelo não está em nenhum dos dois, aparece o aviso
+     com nome, tamanho e fonte, e a pessoa escolhe **Baixar e legendar**,
+     **Usar arquivos do modelo (sem internet)** ou **Cancelar**.
+  4. **Importação manual:** em "Usar arquivos do modelo" a pessoa escolhe os
+     arquivos (ou a pasta) baixados de `huggingface.co/onnx-community/whisper-base`
+     (`config.json`, `generation_config.json`, `preprocessor_config.json`,
+     `tokenizer.json`, `tokenizer_config.json`, `onnx/encoder_model_quantized.onnx`,
+     `onnx/decoder_model_merged_quantized.onnx`). Eles vão para o mesmo cache do
+     navegador e o modelo carrega sem rede.
+- **Runtime:** os arquivos WebAssembly do ONNX Runtime vão no build em `ort/`
+  (cerca de 41 MB; só são baixados na primeira legenda) e nunca vêm de CDN. O
+  service worker não os pré-carrega, nem `models/`. O servidor precisa servir
+  `.mjs` como JavaScript e `.wasm` como `application/wasm` (o `.htaccess` do
+  projeto já faz isso) e a CSP precisa de `'wasm-unsafe-eval'` e `worker-src 'self'`.
+- **Agente:** `await vct.transcribe({ source?: "mix" | "<mídia do bin>", language?: "pt" | "en" | "es" | "auto", model?: "base" | "small" })`
+  volta na hora. Sem o modelo no navegador, a pessoa vê o aviso de download e o
+  texto devolvido diz isso. `vct.status()` ganha uma linha (aguardando a pessoa,
+  preparando, baixando %, transcrevendo N de M trechos, pronta, inserida,
+  cancelada, falhou) e `vct.transcript()` devolve o SRT em páginas (`more()`).
+  O agente aplica com `text.fromSrt`; a pessoa também pode inserir pelo diálogo.
+- **Testes:** a suíte usa um motor falso (`globalThis.__VCT_TRANSCRIBE_ENGINE__`,
+  ver `src/transcribe/protocol.ts`) e nunca baixa modelo.
+
 ## Limites atuais
 
 - API versionada como `window.vct.version === "1"`.
@@ -107,7 +183,8 @@ A lista completa de comandos, campos, limites e regras de tempo está em
   A ponte MCP local existe em `mcp/`, mas o editor atual não a conecta
   (decisão no Batch 5 de `PLANO-DE-ACAO.md`).
 - Corte, ripple, duplicar e remover clipes existem desde a 0.7.1. A API não
-  importa mídia, não salva e não exporta: isso continua com o usuário.
+  importa mídia, não salva e não exporta sozinha: tudo isso passa por
+  `vct.request` e pela confirmação da pessoa.
 - O modelo de projeto continua `.ntvct` v2. A API não muda seu formato.
 
 ## Editar com IA no navegador (recomendado)
@@ -131,7 +208,7 @@ teste), a página registra as ferramentas `vct_*` para agentes do navegador.
 ## Servidor MCP local (só no repositório)
 
 `mcp/vct-mcp-server.mjs` (`npm run mcp`) expõe as ferramentas `vct_*`, o guia
-(`vct://guia`) e os prompts `vct-edit`/`vct-critique` para clientes MCP, numa
+(`vct://guia`) e os prompts `vct-edit`/`vct-critique`/`vct-template`/`vct-how-to` para clientes MCP, numa
 ponte WebSocket local com código. **A interface do editor não oferece mais a
 conexão com esse servidor**; o código fica para uso futuro e para testes
 (`tests/unit/mcp-bridge.test.ts`). `npm run build:mcp` gera um pacote `.tgz`

@@ -531,6 +531,8 @@ test('mover áudio vinculado mantém o vídeo e os fades sincronizados', async (
     await page.mouse.up();
     await page.keyboard.up('Alt');
 
+    // O inspector é redesenhado depois do commit do gesto; espera o valor novo.
+    await expect.poll(async () => Number(await page.locator('[data-audio-property="startTime"]').inputValue())).toBeGreaterThan(layer.startTime + .1);
     const audioStart = Number(await page.locator('[data-audio-property="startTime"]').inputValue());
     const audioFadeInEnd = Number(await page.locator('[data-audio-property="fadeInEnd"]').inputValue());
     const shift = audioStart - layer.startTime;
@@ -538,6 +540,7 @@ test('mover áudio vinculado mantém o vídeo e os fades sincronizados', async (
     expect(audioFadeInEnd).toBeCloseTo(layer.fadeInEnd + shift, 2);
 
     await page.locator('.timeline-label-name[data-select-layer="linked-video"]').click();
+    await expect(page.locator('[data-layer-property="startTime"]')).toHaveValue(String(audioStart));
     const videoStart = Number(await page.locator('[data-layer-property="startTime"]').inputValue());
     const videoFadeInEnd = Number(await page.locator('[data-layer-property="fadeInEnd"]').inputValue());
     expect(videoStart).toBeCloseTo(audioStart, 2);
@@ -549,8 +552,7 @@ test('mover áudio vinculado mantém o vídeo e os fades sincronizados', async (
     await audioEndInput.fill('5.5');
     await audioEndInput.press('Enter');
     await page.locator('.timeline-label-name[data-select-layer="linked-video"]').click();
-    const videoEnd = Number(await page.locator('[data-layer-property="endTime"]').inputValue());
-    expect(videoEnd).toBeCloseTo(5.5, 2);
+    await expect(page.locator('[data-layer-property="endTime"]')).toHaveValue('5.5');
 
     const trimStart = page.locator('[data-trim-audio="linked-audio"][data-trim-edge="start"]');
     const trimBounds = await trimStart.boundingBox();
@@ -561,12 +563,14 @@ test('mover áudio vinculado mantém o vídeo e os fades sincronizados', async (
     await page.mouse.move(trimBounds.x + 32, trimBounds.y + trimBounds.height / 2, { steps: 4 });
     await page.mouse.up();
     await page.keyboard.up('Alt');
+    await expect.poll(async () => Number(await page.locator('[data-audio-property="startTime"]').inputValue())).toBeGreaterThan(audioStart + .05);
     const trimmedAudioStart = Number(await page.locator('[data-audio-property="startTime"]').inputValue());
     const trimmedAudioFadeEnd = Number(await page.locator('[data-audio-property="fadeInEnd"]').inputValue());
     // O fade-in fica ancorado no início do clipe e mantém 0,5 s depois do trim.
     expect(trimmedAudioFadeEnd - trimmedAudioStart).toBeCloseTo(.5, 2);
 
     await page.locator('.timeline-label-name[data-select-layer="linked-video"]').click();
+    await expect(page.locator('[data-layer-property="startTime"]')).toHaveValue(String(trimmedAudioStart));
     const trimmedVideoStart = Number(await page.locator('[data-layer-property="startTime"]').inputValue());
     const trimmedVideoFadeEnd = Number(await page.locator('[data-layer-property="fadeInEnd"]').inputValue());
     expect(trimmedVideoStart).toBeCloseTo(trimmedAudioStart, 2);
@@ -1176,6 +1180,24 @@ test('exportar com região de trabalho renderiza só os frames dela', async ({ b
     const frames = await exportFrames(page);
     expect(frames).toHaveLength(10);
     expect(frames[0].name).toContain('000001');
+  } finally {
+    await context.close();
+  }
+});
+
+test('régua da timeline reespaça os rótulos quando a janela fica estreita', async ({ browser }) => {
+  const { context, page } = await openEditor(browser, 'current');
+  try {
+    await page.locator('#new-project').click();
+    await page.locator('#setup-form [name="duration"]').fill('8');
+    await page.locator('#setup-form button[type="submit"]').click();
+    const overlaps = () => page.evaluate(() => {
+      const spans = [...document.querySelectorAll('.time-ruler span')].map((span) => span.getBoundingClientRect());
+      return spans.slice(1).filter((rect, index) => rect.left < spans[index].right + 4).length;
+    });
+    expect(await overlaps()).toBe(0);
+    await page.setViewportSize({ width: 640, height: 900 });
+    await expect.poll(overlaps).toBe(0);
   } finally {
     await context.close();
   }

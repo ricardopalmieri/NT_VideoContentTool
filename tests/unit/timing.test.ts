@@ -63,9 +63,11 @@ describe('timing histórico 0.6.2', () => {
     layer.sourceOut = 10;
     expect(sourceTimeFor(layer, 2, 10, 1)).toBe(9.999);
   });
-  it('zero em sourceIn usa sourceOffset; speed zero usa 1', () => {
+  it('zero em sourceIn é o início da mídia; sourceOffset só vale sem sourceIn; speed zero usa 1', () => {
     const layer = createLayer('video', settings, { sourceIn: 0, sourceOffset: 2 });
-    expect(sourceTimeFor(layer, 1, 10, 0)).toBe(3);
+    expect(sourceTimeFor(layer, 1, 10, 0)).toBe(1);
+    const legacy = { ...layer, sourceIn: undefined } as unknown as typeof layer;
+    expect(sourceTimeFor(legacy, 1, 10, 0)).toBe(3);
     expect(sourceTimeFor(layer, 1, 0, 1)).toBe(0);
   });
   it('snap desligado ainda arredonda para frame sem consultar DOM/alvos', () => {

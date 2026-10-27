@@ -39,6 +39,10 @@ export function resolveCommandTimes(command: unknown, settings: Pick<ProjectSett
   for (const field of TIME_FIELDS) {
     if (typeof copy[field] === "string") copy[field] = resolveMusicalTime(copy[field] as string, settings, field);
   }
+  // Listas de tempos das macros (fx.strobe times) também aceitam "beat:3".
+  if (Array.isArray(copy.times)) {
+    copy.times = copy.times.map((value, index) => typeof value === "string" ? resolveMusicalTime(value, settings, `times[${index}]`) : value);
+  }
   if (copy.props && typeof copy.props === "object" && !Array.isArray(copy.props)) {
     const props = { ...(copy.props as Record<string, unknown>) };
     for (const field of ["startTime", "endTime"]) if (typeof props[field] === "string") props[field] = resolveMusicalTime(props[field] as string, settings, field);

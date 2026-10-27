@@ -1,12 +1,19 @@
 {
+  "id": "./",
+  "scope": "./",
   "name": "Noisetupi Video Content Tool",
   "short_name": "Noisetupi VCT",
-  "description": "Motion graphics e conteúdo para videomapping no navegador. Build 0.7.1.",
+  "description": "Motion graphics e conteúdo para videomapping no navegador.",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#000000",
   "theme_color": "#080808",
   "icons": [
-    { "src": "logo-simple.png", "sizes": "512x512", "type": "image/png" }
+    {
+      "src": "logo-simple.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
   ]
 }

@@ -39,15 +39,27 @@ function videoInfo(url: string) {
   });
 }
 
+/**
+ * Loads an image and waits for "load". decode() is not used: in Chromium it does not
+ * resolve while the tab is in the background, which froze imports until the person came back.
+ */
+export function loadImage(url: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.addEventListener("load", () => resolve(image), { once: true });
+    image.addEventListener("error", () => reject(new Error("Formato de imagem não suportado neste navegador.")), { once: true });
+    image.src = url;
+  });
+}
+
 async function imageInfo(url: string) {
-  const image = new Image();
-  image.src = url;
-  await image.decode();
+  const image = await loadImage(url);
   const canvas = document.createElement("canvas");
   canvas.width = THUMB_WIDTH;
   canvas.height = Math.max(1, Math.round(THUMB_WIDTH * image.naturalHeight / Math.max(1, image.naturalWidth)));
   canvas.getContext("2d")?.drawImage(image, 0, 0, canvas.width, canvas.height);
-  return { width: image.naturalWidth, height: image.naturalHeight, thumb: canvas.toDataURL("image/jpeg", .7) };
+  // WebP mantém a transparência na miniatura (onde não houver WebP, o navegador devolve PNG).
+  return { width: image.naturalWidth, height: image.naturalHeight, thumb: canvas.toDataURL("image/webp", .8) };
 }
 
 /** Technical metadata for a file already registered under `asset`. */

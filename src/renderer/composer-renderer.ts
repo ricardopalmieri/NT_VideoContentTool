@@ -1,4 +1,4 @@
-import { vertexSource, fragmentSource } from "./shaders";
+import { vertexSource, fragmentSource, compositeFragmentSource } from "./shaders";
 import { sourceTimeFor } from "./source-time";
 import { shouldSeekVideo } from "./video-seek";
 import { fadeEnvelope } from "../timeline/timing";
@@ -12,6 +12,23 @@ interface Target {
   texture: WebGLTexture;
 }
 
+// Raster pré-efeitos de uma layer parada, já na GPU; `key` descreve tudo que o desenhou.
+interface RasterEntry {
+  texture: WebGLTexture;
+  key: string;
+  media?: object;
+  bytes: number;
+}
+
+// Campos que não mudam o raster: opacidade, fade e blend entram só no composite.
+const RASTER_IGNORED_FIELDS = new Set([
+  "name", "visible", "locked", "exportable", "keyframes", "effects", "opacity", "blendMode", "fadeInStart", "fadeInEnd",
+  "fadeOutStart", "fadeOutEnd", "scaleLocked", "sizeLocked", "trackId", "transition", "playbackRate", "reverse", "loop",
+]);
+const POSITION_LOCATION = 0;
+const RASTER_CACHE_MAX_LAYERS = 32;
+const RASTER_CACHE_MAX_BYTES = 256 * 1024 * 1024;
+
 interface EffectHistory {
   targets: Target[];
   writeIndex: number;
@@ -23,6 +40,8 @@ export class ComposerRenderer {
   readonly canvas: HTMLCanvasElement;
   private gl: WebGL2RenderingContext;
   private program: WebGLProgram;
+  // Só o composite (sem efeito): evita o shader de efeitos inteiro por pixel.
+  private compositeProgram: WebGLProgram;
   private sourceTexture: WebGLTexture;
   private targets: Target[] = [];
   private compTarget!: Target;
@@ -33,14 +52,24 @@ export class ComposerRenderer {
   private videoFrameCacheTime = new Map<string, number>();
   private project!: ProjectDocument;
   private uniforms = new Map<string, WebGLUniformLocation>();
+  private compositeUniforms = new Map<string, WebGLUniformLocation>();
   private effectHistories = new Map<string, EffectHistory>();
+  // Ordem de inserção = ordem de uso: a primeira entrada é a menos usada.
+  private rasterCache = new Map<string, RasterEntry>();
+  private rasterCacheBytes = 0;
+  private fontGeneration = 0;
+  private readonly handleFontsLoaded = () => { this.fontGeneration++; };
   private previewScale = 1;
+  private exportScale = 1;
   private activeScale = 1;
   private previewPlaying = false;
   private contextLost = false;
   private readonly handleContextLost = (event: Event) => {
     event.preventDefault();
     this.contextLost = true;
+    // Os recursos de GPU morreram com o contexto; não há o que apagar.
+    this.rasterCache.clear();
+    this.rasterCacheBytes = 0;
     this.invalidate();
   };
   private readonly handleContextRestored: () => void;
@@ -61,18 +90,23 @@ export class ComposerRenderer {
     if (!gl) throw new Error("WebGL2 is required.");
     this.gl = gl;
     this.program = this.createProgram(vertexSource, fragmentSource);
+    this.compositeProgram = this.createProgram(vertexSource, compositeFragmentSource);
     this.sourceTexture = this.createTexture();
     const buffer = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
-    const location = gl.getAttribLocation(this.program, "a_position");
-    gl.enableVertexAttribArray(location);
-    gl.vertexAttribPointer(location, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(POSITION_LOCATION);
+    gl.vertexAttribPointer(POSITION_LOCATION, 2, gl.FLOAT, false, 0, 0);
     for (const name of ["u_texture", "u_texture_r", "u_texture_g", "u_texture_b", "u_resolution", "u_time", "u_effect", "u_mix", "u_opacity", "u_darken", ...Array.from({ length: 8 }, (_, i) => `u_p${i}`)]) {
       this.uniforms.set(name, gl.getUniformLocation(this.program, name)!);
     }
+    for (const name of ["u_texture", "u_opacity", "u_darken"]) {
+      this.compositeUniforms.set(name, gl.getUniformLocation(this.compositeProgram, name)!);
+    }
     canvas.addEventListener("webglcontextlost", this.handleContextLost);
     canvas.addEventListener("webglcontextrestored", this.handleContextRestored);
+    // Texto desenhado com a fonte de reserva não pode ficar preso no cache.
+    document.fonts?.addEventListener("loadingdone", this.handleFontsLoaded);
   }
 
   setProject(project: ProjectDocument, _root: string) {
@@ -87,6 +121,11 @@ export class ComposerRenderer {
 
   setPreviewScale(scale: number) {
     this.previewScale = Math.max(.25, Math.min(1, scale));
+  }
+
+  // Resolução de saída da exportação (fração da composição); 1 mantém o render em 100%.
+  setExportScale(scale: number) {
+    this.exportScale = Math.max(.1, Math.min(1, Number.isFinite(scale) ? scale : 1));
   }
 
   private resizeRenderSurface(scale: number) {
@@ -200,6 +239,7 @@ export class ComposerRenderer {
       item.load();
     }
     this.media.delete(id);
+    this.dropRasterEntry(id);
     this.videoFrameCache.delete(id);
     this.videoFrameCacheTime.delete(id);
   }
@@ -207,9 +247,11 @@ export class ComposerRenderer {
   dispose() {
     this.canvas.removeEventListener("webglcontextlost", this.handleContextLost);
     this.canvas.removeEventListener("webglcontextrestored", this.handleContextRestored);
+    document.fonts?.removeEventListener("loadingdone", this.handleFontsLoaded);
     for (const id of [...this.media.keys()]) this.removeMedia(id);
     if (this.contextLost) return;
     this.clearEffectHistories();
+    this.clearRasterCache();
     const gl = this.gl;
     const renderTargets = this.compTarget ? [...this.targets, this.compTarget] : this.targets;
     for (const target of renderTargets) {
@@ -219,6 +261,7 @@ export class ComposerRenderer {
     this.targets = [];
     gl.deleteTexture(this.sourceTexture);
     gl.deleteProgram(this.program);
+    gl.deleteProgram(this.compositeProgram);
   }
 
   mediaDuration(id: string) {
@@ -272,6 +315,7 @@ export class ComposerRenderer {
     const program = gl.createProgram()!;
     gl.attachShader(program, compile(gl.VERTEX_SHADER, vertex));
     gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragment));
+    gl.bindAttribLocation(program, POSITION_LOCATION, "a_position");
     gl.linkProgram(program);
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || "Shader link error");
     gl.useProgram(program);
@@ -315,6 +359,19 @@ export class ComposerRenderer {
     this.targets = [this.createTarget(), this.createTarget()];
     this.compTarget = this.createTarget();
     this.clearEffectHistories();
+    this.clearRasterCache();
+  }
+
+  private dropRasterEntry(id: string) {
+    const entry = this.rasterCache.get(id);
+    if (!entry) return;
+    if (!this.contextLost) this.gl.deleteTexture(entry.texture);
+    this.rasterCacheBytes -= entry.bytes;
+    this.rasterCache.delete(id);
+  }
+
+  private clearRasterCache() {
+    for (const id of [...this.rasterCache.keys()]) this.dropRasterEntry(id);
   }
 
   private clearEffectHistories() {
@@ -397,9 +454,17 @@ export class ComposerRenderer {
         video.removeEventListener("abort", fail);
         resolve(ready);
       };
+      let presenting = false;
       const checkReady = () => {
-        if (video.readyState >= 2 && !video.seeking && !shouldSeekVideo(video.currentTime, target)) finish(true);
+        if (presenting || video.readyState < 2 || video.seeking || shouldSeekVideo(video.currentTime, target)) return;
+        // "seeked" pode chegar antes de o quadro novo estar pronto para drawImage;
+        // o callback de quadro garante que ele foi apresentado.
+        if (!seekIssued || !("requestVideoFrameCallback" in video)) return finish(true);
+        presenting = true;
+        const fallback = window.setTimeout(() => finish(true), 150);
+        video.requestVideoFrameCallback(() => { window.clearTimeout(fallback); finish(true); });
       };
+      let seekIssued = false;
       const fail = () => finish(false);
       const timeout = window.setTimeout(fail, 1500);
       video.addEventListener("seeked", checkReady);
@@ -407,6 +472,7 @@ export class ComposerRenderer {
       video.addEventListener("error", fail);
       video.addEventListener("abort", fail);
       if (shouldSeekVideo(video.currentTime, target)) {
+        seekIssued = true;
         video.currentTime = target;
       } else if (video.readyState >= 2) {
         checkReady();
@@ -693,6 +759,16 @@ export class ComposerRenderer {
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, target?.framebuffer || null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    if (!effect && !channels) {
+      gl.useProgram(this.compositeProgram);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.uniform1i(this.compositeUniforms.get("u_texture")!, 0);
+      gl.uniform1f(this.compositeUniforms.get("u_opacity")!, opacity);
+      gl.uniform1f(this.compositeUniforms.get("u_darken")!, darken ? 1 : 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      return;
+    }
     gl.useProgram(this.program);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -785,13 +861,75 @@ export class ComposerRenderer {
     else this.ctx.clearRect(0, 0, width * (1 - transition.reveal.amount), height);
   }
 
-  private compositeRaster(layer: Layer, effects: EffectNode[], time: number, transitionOpacity = 1) {
+  private uploadRaster(texture: WebGLTexture) {
     const gl = this.gl;
-    gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.raster);
-    let current = this.sourceTexture;
+  }
+
+  // Chave do raster de uma layer parada, ou null quando ele muda a cada quadro (vídeo)
+  // ou ainda não pode ser desenhado (imagem carregando). Tudo que rasterize() lê entra
+  // aqui: campos da layer, valores avaliados dos keyframes, escala, deslocamento e cortina.
+  private rasterKey(layer: Layer, time: number, offsetX: number, transition: TransitionState) {
+    if (layer.kind !== "text" && layer.kind !== "geometry") {
+      const media = this.media.get(layer.id);
+      if (!(media instanceof HTMLImageElement) || !media.complete || !media.naturalWidth) return null;
+    }
+    let key = JSON.stringify(layer, (name, value) => RASTER_IGNORED_FIELDS.has(name) ? undefined : value);
+    for (const [property, keys] of Object.entries(layer.keyframes)) {
+      if (!keys.length) continue;
+      key += property.endsWith("Color")
+        ? `|${property}=${this.evaluatedColor(layer, property.slice(0, -5) as "fill" | "stroke", time)}`
+        : `|${property}=${this.evaluated(layer, property as keyof Layer, time)}`;
+    }
+    const reveal = transition.reveal && transition.reveal.amount < 1 ? `${transition.reveal.from}${transition.reveal.amount}` : "";
+    return `${this.canvas.width}x${this.canvas.height}@${this.activeScale}|f${this.fontGeneration}|${offsetX}|${reveal}|${key}`;
+  }
+
+  /**
+   * Paints the layer into the raster and uploads it, or reuses the texture of the
+   * previous frame when nothing that affects the raster changed. Returns the
+   * texture to feed the effect passes, or null when the layer could not be drawn.
+   */
+  private async layerTexture(layer: Layer, time: number, exporting: boolean, transition: TransitionState) {
+    const key = this.rasterKey(layer, time, transition.offsetX, transition);
+    const media = key ? this.media.get(layer.id) : undefined;
+    const cached = key ? this.rasterCache.get(layer.id) : undefined;
+    if (cached && cached.key === key && cached.media === media) {
+      this.rasterCache.delete(layer.id);
+      this.rasterCache.set(layer.id, cached);
+      return cached.texture;
+    }
+    if (!await this.rasterize(layer, time, exporting, 1, transition.offsetX, 0)) return null;
+    this.applyReveal(transition);
+    if (!key) {
+      this.uploadRaster(this.sourceTexture);
+      return this.sourceTexture;
+    }
+    const bytes = this.raster.width * this.raster.height * 4;
+    const entry: RasterEntry = cached ?? { texture: this.createTexture(), key, media, bytes };
+    if (cached) {
+      this.rasterCache.delete(layer.id);
+      entry.key = key;
+      entry.media = media;
+    } else {
+      this.rasterCacheBytes += bytes;
+    }
+    this.rasterCache.set(layer.id, entry);
+    this.uploadRaster(entry.texture);
+    // Evict the least recently used layers, never the one just painted.
+    for (const id of this.rasterCache.keys()) {
+      if (this.rasterCache.size <= RASTER_CACHE_MAX_LAYERS && this.rasterCacheBytes <= RASTER_CACHE_MAX_BYTES) break;
+      if (id !== layer.id) this.dropRasterEntry(id);
+    }
+    return entry.texture;
+  }
+
+  private compositeRaster(layer: Layer, effects: EffectNode[], time: number, source: WebGLTexture, transitionOpacity = 1) {
+    const gl = this.gl;
+    let current = source;
     let index = 0;
     gl.disable(gl.BLEND);
     for (const effect of effects) {
@@ -843,7 +981,7 @@ export class ComposerRenderer {
       throw new Error("WebGL context was lost. Restore the browser tab before rendering.");
     }
     this.notReady.clear();
-    this.ensureRenderScale(exporting ? 1 : this.previewScale);
+    this.ensureRenderScale(exporting ? this.exportScale : this.previewScale);
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.compTarget.framebuffer);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
@@ -860,9 +998,8 @@ export class ComposerRenderer {
       const trail = enabledEffects.find((effect) => effect.kind === "feedback");
       const visualEffects = enabledEffects.filter((effect) => effect !== trail);
       if (!trail) {
-        const ready = await this.rasterize(layer, time, exporting, 1, transition.offsetX, 0);
-        if (ready) this.applyReveal(transition);
-        if (ready) this.compositeRaster(layer, visualEffects, time, transition.opacity);
+        const texture = await this.layerTexture(layer, time, exporting, transition);
+        if (texture) this.compositeRaster(layer, visualEffects, time, texture, transition.opacity);
         else if (exporting) throw new Error(`Não foi possível renderizar a mídia da layer "${layer.name}".`);
         else this.notReady.add(layer.id);
         continue;
@@ -886,10 +1023,18 @@ export class ComposerRenderer {
           offsetY * index,
         );
         if (ready) this.applyReveal(transition);
-        if (ready) this.compositeRaster(layer, visualEffects, time, transition.opacity);
-        else if (exporting) throw new Error(`Não foi possível renderizar a mídia da layer "${layer.name}" no frame ${Math.round(sampleTime * this.project.settings.fps)}.`);
+        if (ready) {
+          this.uploadRaster(this.sourceTexture);
+          this.compositeRaster(layer, visualEffects, time, this.sourceTexture, transition.opacity);
+        } else if (exporting) throw new Error(`Não foi possível renderizar a mídia da layer "${layer.name}" no frame ${Math.round(sampleTime * this.project.settings.fps)}.`);
         else this.notReady.add(layer.id);
       }
+    }
+
+    // Layers apagadas do projeto não ficam ocupando memória de vídeo.
+    if (this.rasterCache.size) {
+      const ids = new Set(this.project.layers.map((layer) => layer.id));
+      for (const id of [...this.rasterCache.keys()]) if (!ids.has(id)) this.dropRasterEntry(id);
     }
 
     gl.disable(gl.BLEND);
