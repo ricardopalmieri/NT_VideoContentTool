@@ -1107,3 +1107,7 @@ button { transition: color 120ms ease, background-color 120ms ease, border-color
 /* Importar várias mídias. */
 .tool-grid .import-many-button { grid-column: 1 / -1; min-height: 34px; border-style: dashed; color: var(--quiet); }
 body.is-dropping-media .editor-app::after { content: "Solte para importar as mídias"; position: fixed; z-index: 60; inset: 12px; display: grid; place-items: center; border: 2px dashed var(--red); border-radius: var(--radius-panel); background: rgba(8,8,8,.72); color: var(--ink); font-size: 18px; pointer-events: none; }
+.agent-steps { display: grid; gap: 8px; margin: 0; padding-left: 20px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.agent-steps b { color: var(--ink); font-weight: 500; }
+.agent-dialog textarea { min-height: 96px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-control); background: #0b0b0a; color: var(--ink); font: 12px/1.5 "IBM Plex Mono", monospace; resize: vertical; }
+.agent-note { margin: 0; color: var(--quiet); font-size: 12px; line-height: 1.5; }

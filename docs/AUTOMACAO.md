@@ -92,32 +92,29 @@ manuais continuam disponíveis normalmente pela interface.
   camadas; essas operações exigem contratos e confirmação próprios.
 - O modelo de projeto continua `.ntvct` v2. A API não muda seu formato.
 
-## Agentes de IA fora do navegador (MCP)
+## Editar com IA no navegador (recomendado)
 
-Um agente como o Claude Code ou o Claude Desktop pode editar o projeto aberto
-pelo servidor MCP local:
+O caminho para quem usa o site é um agente que roda no próprio navegador e
+executa JavaScript na página, como a extensão **Claude in Chrome**:
 
-1. Na pasta do projeto: `npm ci` (uma vez). Depois `npm run mcp`, ou deixe o
-   Claude Code iniciar o servidor sozinho pelo `.mcp.json` do repositório.
-2. O servidor mostra o endereço (`ws://127.0.0.1:47811`) e um **código**. A
-   ferramenta `vct_connection_info` devolve também um link pronto.
-3. No editor, abra um projeto, clique no botão **Agente** (robô) da barra
-   superior, confira o endereço e o código e clique em **Conectar**.
-4. Uma faixa "AGENTE CONECTADO" fica visível, com o botão **Desconectar**.
+1. No editor, clique no botão **Editar com IA** (robô) da barra superior.
+2. Siga o passo a passo e clique em **Copiar instruções**.
+3. Cole no painel do Claude nesta aba e complete com o pedido.
 
-Ferramentas: `vct_connection_info`, `vct_describe`, `vct_get_timeline`,
-`vct_get_project`, `vct_validate`, `vct_list_catalog`, `vct_dry_run`,
-`vct_apply`, `vct_undo`, `vct_redo` e `vct_capture_frame`.
+O agente lê `window.vct.guide()` (fluxo, regras, motion design e VJ) e edita
+pela API (`getTimeline`, `dryRun`, `batch`). Cada lote é um passo de desfazer.
+Nada é enviado para servidores da Noisetupi. Agentes que só clicam e veem
+screenshots também funcionam, mas gastam muito mais tokens
+(`docs/BENCHMARK-TOKENS.md`).
 
-**Segurança:**
-- O servidor escuta só em 127.0.0.1 e exige o código (comparação em tempo constante).
-- Aceita só origens `https://noisetupi.com.br` e `localhost`/`127.0.0.1`.
-- A página só conecta com o clique do usuário, só fala com endereço local, aceita uma lista fechada de métodos (sem arquivos, salvar ou exportar) e limita os pedidos a 20 por segundo.
-- Remoções pedem confirmação na página.
+**WebMCP:** se o navegador oferecer `navigator.modelContext` (Chrome, em
+teste), a página registra as ferramentas `vct_*` para agentes do navegador.
 
-**WebMCP:** se o navegador oferecer `navigator.modelContext` (Chrome, em teste),
-a página registra as mesmas ferramentas `vct_*` para agentes do próprio navegador.
+## Servidor MCP local (só no repositório)
 
-**Prompt e skills:** `agents/PROMPT.md` (portátil), `agents/skills/vct-edit` e
-`agents/skills/vct-critique`. Economia de tokens medida em
-`docs/BENCHMARK-TOKENS.md`.
+`mcp/vct-mcp-server.mjs` (`npm run mcp`) expõe as ferramentas `vct_*`, o guia
+(`vct://guia`) e os prompts `vct-edit`/`vct-critique` para clientes MCP, numa
+ponte WebSocket local com código. **A interface do editor não oferece mais a
+conexão com esse servidor**; o código fica para uso futuro e para testes
+(`tests/unit/mcp-bridge.test.ts`). `npm run build:mcp` gera um pacote `.tgz`
+instalável com `npx`.

@@ -2,6 +2,11 @@
 
 ## Rodada 6 — edição com IA (MCP)
 
+- **Editar com IA pelo navegador:** o botão da barra superior abre um passo a
+  passo para usar o Claude in Chrome (ou outro agente que execute JavaScript na
+  página), com "Copiar instruções". O guia para o agente fica em
+  `window.vct.guide()`. A conexão com servidor MCP local saiu da interface.
+
 - **Importar vários arquivos de uma vez:** botão "Importar vários…" (vídeos,
   imagens e áudios) ou arrastar os arquivos para o editor. Visuais entram em
   sequência numa faixa nova a partir do playhead (imagens com 3 s, ordem por

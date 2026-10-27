@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "noisetupi-vct": {
-      "command": "node",
-      "args": ["mcp/vct-mcp-server.mjs"]
-    }
-  }
-}

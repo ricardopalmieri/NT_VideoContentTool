@@ -11,6 +11,7 @@
 // Variáveis: VCT_BRIDGE_PORT (47811), VCT_BRIDGE_TOKEN (aleatório),
 // VCT_EDITOR_URL, VCT_ALLOWED_ORIGINS (lista separada por vírgula).
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocketServer } from "ws";
@@ -116,6 +117,16 @@ function callPage(method, params = {}) {
   });
 }
 
+// ---- Guia e skills ------------------------------------------------------------
+// No pacote publicado (npx) os textos vêm embutidos pelo build; no repositório,
+// são lidos de agents/. Assim qualquer cliente MCP recebe a skill do VCT.
+/* global __VCT_GUIDES__ */
+async function guide(name) {
+  if (typeof __VCT_GUIDES__ !== "undefined") return __VCT_GUIDES__[name] || "";
+  return readFile(new URL(`../agents/${name}`, import.meta.url), "utf8").catch(() => "");
+}
+const stripFrontMatter = (text) => text.replace(/^---[\s\S]*?---\s*/, "");
+
 // ---- Ferramentas MCP ----------------------------------------------------------
 // Respostas em JSON compacto: menos tokens para o agente.
 const asText = (value) => ({ content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }] });
@@ -129,8 +140,33 @@ const server = new McpServer({ name: "noisetupi-vct", version: "0.7.0" }, {
   instructions: "Edite vídeos no Noisetupi Video Content Tool aberto no navegador do usuário. "
     + "Fluxo: vct_describe (uma vez) → vct_get_timeline → planeje → vct_dry_run → vct_apply (um lote por intenção, com label) "
     + "→ vct_capture_frame para conferir → ajuste. Prefira vct_get_timeline a vct_get_project. "
-    + "Remoções pedem confirmação na página. Nunca invente ids: leia da timeline.",
+    + "Remoções pedem confirmação na página. Nunca invente ids: leia da timeline. "
+    + "Guia completo (motion design, VJ, safe areas): ferramenta vct_guide ou recurso vct://guia.",
 });
+
+server.registerResource("guia", "vct://guia", {
+  title: "Guia do Noisetupi VCT para agentes",
+  description: "Fluxo econômico em tokens, regras do editor e vocabulário de motion design e VJ.",
+  mimeType: "text/markdown",
+}, async (uri) => ({ contents: [{ uri: uri.href, mimeType: "text/markdown", text: await guide("PROMPT.md") }] }));
+
+server.registerPrompt("vct-edit", {
+  title: "Editar vídeo no VCT",
+  description: "Edita o projeto aberto no Noisetupi VCT (cortes, faixas, transições, textos).",
+  argsSchema: { pedido: z.string().describe("O que editar, em linguagem natural.") },
+}, async ({ pedido }) => ({ messages: [{ role: "user", content: { type: "text",
+  text: `${stripFrontMatter(await guide("skills/vct-edit/SKILL.md"))}\n\n${await guide("PROMPT.md")}\n\nPedido do usuário: ${pedido}` } }] }));
+
+server.registerPrompt("vct-critique", {
+  title: "Revisar a edição no VCT",
+  description: "Revisa ritmo, hierarquia, legibilidade e transições e propõe ajustes sem aplicar.",
+}, async () => ({ messages: [{ role: "user", content: { type: "text",
+  text: `${stripFrontMatter(await guide("skills/vct-critique/SKILL.md"))}\n\n${await guide("PROMPT.md")}` } }] }));
+
+server.registerTool("vct_guide", {
+  description: "Guia do VCT para agentes (fluxo, regras, motion design e VJ). Leia antes da primeira edição se o cliente não carregou o recurso vct://guia.",
+  annotations: { readOnlyHint: true },
+}, async () => asText(await guide("PROMPT.md")));
 
 server.registerTool("vct_connection_info", {
   title: "Conexão com o editor",

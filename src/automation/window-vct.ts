@@ -4,6 +4,7 @@ import { validateProjectDocument } from "../model/validate-project";
 import type { ProjectDocument } from "../model/types";
 import { audioLanes, visualTracks } from "../model/clip-tracks";
 import { EDITING_COMMANDS } from "../model/editing-commands";
+import { AGENT_GUIDE } from "./agent-guide";
 
 function timelineSummary(project: ProjectDocument) {
   return structuredClone({
@@ -33,6 +34,8 @@ export interface VctChangeEvent {
 export interface VctApi {
   readonly version: "1";
   getProject(): ProjectDocument;
+  /** Guia para agentes de IA: fluxo, regras do editor, motion design e VJ. */
+  guide(): string;
   describe(): { version: string; timeUnit: string; maxBatchSize: number; editingCommands: typeof EDITING_COMMANDS; methods: string[]; limitations: string[] };
   getTimeline(): ReturnType<typeof timelineSummary>;
   dryRun(commands: readonly VctCommand[]): { results: readonly unknown[]; timeline: ReturnType<typeof timelineSummary>; requiresConfirmation: boolean };
@@ -106,10 +109,11 @@ export function createVctApi(host: VctApiHost): VctApi {
   const api: VctApi = {
     version: "1",
     getProject: () => structuredClone(activeProject(host)),
+    guide: () => AGENT_GUIDE,
     describe: () => structuredClone({
       version: '1', timeUnit: 'seconds', maxBatchSize: 100, editingCommands: EDITING_COMMANDS,
-      methods: ['getTimeline', 'getProject', 'query', 'validate', 'listCatalog', 'dryRun', 'dispatch', 'batch', 'undo', 'redo', 'captureFrame', 'onChange'],
-      limitations: ['Existing open project required', 'Agents outside the page connect only through the local MCP bridge the user enables in the page', 'No file access/import/export', 'New clip timings must fit composition and align to frames', 'Split video requires explicit sourceOut and loop disabled', 'Deletion requires confirmation in page'],
+      methods: ['guide', 'getTimeline', 'getProject', 'query', 'validate', 'listCatalog', 'dryRun', 'dispatch', 'batch', 'undo', 'redo', 'captureFrame', 'onChange'],
+      limitations: ['Existing open project required', 'Runs inside the page: agents execute JavaScript in this tab (e.g. Claude in Chrome)', 'No file access/import/export', 'New clip timings must fit composition and align to frames', 'Split video requires explicit sourceOut and loop disabled', 'Deletion requires confirmation in page'],
     }),
     getTimeline: () => timelineSummary(activeProject(host)),
     dryRun: commands => {
