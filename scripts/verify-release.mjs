@@ -14,7 +14,8 @@ const checks = [
   [Boolean(archive["LICENSE"] && archive["NOTICE"] && archive["THIRD_PARTY_LICENSES.md"] && archive["TRADEMARKS.md"]), "avisos legais no pacote"],
   [Boolean(archive["LICENSES/MPL-2.0.txt"] && archive["LICENSES/fflate-MIT.txt"]), "textos completos MPL e MIT"],
   [["ibm-plex-mono", "ibm-plex-sans", "inter", "space-grotesk", "syne"].every((font) => Boolean(archive[`LICENSES/${font}-OFL-1.1.txt`])), "cinco avisos OFL"],
-  [script.includes("© 2026 Noisetupi") && script.includes("Mozilla Public"), "comentários legais preservados no JavaScript"],
+  // O Mediabunny (MPL) é carregado só na exportação, então os avisos dele ficam em outro arquivo de assets/.
+  [script.includes("© 2026 Noisetupi") && Object.keys(archive).some((path) => /^assets\/.*\.js$/.test(path) && strFromU8(archive[path]).includes("Mozilla Public")), "comentários legais preservados no JavaScript"],
   [version.version === expectedVersion, `version.json ${expectedVersion}`],
   [index.includes(`application-version" content="${expectedVersion}`), `index identificado como ${expectedVersion}`],
   [index.includes(scriptPath), "index aponta para o bundle atual"],
