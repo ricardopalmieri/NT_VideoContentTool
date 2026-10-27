@@ -1,4 +1,5 @@
 import { AUDIO_EFFECT_KINDS, EFFECT_KINDS } from "./effect-catalog";
+import { isTransitionType } from "./transitions";
 import type { ProjectDocument } from "./types";
 
 const inputKinds = new Set(["image", "video", "guide", "geometry", "text"]);
@@ -123,6 +124,18 @@ export function validateProjectDocument(value: unknown) {
     else if (ids.has(layer.id)) issues.push(`${path}.id duplicado: ${layer.id}.`);
     else ids.add(layer.id);
     if (typeof layer.name !== "string" || !layer.name.trim()) issues.push(`${path}.name é obrigatório.`);
+    if (layer.trackId !== undefined && (typeof layer.trackId !== "string" || !layer.trackId.trim())) {
+      issues.push(`${path}.trackId deve ser um texto não vazio.`);
+    }
+    if (layer.transition !== undefined) {
+      if (!isRecord(layer.transition)
+        || !isTransitionType(layer.transition.type)
+        || !hasFiniteNumber(layer.transition.duration)
+        || layer.transition.duration < 0
+        || layer.transition.duration > maxDuration) {
+        issues.push(`${path}.transition é inválida.`);
+      }
+    }
     for (const key of ["visible", "locked", "exportable", "reverse", "loop", "scaleLocked", "sizeLocked", "fillEnabled", "strokeEnabled"]) {
       if (typeof layer[key] !== "boolean") issues.push(`${path}.${key} deve ser booleano.`);
     }
@@ -160,6 +173,9 @@ export function validateProjectDocument(value: unknown) {
     else if (ids.has(track.id)) issues.push(`${path}.id duplicado: ${track.id}.`);
     else ids.add(track.id);
     if (typeof track.name !== "string" || typeof track.asset !== "string" || !track.asset) issues.push(`${path} precisa de nome e referência de mídia.`);
+    if (track.laneId !== undefined && (typeof track.laneId !== "string" || !track.laneId.trim())) {
+      issues.push(`${path}.laneId deve ser um texto não vazio.`);
+    }
     for (const key of ["linked", "muted", "reverse", "loop"]) {
       if (typeof track[key] !== "boolean") issues.push(`${path}.${key} deve ser booleano.`);
     }
