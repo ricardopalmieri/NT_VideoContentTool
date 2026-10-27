@@ -579,6 +579,9 @@ test('autosave recupera projeto e blobs de mídia após abrir uma nova sessão',
     await expect(recoveryPage.locator('#missing-media')).toHaveCount(0);
     await expect(recoveryPage.locator('#status-text')).toContainText('PROJETO RECUPERADO');
     await save(recoveryPage);
+    // O snapshot de recuperação é apagado depois do download; em CI lento,
+    // fechar a aba antes disso deixava a recuperação no IndexedDB.
+    await expect(recoveryPage.locator('#status-text')).toContainText('PROJETO SALVO', { timeout: 10_000 });
     await recoveryPage.close();
 
     const welcomePage = await context.newPage();
