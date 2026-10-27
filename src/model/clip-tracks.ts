@@ -140,17 +140,17 @@ export interface SplitResult {
 
 // Divide a layer no tempo dado. Keyframes ficam nas duas partes (tempo absoluto),
 // então a animação continua contínua. Áudio vinculado é dividido junto.
-export function splitClip(project: ProjectDocument, layerId: string, time: number, mediaDuration = 0, minLength = 1 / 60): SplitResult | null {
+export function splitClip(project: ProjectDocument, layerId: string, time: number, mediaDuration = 0, minLength = 1 / 60, newId: (prefix: string) => string = uid): SplitResult | null {
   const index = project.layers.findIndex((item) => item.id === layerId);
   const first = project.layers[index];
   if (!first || time <= first.startTime + minLength || time >= first.endTime - minLength) return null;
   const media = first.kind === "video" ? mediaDuration : 0;
   const second = structuredClone(first);
-  second.id = uid("layer");
+  second.id = newId("layer");
   second.trackId = trackIdOf(first);
   // O corte cria uma borda seca; a entrada pertence à primeira parte.
   delete second.transition;
-  second.effects.forEach((effect) => effect.id = uid("fx"));
+  second.effects.forEach((effect) => effect.id = newId("fx"));
   splitTiming(first, second, time, media, first.kind === "video");
   project.layers.splice(index + 1, 0, second);
 
@@ -158,10 +158,10 @@ export function splitClip(project: ProjectDocument, layerId: string, time: numbe
     if (!audio.linked || audio.linkedLayerId !== first.id) continue;
     const audioIndex = project.audioTracks.indexOf(audio);
     const audioSecond = structuredClone(audio);
-    audioSecond.id = uid("audio");
+    audioSecond.id = newId("audio");
     audioSecond.laneId = laneIdOf(audio);
     audioSecond.linkedLayerId = second.id;
-    audioSecond.effects.forEach((effect) => effect.id = uid("afx"));
+    audioSecond.effects.forEach((effect) => effect.id = newId("afx"));
     splitTiming(audio, audioSecond, time, media || audio.sourceOut);
     project.audioTracks.splice(audioIndex + 1, 0, audioSecond);
   }
@@ -233,7 +233,7 @@ export function copyClips(project: ProjectDocument, layerIds: string[]): Clipboa
 
 // Cola no playhead: o clipe mais cedo começa em `time`. Cada clipe volta para a
 // faixa original se ela existir e estiver livre; senão ganha uma faixa nova no topo.
-export function pasteClips(project: ProjectDocument, clipboard: ClipboardClips, time: number) {
+export function pasteClips(project: ProjectDocument, clipboard: ClipboardClips, time: number, newId: (prefix: string) => string = uid) {
   if (!clipboard.layers.length) return [];
   const delta = time - Math.min(...clipboard.layers.map((layer) => layer.startTime));
   const pasted: Layer[] = [];
@@ -241,14 +241,14 @@ export function pasteClips(project: ProjectDocument, clipboard: ClipboardClips, 
   for (const layer of copy.layers) {
     const originalId = layer.id;
     const originalTrack = trackIdOf(layer);
-    layer.id = uid("layer");
-    layer.effects.forEach((effect) => effect.id = uid("fx"));
+    layer.id = newId("layer");
+    layer.effects.forEach((effect) => effect.id = newId("fx"));
     const pastedAudio: Array<{ track: AudioTrack; lane: string }> = [];
     for (const track of copy.audio) {
       if (track.linkedLayerId !== originalId) continue;
       pastedAudio.push({ track, lane: laneIdOf(track) });
-      track.id = uid("audio");
-      track.effects.forEach((effect) => effect.id = uid("afx"));
+      track.id = newId("audio");
+      track.effects.forEach((effect) => effect.id = newId("afx"));
       track.linkedLayerId = layer.id;
       project.audioTracks.push(track);
     }

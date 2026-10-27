@@ -5,6 +5,7 @@ import {
   EFFECT_PARAMETERS,
 } from "./effect-catalog";
 import { syncLinkedAudioTracks } from "./linked-media";
+import { parseEditingCommand, executeEditingCommand, type EditingCommand } from "./editing-commands";
 import { toggleKeyframe, upsertKeyframe } from "./keyframes";
 import { assertValidProjectDocument } from "./validate-project";
 import type { AudioEffectKind, Easing, EffectKind, Keyframe, ProjectDocument } from "./types";
@@ -36,6 +37,7 @@ function isNumericLayerProperty(property: string): property is LayerNumericPrope
 }
 
 export type VctCommand =
+  | EditingCommand
   | { type: "layer.setNumeric"; layerId: string; property: string; value: number }
   | { type: "layer.setName"; layerId: string; name: string }
   | { type: "keyframe.upsert"; layerId: string; property: string; time: number; value: number; easing?: Easing }
@@ -71,6 +73,8 @@ function finiteNumber(value: unknown, name: string) {
 
 function parseCommand(value: unknown): VctCommand {
   if (!isRecord(value) || typeof value.type !== "string") throw new Error("Comando VCT inválido.");
+  const editing = parseEditingCommand(value);
+  if (editing) return editing;
   switch (value.type) {
     case "layer.setNumeric":
       return {
@@ -190,6 +194,9 @@ function validateAudioEffectParameter(
 
 function executeCommand(project: ProjectDocument, command: VctCommand, tolerance: number) {
   switch (command.type) {
+    case 'layer.create': case 'layer.setText': case 'clip.split': case 'clip.move':
+    case 'clip.duplicate': case 'clip.remove': case 'clip.setTransition':
+      return executeEditingCommand(project, command);
     case "layer.setNumeric": {
       if (!isNumericLayerProperty(command.property)) throw new Error(`Propriedade numérica não permitida: ${command.property}.`);
       const layer = findLayer(project, command.layerId);
@@ -344,13 +351,18 @@ export function runProjectCommands(
   input: readonly unknown[],
   tolerance: number,
 ): CommandResult {
-  if (!input.length || input.length > maxCommandsPerBatch) {
+  if (!Array.isArray(input) || !input.length || input.length > maxCommandsPerBatch) {
     throw new Error(`O lote deve conter entre 1 e ${maxCommandsPerBatch} comandos.`);
   }
   if (!Number.isFinite(tolerance) || tolerance < 0) throw new Error("A tolerância de keyframe é inválida.");
   const commands = input.map(parseCommand);
   const project = structuredClone(source);
   const results = commands.map((command) => executeCommand(project, command, tolerance));
+  for (const locked of source.layers.filter(layer => layer.locked)) {
+    if (JSON.stringify(project.layers.find(layer => layer.id === locked.id)) !== JSON.stringify(locked)) {
+      throw new Error(`A camada está bloqueada: ${locked.id}.`);
+    }
+  }
   assertValidProjectDocument(project);
   return { project, results, commands };
 }

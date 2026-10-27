@@ -1,5 +1,25 @@
 # Histórico de alterações
 
+## Rodada 6 — edição com IA (MCP)
+
+- **Comandos de edição no `window.vct`:** criar texto e geometria, mudar texto,
+  cortar, mover (inclusive entre faixas), duplicar, remover (com ripple) e
+  definir transição. Também `describe`, `getTimeline` (compacta), `dryRun`,
+  `undo`/`redo` e `captureFrame` (JPEG pequeno do quadro).
+- **Servidor MCP local** (`npm run mcp`, `.mcp.json` para o Claude Code): as
+  ferramentas `vct_*` repassam para a página por WebSocket em 127.0.0.1, com
+  código, lista de origens permitidas e lista fechada de métodos.
+- **Botão Agente** na barra superior: diálogo com endereço e código
+  (pré-preenchidos pelo link do servidor) e faixa "agente conectado" com
+  Desconectar. Cada lote do agente é um passo de desfazer.
+- **WebMCP:** registra as ferramentas quando o navegador oferece
+  `navigator.modelContext`.
+- **Prompt portátil e skills** (`agents/`): fluxo econômico em tokens e
+  vocabulário de motion design e VJ.
+- **Benchmark reproduzível de tokens** (`npm run benchmark:tokens`): na tarefa
+  de referência, o VCT via MCP usou ~2,6× menos tokens que reescrever o
+  projeto e ~25× menos que operar a interface por screenshots.
+
 ## Rodada 2 — edição com vários clipes por faixa
 
 ### Transições e modo Sobrepor

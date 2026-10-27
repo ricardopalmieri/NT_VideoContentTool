@@ -1084,3 +1084,22 @@ button { transition: color 120ms ease, background-color 120ms ease, border-color
 .transition-duration { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px; color: var(--quiet); font: 11px "IBM Plex Mono", monospace; }
 .transition-duration input { width: 7ch; height: 26px; padding: 0 6px; border: 1px solid var(--line); border-radius: 3px; background: #0b0b0a; color: var(--ink); font: 12px "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; text-align: right; }
 .transition-note { margin: 0; padding: 0 8px; color: var(--quiet); font: 11px "IBM Plex Mono", monospace; }
+
+/* 0.7 — conexão com agente de IA (MCP). */
+#agent-panel-button.is-active { color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent-green); }
+.agent-banner { position: fixed; z-index: 40; bottom: 34px; left: 50%; display: flex; max-width: min(720px, calc(100vw - 32px)); align-items: center; gap: 12px; padding: 7px 10px 7px 14px; border: 1px solid #2f3a33; border-radius: var(--radius-panel); background: #101512; color: #b8d9c8; font: 12px "IBM Plex Mono", monospace; transform: translateX(-50%); }
+.agent-banner[hidden] { display: none; }
+.agent-banner.is-connected { border-color: #3f6b55; }
+.agent-banner span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-banner button { flex: none; height: 26px; padding: 0 10px; border: 1px solid #3f6b55; border-radius: 3px; background: transparent; color: var(--ink); font: inherit; }
+.agent-dialog { width: min(480px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--line); border-radius: var(--radius-panel); background: #0f0f0e; color: var(--ink); }
+.agent-dialog::backdrop { background: rgba(0,0,0,.6); }
+.agent-dialog form { display: grid; gap: 12px; padding: 20px; }
+.agent-dialog h2 { margin: 0; font-size: 20px; font-weight: 300; }
+.agent-intro { margin: 0; color: var(--quiet); font-size: 13px; line-height: 1.5; }
+.agent-dialog label { display: grid; gap: 4px; color: var(--quiet); font: 11px "IBM Plex Mono", monospace; }
+.agent-dialog input { height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius-control); background: #0b0b0a; color: var(--ink); font: 13px "IBM Plex Mono", monospace; }
+.agent-error { margin: 0; color: var(--red-soft); font-size: 12px; }
+.agent-dialog footer { display: flex; justify-content: flex-end; gap: 8px; }
+.agent-dialog footer button { min-width: 110px; height: 36px; border: 1px solid var(--line); border-radius: var(--radius-control); background: transparent; color: var(--ink); }
+.agent-dialog footer .primary { border-color: var(--red); background: var(--red); }

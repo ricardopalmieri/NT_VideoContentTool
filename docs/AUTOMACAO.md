@@ -6,7 +6,9 @@ Com um projeto aberto, a página expõe `window.vct`, uma API síncrona para
 consultar, validar e editar o projeto ativo. Ela é destinada a agentes de
 navegador e ferramentas que já executam JavaScript na própria aba.
 
-A API não abre porta, servidor, WebSocket ou conexão externa. Não oferece
+Por si só, a API não abre porta, servidor, WebSocket ou conexão externa; a
+ponte com agentes fora do navegador só existe quando o usuário conecta o
+servidor MCP local (veja "Agentes de IA fora do navegador"). Não oferece
 acesso ao sistema de arquivos, salvar, exportar, abrir projetos, importar
 mídias nem apagar camadas. A remoção de efeitos pede confirmação do usuário na
 página. Comandos bem-sucedidos entram no histórico Undo/Redo e no autosave
@@ -89,3 +91,33 @@ manuais continuam disponíveis normalmente pela interface.
 - Sem edição de mídia/arquivos, clipe split/ripple, salvar/exportar ou apagar
   camadas; essas operações exigem contratos e confirmação próprios.
 - O modelo de projeto continua `.ntvct` v2. A API não muda seu formato.
+
+## Agentes de IA fora do navegador (MCP)
+
+Um agente como o Claude Code ou o Claude Desktop pode editar o projeto aberto
+pelo servidor MCP local:
+
+1. Na pasta do projeto: `npm ci` (uma vez). Depois `npm run mcp`, ou deixe o
+   Claude Code iniciar o servidor sozinho pelo `.mcp.json` do repositório.
+2. O servidor mostra o endereço (`ws://127.0.0.1:47811`) e um **código**. A
+   ferramenta `vct_connection_info` devolve também um link pronto.
+3. No editor, abra um projeto, clique no botão **Agente** (robô) da barra
+   superior, confira o endereço e o código e clique em **Conectar**.
+4. Uma faixa "AGENTE CONECTADO" fica visível, com o botão **Desconectar**.
+
+Ferramentas: `vct_connection_info`, `vct_describe`, `vct_get_timeline`,
+`vct_get_project`, `vct_validate`, `vct_list_catalog`, `vct_dry_run`,
+`vct_apply`, `vct_undo`, `vct_redo` e `vct_capture_frame`.
+
+**Segurança:**
+- O servidor escuta só em 127.0.0.1 e exige o código (comparação em tempo constante).
+- Aceita só origens `https://noisetupi.com.br` e `localhost`/`127.0.0.1`.
+- A página só conecta com o clique do usuário, só fala com endereço local, aceita uma lista fechada de métodos (sem arquivos, salvar ou exportar) e limita os pedidos a 20 por segundo.
+- Remoções pedem confirmação na página.
+
+**WebMCP:** se o navegador oferecer `navigator.modelContext` (Chrome, em teste),
+a página registra as mesmas ferramentas `vct_*` para agentes do próprio navegador.
+
+**Prompt e skills:** `agents/PROMPT.md` (portátil), `agents/skills/vct-edit` e
+`agents/skills/vct-critique`. Economia de tokens medida em
+`docs/BENCHMARK-TOKENS.md`.

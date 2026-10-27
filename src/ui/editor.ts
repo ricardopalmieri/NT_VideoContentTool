@@ -2,6 +2,7 @@ import { clamp } from "../model/math";
 import { normalizeFades, setFadeHandle } from "../timeline/timing";
 import { formatDurationValue, parseDurationValue, type DurationUnit } from "../timeline/timecode";
 import { sourceTimeFor } from "../renderer/source-time";
+import { installAgentAutomation, openAgentPanel } from "../automation/agent-panel";
 import { audioLanes, clipNeighbors, copyClips, moveClipToTrack, pasteClips, placeTrack, rippleDelete, shiftClip, shiftTrack, splitClip, trackIdOf, visualTracks, type ClipboardClips } from "../model/clip-tracks";
 import { autoTransitionsForOverlap, DEFAULT_TRANSITION_DURATION, isTransitionType, syncTransitionAudioFades, transitionWindow, TRANSITION_TYPES, type TransitionType } from "../model/transitions";
 import { timelineSnapCandidates as collectTimelineSnapCandidates, snapTimelineTime as calculateTimelineSnap } from "../timeline/snapping";
@@ -681,6 +682,7 @@ function renderEditor() {
           ${missingMediaReferences().length ? `<button class="missing-media-button" id="missing-media" aria-label="${language === "pt-BR" ? "Localizar mídias ausentes" : "Locate missing media"}" title="${language === "pt-BR" ? "Localizar mídias ausentes" : "Locate missing media"}">${uiIcon("missing")}<span>MEDIA</span></button>` : ""}
           <button id="composition-settings" aria-label="${language === "pt-BR" ? "Composição" : "Composition"}" title="${language === "pt-BR" ? "Composição" : "Composition"}">${uiIcon("settings")}<span>${language === "pt-BR" ? "COMPOSIÇÃO" : "COMPOSITION"}</span></button>
           <button class="export-button" id="export-project" aria-label="${t("export")}" title="${t("export")}">${uiIcon("export")}<span>${t("export")}</span></button>
+          <button id="agent-panel-button" aria-label="${language === "pt-BR" ? "Conectar agente de IA" : "Connect AI agent"}" title="${language === "pt-BR" ? "Conectar agente de IA (MCP)" : "Connect AI agent (MCP)"}"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="6" width="12" height="9" rx="2.5"/><path d="M10 6V3.5M7.5 10.5h.01M12.5 10.5h.01M2 10v2M18 10v2"/></svg></button>
           <button class="language-mini" id="language" aria-label="${language === "pt-BR" ? "Mudar idioma" : "Change language"}" title="${language === "pt-BR" ? "Mudar idioma" : "Change language"}">${uiIcon("language")}<span>${language === "pt-BR" ? "PT" : "EN"}</span></button>
         </div>
       </header>
@@ -1484,6 +1486,7 @@ function bindEditor() {
     }
   })());
   app.querySelector("#missing-media")?.addEventListener("click", showMissingMediaModal);
+  app.querySelector("#agent-panel-button")?.addEventListener("click", openAgentPanel);
   app.querySelector("#composition-settings")?.addEventListener("click", showCompositionModal);
   app.querySelector("#export-project")?.addEventListener("click", showExportModal);
   app.querySelector("#undo")?.addEventListener("click", undo);
@@ -4278,13 +4281,51 @@ window.addEventListener("beforeunload", (event) => {
 automationApi = createVctApi({
   getProject: () => project,
   keyframeTolerance,
-  confirmConsequential: (message) => window.confirm(language === "pt-BR" ? message : "Confirm effect removal before applying this batch?"),
+  assertCanEdit: () => {
+    if (exportInProgress) throw new Error('Aguarde a exportação antes de editar.');
+  },
+  undo: () => {
+    if (!project || !history.canUndo(JSON.stringify(project))) return false;
+    stopPlayback(); undo(); return true;
+  },
+  redo: () => {
+    if (!project || !history.canRedo(JSON.stringify(project))) return false;
+    stopPlayback(); redo(); return true;
+  },
+  confirmConsequential: (message) => window.confirm(language === "pt-BR" ? message : "Confirm clip/effect removal before applying this batch?"),
+  captureFrame: async (time, maxWidth) => {
+    if (!project || !renderer) throw new Error("Nenhum projeto está aberto.");
+    if (time !== undefined) {
+      stopPlayback();
+      setTime(clamp(time, 0, project.settings.duration), false);
+    }
+    await renderFrame();
+    const canvas = app.querySelector<HTMLCanvasElement>("#composition-canvas");
+    if (!canvas) throw new Error("Preview indisponível.");
+    const scale = Math.min(1, maxWidth / canvas.width);
+    const frame = document.createElement("canvas");
+    frame.width = Math.max(1, Math.round(canvas.width * scale));
+    frame.height = Math.max(1, Math.round(canvas.height * scale));
+    const context = frame.getContext("2d")!;
+    context.fillStyle = project.settings.transparent ? "#000000" : project.settings.background;
+    context.fillRect(0, 0, frame.width, frame.height);
+    context.drawImage(canvas, 0, 0, frame.width, frame.height);
+    return { time: currentTime, width: frame.width, height: frame.height, dataUrl: frame.toDataURL("image/jpeg", .8) };
+  },
   commitProject: (next, label) => {
     if (!project) throw new Error("Nenhum projeto está aberto.");
+    if (exportInProgress) throw new Error('Aguarde a exportação antes de editar.');
+    stopPlayback();
     snapshot();
+    const structureChanged = project.layers.map(layer => layer.id).join('|') !== next.layers.map(layer => layer.id).join('|')
+      || project.audioTracks.map(track => track.id).join('|') !== next.audioTracks.map(track => track.id).join('|');
     Object.assign(project, next);
+    selectedClipIds.clear();
+    if (!project.layers.some(layer => layer.id === selectedLayerId)) selectedLayerId = project.layers[0]?.id || '';
+    if (!project.audioTracks.some(track => track.id === selectedAudioTrackId)) selectedAudioTrackId = '';
     markProjectModified(project);
-    updatePanels();
+    if (structureChanged) renderEditorPreservingCanvas();
+    else updatePanels();
     updateTransformBox();
     const serialized = JSON.stringify(project);
     app.querySelector<HTMLButtonElement>("#undo")?.toggleAttribute("disabled", !history.canUndo(serialized));
@@ -4293,6 +4334,7 @@ automationApi = createVctApi({
     void renderFrame();
   },
 });
+installAgentAutomation(automationApi, () => language);
 Object.defineProperty(window, "vct", { value: automationApi, configurable: true, enumerable: false });
 
 renderLanguage();

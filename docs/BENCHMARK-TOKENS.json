@@ -1,0 +1,14 @@
+{
+  "task": "Reels 30 s: 6 trechos com transições, título e crédito + 2 rodadas de ajuste",
+  "commands": 18,
+  "projectJsonTokens": 1411,
+  "tokens": {
+    "vctMcp": 3080,
+    "fullProjectRewrite": 8104,
+    "guiScreenshots": 78786
+  },
+  "ratio": {
+    "vsFullProjectRewrite": 2.6,
+    "vsGuiScreenshots": 25.6
+  }
+}
