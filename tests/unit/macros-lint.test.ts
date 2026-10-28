@@ -80,13 +80,14 @@ describe("plan", () => {
       [{ type: "track.create", trackId: "over", kind: "video" }],
       [{ type: "layer.create", layerId: "t", kind: "text", name: "T", startTime: 0, endTime: 4, trackId: "over" }],
     ] as never;
-    const preview = api.plan(batches, { dryRun: true });
+    expect(api.plan(batches, { dryRun: true })).toMatch(/^ok \(simulação\) · 2 lotes · 2 comandos/);
     expect(commit).not.toHaveBeenCalled();
-    expect(preview.summary).toContain("[over]: 0-4 t");
-    api.plan(batches, { label: "Montagem" });
+    expect(api.plan(batches, { label: "Montagem" })).toContain("desfazer: Montagem");
     expect(commit).toHaveBeenCalledTimes(1);
     expect(project.layers.some((layer) => layer.id === "t")).toBe(true);
-    expect(() => api.plan([[{ type: "clip.move", layerId: "nada", startTime: 0 }]] as never)).toThrow("Lote 1");
+    expect(api.summary()).toContain("[over]: 0-4 t");
+    expect(api.plan([[{ type: "clip.move", layerId: "nada", startTime: 0 }]] as never)).toMatch(/^erro no lote 1, comando 1 \(clip\.move\)/);
+    expect(api.plan([[{ type: "clip.move", layerId: "nada", startTime: 0 }]] as never, { format: "json" })).toMatchObject({ ok: false, results: [] });
   });
 });
 

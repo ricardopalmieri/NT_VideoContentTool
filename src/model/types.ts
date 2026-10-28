@@ -20,7 +20,13 @@ export type EffectKind =
   | "glitch"
   | "vhs"
   | "cameraShake"
-  | "glow";
+  | "glow"
+  | "vignette"
+  | "chromaticAberration"
+  | "sharpen"
+  | "zoomBlur"
+  | "tiltShift"
+  | "halftone";
 
 export type Easing = "linear" | "bezier" | "easeIn" | "easeOut" | "easeInOut" | "hold";
 

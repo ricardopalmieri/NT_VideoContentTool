@@ -7,15 +7,24 @@ executando JavaScript na página com a API window.vct. Não clique na interface
 para editar: a API é exata, desfazível e gasta muito menos tokens.
 
 ## Fluxo
-1. window.vct.describe() — uma vez: texto curto com todos os comandos, campos
-   (! obrigatório), limites e regras de tempo. Se terminar em "[continua",
-   chame window.vct.more(). Detalhe e exemplo de um comando: describe("clip.move").
+1. window.vct.describe() — uma vez: índice curto com os comandos por grupo e os
+   campos obrigatórios (nome!campo). Se terminar em "[continua", chame
+   window.vct.more(). Detalhe e exemplo de um comando: describe("clip.move").
+   Propriedades de layer.set por tipo de camada (texto tem fonte, tamanho, peso,
+   cor, contorno, sombra e alinhamento): describe("props texto"), "props forma",
+   "props imagem", "props video", "props guia", "props audio", "props composicao".
+   Regras: describe("regras"). Tudo de uma vez: describe("tudo"). Com
+   { format: "json" } vem objeto em vez de texto.
 2. window.vct.getTimeline() — faixas, clipes (id, nome, tipo, início/fim em s),
    transições e áudio. Use esses ids; ids novos curtos e legíveis ("titulo").
 3. Explique o plano ao usuário em poucas linhas.
 4. window.vct.dryRun([...comandos]) — simula; corrija erros antes de aplicar.
 5. window.vct.batch([...comandos], { label: "Cortes no ritmo" }) — até 500
    comandos, tudo ou nada, num único passo de desfazer com esse nome.
+   batch, plan, dryRun e dispatch devolvem texto curto: "ok · 3 comandos ·
+   desfazer: Cortes no ritmo · criados: ids · avisos: ..." ou, se falhar (sem
+   lançar erro), "erro no comando 3 (layer.set): causa" e nada muda. Com
+   { format: "json" } vem { ok, errors, warnings, results }.
 6. Para conferir, chame await window.vct.captureFrame({ time }) (move o playhead
    e renderiza) e tire um screenshot do preview em momentos-chave.
 7. Ajuste com novos lotes; window.vct.undo() desfaz o último.
@@ -28,7 +37,18 @@ para editar: a API é exata, desfazível e gasta muito menos tokens.
   duração da transição é a sobreposição.
 - Remover clipes pede confirmação ao usuário.
 - Propriedades: layer.set, audio.set (volume, mudo) e composition.set (duração,
-  tamanho) mudam várias de uma vez.
+  tamanho) mudam várias de uma vez. Para muitas camadas de uma vez use
+  layer.setMany (layerIds, trackId ou kind; multiply escala valores, como
+  { fontSize: 1.4 } para legendas 40% maiores). clip.fade liga fade de entrada
+  e saída do vídeo e do áudio vinculado juntos.
+- Mídia entra no tamanho original em pixels, centralizada (clip.place sem fit);
+  use fit contain ou cover, ou layer.fit, para enquadrar.
+- Tudo que a API devolve troca os caracteres de pergunta, e comercial e igual
+  por versões largas (extensão do Chrome bloqueia os originais).
+- Diagnóstico sem mexer no projeto: vct.view({ solo: "id" }) isola uma camada,
+  vct.view({ bypassEffects: true }) desliga os efeitos só na tela e
+  vct.view({}) volta ao normal. captureFrame({ show: true }) mostra o quadro
+  na tela para screenshot (depois hideSheet()).
 - Salvar, exportar, importar e abrir dependem da pessoa: vct.request("save"),
   vct.request("export", { format: "mp4-h264", scale: 0.5 }) (format também
   "png-sequence"; scale 1, 0.75, 0.5 ou 0.25), vct.request("import", { message })
@@ -46,10 +66,19 @@ para editar: a API é exata, desfazível e gasta muito menos tokens.
   "mix" (mixagem da timeline, padrão) ou o caminho de uma mídia do bin (veja
   vct.assets(); os tempos são os do arquivo). language: pt, en, es ou auto.
   model: base (rápido, 80 MB) ou small (preciso, 252 MB). Volta na hora.
+- Mídia longa: o áudio vai em blocos de cerca de 5 min (silêncios longos são
+  pulados), então 30 min levam bem mais que 3 min sem GPU. Para só uma parte,
+  passe start e end em segundos ({ start: 600, end: 900 }; os tempos são os da
+  timeline em "mix" e os do arquivo em uma mídia). Tempo por palavra só até
+  5 min; { words: true } força. Não espere: vct.status() mostra "bloco N de M"
+  e "~X min restantes", e vct.transcript() já devolve o que os blocos prontos
+  deram. await window.vct.cancelTranscribe() interrompe (o que existe fica).
+  Se o motor ficar 90 s sem progresso, ele é encerrado e a pessoa clica em
+  Retomar do bloco N no diálogo; avise e confira vct.status().
 - Se o modelo ainda não está neste navegador, a pessoa vê um aviso de download
   e decide: diga o que ela deve clicar e confira vct.status() de poucos em
   poucos segundos (baixando, transcrevendo, pronta, cancelada ou falhou).
-- Pronta: vct.transcript() devolve o SRT em páginas (more()). Aplique com
+- Pronta (ou parcial, durante os blocos): vct.transcript() devolve o SRT em páginas (more()). Aplique com
   batch([{ type: "text.fromSrt", srt, idPrefix: "leg" }], { label: "Legenda
   automática" }). Os caracteres de pergunta, e comercial e igual saem em
   versão larga neste texto; a pessoa também pode usar o botão Inserir na

@@ -2,6 +2,8 @@
 // dryRun shows exactly what will change and undo stays one step per batch.
 import { sourceTimeFor } from "../renderer/source-time";
 import { visualTracks } from "./clip-tracks";
+import { EFFECT_CATALOG } from "./effect-catalog";
+import { safeArea } from "./lint";
 import type { ProjectDocument } from "./types";
 
 type Command = Record<string, unknown> & { type: string };
@@ -101,7 +103,7 @@ export function expandSpike(project: ProjectDocument, command: { effect: string;
   const parameter = command.parameter || "mix";
   const effectId = command.effectId || `${command.effect}_spike_${Math.round(command.at * 1000)}`;
   const existing = project.postEffects.find((item) => item.id === effectId) || project.layers.flatMap((layer) => layer.effects).find((item) => item.id === effectId);
-  const post = ["rgbDelay", "noise", "glitch", "vhs", "cameraShake", "glow"].includes(command.effect);
+  const post = EFFECT_CATALOG[command.effect as keyof typeof EFFECT_CATALOG]?.category === "post";
   if (!existing && !post && !command.ownerId) throw new Error(`${command.effect} é efeito de camada: informe ownerId (a camada).`);
   const commands: Command[] = existing ? [] : [{ type: "effect.add", kind: command.effect, ownerId: post ? "__post__" : command.ownerId!, effectId }];
   const previous = existing?.keyframes?.[parameter] || [];
@@ -160,13 +162,33 @@ function srtTime(value: string) {
   return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]) + Number(match[4].padEnd(3, "0").slice(0, 3)) / 1000;
 }
 
+/** Largura da caixa das legendas: fração da largura da composição. */
+export const SUBTITLE_BOX_WIDTH_RATIO = .86;
+/** Tamanho padrão da fonte das legendas: fração do LADO MENOR da composição (59 px em 1080p; 59 px também em 1080x1920). */
+export const SUBTITLE_FONT_RATIO = .055;
+/** Largura média de um caractere, em em (aproximada para fontes sem serifa em peso normal a negrito). */
+export const SUBTITLE_CHAR_EM = .55;
+
+/** Fonte, caixa de 2 linhas (altura de linha 1,2, com respiro) e largura da legenda; o tamanho vem do lado menor, não da altura. */
+export function subtitleBox(settings: Pick<ProjectDocument["settings"], "width" | "height">, ratio = SUBTITLE_FONT_RATIO) {
+  const fontSize = Math.round(Math.min(settings.width, settings.height) * ratio);
+  return { fontSize, height: Math.round(fontSize * 1.2 * 2 + fontSize * .4), width: Math.round(settings.width * SUBTITLE_BOX_WIDTH_RATIO) };
+}
+
+/** Quantos caracteres cabem numa linha da caixa (descontado o respiro de 4% da fonte de cada lado, como o renderer faz). */
+export function charsPerLine(boxWidth: number, fontSize: number) {
+  return Math.max(1, Math.floor((boxWidth - Math.max(2, fontSize * .04) * 2) / (fontSize * SUBTITLE_CHAR_EM)));
+}
+
 /** Subtitles: one text clip per SRT cue on a new track. */
 export function expandSrt(project: ProjectDocument, command: { srt: string; trackId?: string; idPrefix?: string; props?: Record<string, unknown> }): Command[] {
   const prefix = command.idPrefix || "legenda";
   const trackId = command.trackId || `${prefix}_track`;
   const cues = command.srt.replace(/\r/g, "").split(/\n\s*\n/).map((block) => block.trim().split("\n")).filter((lines) => lines.length >= 2);
   const commands: Command[] = project.tracks?.some((track) => track.id === trackId) ? [] : [{ type: "track.create", trackId, kind: "video", name: "Legendas", index: 0 }];
-  const margin = project.settings.height * (project.settings.height > project.settings.width * 1.3 ? 420 / 1920 : .12);
+  // Padrão de 5,5% do lado menor (59 px em 1080p e em 9:16), caixa de 2 linhas com respiro, rente à base da área segura.
+  const { fontSize, height: boxHeight, width: boxWidth } = subtitleBox(project.settings);
+  const centerY = Math.round(project.settings.height - safeArea(project.settings).bottom - project.settings.height * .01 - boxHeight / 2);
   const parsed = cues.flatMap((lines) => {
     const timing = lines.findIndex((line) => line.includes("-->"));
     if (timing < 0) return [];
@@ -182,7 +204,7 @@ export function expandSrt(project: ProjectDocument, command: { srt: string; trac
     const end = next && next.start < cue.end ? next.start : cue.end;
     if (end <= start || end > project.settings.duration + 1e-6) continue;
     commands.push({ type: "layer.create", layerId: `${prefix}${++index}`, kind: "text", name: `Legenda ${index}`, startTime: start, endTime: end, trackId,
-      props: { text, fontSize: Math.round(project.settings.height * .035), y: project.settings.height - margin, width: project.settings.width * .86, height: project.settings.height * .09, ...command.props } });
+      props: { text, fontSize, y: centerY, width: boxWidth, height: boxHeight, ...command.props } });
   }
   if (!index) throw new Error("Nenhuma legenda válida dentro da composição.");
   return commands;

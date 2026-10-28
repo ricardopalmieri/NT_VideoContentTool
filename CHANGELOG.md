@@ -1,6 +1,6 @@
 # Histórico de alterações
 
-## Não lançado — batches 0 a 4 e 7 de `docs/PLANO-DE-ACAO.md`
+## 0.7.2 — batches 0 a 5, 7 e 11 de `docs/PLANO-DE-ACAO.md`
 
 ### Batch 0 — arrumação
 
@@ -81,6 +81,30 @@
   desfazer) e **Baixar .srt**. Legendas de até 2 linhas de 42 caracteres e 6 s,
   com tempos por palavra e alinhados a frames.
 - `vct.transcribe()`, `vct.transcript()` e linha de legenda em `vct.status()`.
+
+### Batch 11 — API da IA, efeitos, interface e transcrição longa
+
+- `describe()` em índice curto; `batch`/`plan`/`dryRun`/`dispatch` devolvem texto
+  curto sem lançar; comandos `layer.setMany` e `clip.fade`; `vct.view({ solo,
+  bypassEffects })` e `captureFrame({ show: true })`.
+- Pacote de efeitos novo (`src/renderer/effects/`, um módulo por efeito): blur
+  gaussiano, bloom, glitch, grão, cor, vinheta, aberração cromática, nitidez,
+  zoom blur, tilt-shift e meio-tom. Licenças em `THIRD_PARTY_LICENSES.md` e `LICENSES/`.
+- Mídia entra no tamanho original (botões Original · Inteiro · Preencher); seleção
+  múltipla com Shift/Ctrl; clicar na faixa de legendas seleciona todas e o estilo
+  vale para todas num passo de desfazer (`layer.setMany` com `trackId`).
+- Rolagem em todos os painéis; divisórias arrastáveis (mouse, toque e teclado,
+  tamanho guardado) entre Mídia/Efeitos e Layers, propriedades e efeitos, e na
+  coluna dos nomes das faixas; a régua de tempo fica no topo ao rolar a timeline.
+- Legenda automática: mídia longa em blocos de 5 min, progresso e estimativa,
+  parcial, retomar depois de travar; áudio decodificado em partes; arquivos do
+  modelo por dispositivo (WebGPU fp16/fp32, WASM q8); tamanho/posição/sombra das
+  legendas; **Inserir na timeline** coloca também o vídeo transcrito.
+- Correções da legenda automática: o modelo carregava indefinidamente com as
+  threads do WebAssembly (o runtime usa uma thread); cache incompleto baixa de
+  novo o arquivo que falta em vez de procurá-lo em `models/`; a tela sai de
+  "Baixando" quando o download termina; carga travada é encerrada em 2 min e o
+  retomar usa o processador.
 
 ## 0.7.1 — edição com IA (Rodada 6) e Rodada 2
 

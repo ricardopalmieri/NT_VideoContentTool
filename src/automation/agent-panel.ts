@@ -76,18 +76,18 @@ interface ModelContextLike {
 }
 
 const WEBMCP_DESCRIPTIONS: Record<BridgeMethod, string> = {
-  describe: "Short text with every VCT command, field, limit and timing rule. Input: {type?} for one command with an example.",
+  describe: "One-page index of VCT commands. Input: {type?} a command, 'props texto' (or forma, imagem, video, guia, audio, composicao), 'regras' or 'tudo'; {format?: 'json'}.",
   more: "Next page of a long text returned by describe, assets or summary.",
   assets: "Media bin as short text: id, kind, duration, resolution, orientation, audio, usage.",
   summary: "Timeline as short text, one line per track.",
   lint: "Quality issues: flashes, safe area, gaps, overlapping audio, reading time.",
-  plan: "Several command batches simulated in sequence and applied as one undo step. Input: {batches, label, dryRun?}.",
+  plan: "Several command batches simulated in sequence and applied as one undo step. Input: {batches, label, dryRun?, format?}. Returns short text (ok or error at batch and command).",
   getTimeline: "Compact timeline: tracks, clips (times in seconds), transitions and audio lanes.",
   getProject: "Full project JSON (large; prefer getTimeline).",
   validate: "Validate the open project.",
   listCatalog: "Effect and audio effect catalog with parameter ranges.",
-  dryRun: "Simulate a command batch without changing the project. Input: {commands}.",
-  batch: "Apply 1–500 commands atomically as one undo step. Input: {commands, label}.",
+  dryRun: "Simulate a command batch without changing the project. Input: {commands, format?}. Returns short text.",
+  batch: "Apply 1–500 commands atomically as one undo step. Input: {commands, label, format?}. Returns short text (ok or error at command N).",
   undo: "Undo the last edit.",
   redo: "Redo the last undone edit.",
   captureFrame: "Render one frame as a small JPEG data URL. Input: {time?, maxWidth?}.",

@@ -4,6 +4,7 @@
 // Nada roda sem a página aberta e a conexão ativa; desconectar encerra tudo.
 import type { VctApi } from "./window-vct";
 import type { VctCommand } from "../model/commands";
+import { isFailureText } from "./run-report";
 
 export const BRIDGE_PROTOCOL = "vct-bridge-1";
 
@@ -46,23 +47,34 @@ export async function handleBridgeRequest(api: VctApi, request: unknown): Promis
   const params = isRecord(request.params) ? request.params : {};
   try {
     let result: unknown;
+    const json = params.format === "json";
     switch (request.method) {
-      case "describe": result = api.describe(typeof params.type === "string" ? params.type : undefined); break;
+      case "describe": {
+        const topic = typeof params.type === "string" ? params.type : undefined;
+        result = params.format === "json" ? api.describe(topic, { format: "json" }) : api.describe(topic);
+        break;
+      }
       case "more": result = api.more(); break;
       case "assets": result = api.assets(); break;
       case "summary": result = api.summary(); break;
       case "lint": result = api.lint(); break;
       case "plan": {
         if (!Array.isArray(params.batches)) throw new Error("params.batches deve ser uma lista de lotes.");
-        result = api.plan(params.batches as VctCommand[][], { label: typeof params.label === "string" ? params.label : "Agente", dryRun: params.dryRun === true });
+        const label = typeof params.label === "string" ? params.label : "Agente";
+        result = json ? api.plan(params.batches as VctCommand[][], { label, dryRun: params.dryRun === true, format: "json" })
+          : api.plan(params.batches as VctCommand[][], { label, dryRun: params.dryRun === true });
         break;
       }
       case "getTimeline": result = api.getTimeline(); break;
       case "getProject": result = api.getProject(); break;
       case "validate": result = api.validate(); break;
       case "listCatalog": result = api.listCatalog(); break;
-      case "dryRun": result = api.dryRun(commandList(params)); break;
-      case "batch": result = api.batch(commandList(params), { label: typeof params.label === "string" ? params.label : "Agente" }); break;
+      case "dryRun": result = json ? api.dryRun(commandList(params), { format: "json" }) : api.dryRun(commandList(params)); break;
+      case "batch": {
+        const label = typeof params.label === "string" ? params.label : "Agente";
+        result = json ? api.batch(commandList(params), { label, format: "json" }) : api.batch(commandList(params), { label });
+        break;
+      }
       case "undo": result = api.undo(); break;
       case "redo": result = api.redo(); break;
       case "captureFrame": result = await api.captureFrame({
@@ -70,6 +82,9 @@ export async function handleBridgeRequest(api: VctApi, request: unknown): Promis
         maxWidth: typeof params.maxWidth === "number" ? params.maxWidth : undefined,
       }); break;
     }
+    // plan, dryRun e batch devolvem a falha como resultado; para o cliente MCP ela continua sendo erro.
+    if (isFailureText(result)) return fail(result as string);
+    if (isRecord(result) && result.ok === false && Array.isArray(result.errors)) return fail(String(result.errors[0] ?? "Falha no comando VCT."));
     return { type: "response", id, ok: true, result };
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error));

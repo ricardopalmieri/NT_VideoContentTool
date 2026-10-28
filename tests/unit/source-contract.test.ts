@@ -34,7 +34,19 @@ const ROUND1_FRAGMENT_PATCHES: Array<[string, string]> = [
   ],
 ];
 
-it('preserva os shaders GLSL originais, exceto o composite da Rodada 1', () => {
+// Pacote de efeitos modular: estes efeitos saíram do shader único (agora são módulos em src/renderer/effects).
+// 3 níveis/cor, 5 blur, 21 ruído, 22 glitch, 25 bloom; o auxiliar bloomExtract só servia ao bloom.
+function withoutModularEffects(source: string) {
+  let result = source;
+  for (const code of [3, 5, 21, 22, 25]) {
+    result = result.replace(new RegExp(String.raw`  \} else if \(u_effect == ${code}\) \{
+[\s\S]*?(?=  \} else if \(u_effect == |  \}
+  if \(u_effect != 0\))`), '');
+  }
+  return result.replace(/vec4 bloomExtract[\s\S]*?(?=float edgeAt)/, '');
+}
+
+it('preserva os shaders GLSL originais, exceto o composite da Rodada 1 e os efeitos que viraram módulos', () => {
   for (const [name, expected] of [['vertexSource', vertexSource], ['fragmentSource', fragmentSource]]) {
     const start = renderer.indexOf(`const ${name} = \``) + `const ${name} = \``.length;
     const end = renderer.indexOf('`;', start);
@@ -44,6 +56,7 @@ it('preserva os shaders GLSL originais, exceto o composite da Rodada 1', () => {
         expect(original).toContain(from);
         original = original.replace(from, to);
       }
+      original = withoutModularEffects(original);
     }
     expect(original).toBe(expected);
   }

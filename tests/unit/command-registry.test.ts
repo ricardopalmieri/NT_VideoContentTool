@@ -26,7 +26,7 @@ describe("command registry", () => {
     for (const type of Object.keys(COMMANDS)) expect(text).toContain(`${type} `);
     expect(text).not.toMatch(/[?&=]/);
     const api = createVctApi({ getProject: fixture, keyframeTolerance: () => 1 / 60, commitProject: () => {}, confirmConsequential: () => true });
-    let full = api.describe() as string;
+    let full = api.describe('tudo');
     for (let page = 0; page < 20 && full.includes("[continua: vct.more()]"); page++) {
       full = full.replace("\n[continua: vct.more()]", "") + api.more();
     }

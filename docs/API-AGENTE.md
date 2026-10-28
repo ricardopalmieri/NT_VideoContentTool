@@ -1,12 +1,12 @@
 # API do agente (window.vct)
 
 Gerado do registro de comandos (`src/model/command-registry.ts`). É o mesmo texto que
-`window.vct.describe()` devolve ao agente. Não edite à mão: rode
+`window.vct.describe('tudo')` devolve ao agente (`describe()` sem argumento é só o índice de uma página). Não edite à mão: rode
 `DOCS_WRITE=1 npx vitest run tests/unit/api-docs.test.ts`.
 
 ```text
 VCT API 1 · lote 1 a 500 comandos, tudo ou nada, um passo de desfazer
-Métodos: guide describe more assets summary lint plan contactSheet assetSheet hideSheet analyzeMix analyzeAudio analyzeVideo getTimeline getProject query validate listCatalog dryRun dispatch batch undo redo captureFrame request status transcribe transcript onChange
+Métodos: guide describe more assets summary lint plan contactSheet assetSheet hideSheet analyzeMix analyzeAudio analyzeVideo getTimeline getProject query validate listCatalog dryRun dispatch batch undo redo captureFrame view request status transcribe cancelTranscribe transcript onChange
 Campos com ! são obrigatórios. Detalhe e exemplo: describe(tipo).
 - Tempos em segundos da composição, alinhados a frames (frame dividido por fps).
 - Fluxo curto: assets() e summary() para ler; clip.place para montar; dryRun ou plan com dryRun; batch ou plan; lint(); captureFrame para conferir.
@@ -16,8 +16,10 @@ Campos com ! são obrigatórios. Detalhe e exemplo: describe(tipo).
 - Faixa visual: id da faixa é trackId do clipe ou o id do primeiro clipe. Índice 0 é o topo (desenhado por cima).
 - Remoções pedem confirmação ao usuário no commit. dryRun não pede.
 - Ids novos: curtos e legíveis. Ids derivados de corte e duplicação: novoId:audio:N e novoId:fx:N.
+- Retorno de batch, plan, dryRun e dispatch: texto curto, ok seguido de contagem, desfazer e avisos, ou erro no comando N com a causa. Com { format: 'json' }: { ok, errors, warnings, results }.
+- Mídia entra no tamanho original em pixels, centralizada (clip.place sem fit). layer.fit com contain ou cover enquadra; layer.set muda width e height.
 ## mídia
-clip.place layerId!:id asset!:string startTime!:number 0..7200 endTime:number 0..7200 duration:number 0.001..7200 trackId:id sourceIn:number 0..7200 playbackRate:number 0.05..8 fit:contain|cover|rotate-cover|none audio:linked|none name:string props:object | Põe uma mídia do bin na timeline num passo: tempo, trecho do arquivo, enquadramento e áudio vinculado. Sem endTime nem duration usa o resto do arquivo. Sem trackId cria faixa nova no topo.
+clip.place layerId!:id asset!:string startTime!:number 0..7200 endTime:number 0..7200 duration:number 0.001..7200 trackId:id sourceIn:number 0..7200 playbackRate:number 0.05..8 fit:contain|cover|rotate-cover|none audio:linked|none name:string props:object | Põe uma mídia do bin na timeline num passo: tempo, trecho do arquivo, enquadramento e áudio vinculado. Sem fit entra no tamanho original do arquivo, centralizada. Sem endTime nem duration usa o resto do arquivo. Sem trackId cria faixa nova no topo.
 layer.fit layerId!:id fit!:contain|cover|rotate-cover|none | Reenquadra imagem ou vídeo: contain (inteiro), cover (preenche), rotate-cover (gira 90 e preenche), none (tamanho real).
 asset.add asset!:string metadata!:object | Registra uma mídia no bin (uso interno da importação; a IA não importa arquivos).
 asset.remove asset!:string | Tira do bin uma mídia que não está em uso.
@@ -27,6 +29,7 @@ layer.set layerId!:id props!:object allowOverlap:boolean | Muda várias propried
 layer.setNumeric layerId!:id property!:string value!:number | Atalho de layer.set para uma propriedade numérica.
 layer.setName layerId!:id name!:string | Renomeia a camada (1–200 caracteres).
 layer.setText layerId!:id text!:string | Troca o texto de uma camada de texto (até 10000 caracteres).
+layer.setMany layerIds:array trackId:id kind:text|geometry|image|video|guide props:object multiply:object | Aplica as mesmas props a várias camadas num passo: layerIds, trackId e kind escolhem (os filtros se somam). multiply multiplica props numéricas pelo valor atual de cada camada (fontSize 1.4 deixa 40% maior). Valida como layer.set.
 ## clipe
 clip.move layerId!:id startTime!:number 0..7200 trackId:id allowOverlap:boolean | Move no tempo (e para trackId existente), com keyframes, fades e áudio vinculado.
 clip.split layerId!:id time!:number 0..7200 newLayerId!:id sourceDuration:number 0.001..7200 | Corta num frame. Vídeo exige sourceOut definido e loop desligado, ou sourceDuration (duração do arquivo).
@@ -34,6 +37,7 @@ clip.duplicate layerId!:id startTime!:number 0..7200 newLayerId!:id | Copia o cl
 clip.paste clipboard!:object startTime!:number 0..7200 | Cola clipes copiados (formato de copyClips) a partir de startTime.
 clip.remove layerId!:id ripple:boolean | Remove o clipe e o áudio vinculado; ripple fecha o espaço.
 clip.setTransition layerId!:id transition!:object | Transição de entrada {type:dissolve|dip|wipe-right|wipe-left|push-left, duration} ou null.
+clip.fade layerId!:id in:number 0..7200 out:number 0..7200 | Fade de entrada (in) e/ou saída (out), em s, no clipe e no áudio vinculado juntos. 0 tira o fade. Com transição, a sobreposição manda no áudio.
 ## faixa
 track.create trackId!:id kind!:video|audio name:string index:int 0..10000 | Cria faixa com nome (vazia até receber clipes). index 0 é o topo (vídeo) ou a primeira (áudio).
 track.rename trackId!:id name!:string | Renomeia uma faixa.
@@ -47,7 +51,7 @@ effect.keyframe.upsert effectId!:id property!:string time!:number 0..7200 value!
 effect.keyframe.toggle effectId!:id property!:string time!:number 0..7200 value!:number easing:linear|bezier|easeIn|easeOut|easeInOut|hold curve:number 0..1 timeBase:composition|clip | Liga/desliga keyframe de parâmetro de efeito.
 effect.keyframe.set effectId!:id property!:string keys!:array timeBase:composition|clip | Substitui a trilha de keyframes de um parâmetro de efeito.
 ## efeito
-effect.add kind!:mirror|feedback|levels|kaleidoscope|blur|crop|edge|colorKey|lumaKey|chromaKey|animaTracer|rgbDelay|noise|glitch|vhs|cameraShake|glow ownerId!:id effectId!:id | Adiciona efeito. Efeitos de pós usam ownerId "__post__".
+effect.add kind!:mirror|feedback|levels|kaleidoscope|blur|crop|edge|colorKey|lumaKey|chromaKey|animaTracer|sharpen|zoomBlur|tiltShift|halftone|rgbDelay|noise|glitch|vhs|cameraShake|glow|vignette|chromaticAberration ownerId!:id effectId!:id | Adiciona efeito. Efeitos de pós usam ownerId "__post__".
 effect.setParam effectId!:id parameter!:string value!:number | Muda um parâmetro (veja listCatalog para nomes e limites; mix 0..1).
 effect.set effectId!:id enabled:boolean name:string | Liga/desliga ou renomeia um efeito.
 effect.reorder effectId!:id index!:int 0..1000 | Muda a posição do efeito na cadeia (0 é o primeiro).
@@ -69,9 +73,9 @@ audioEffect.remove effectId!:id | Remove efeito de áudio.
 loop.seam fade:number 0.04..10 trackId:id newLayerId:id | Costura de loop: cópia do plano de abertura entra em fade nos últimos fade s e termina no quadro em que o loop começa.
 fx.stutter layerId!:id at!:number 0..7200 pattern!:string beat:number 0.05..10 newLayerId:id | Repete o trecho do vídeo que começa em at; pattern em tempos (1/2 1/4 …), flip espelha os próximos. Precisa de grid ou beat.
 fx.strobe times!:array frames:int 1..30 color:color opacity:number 0..1 id:id | Flashes de tela cheia de frames frames em cada tempo de times. Mais de 3 por segundo é risco de fotossensibilidade.
-fx.spike effect!:mirror|feedback|levels|kaleidoscope|blur|crop|edge|colorKey|lumaKey|chromaKey|animaTracer|rgbDelay|noise|glitch|vhs|cameraShake|glow at!:number 0..7200 dur:number 0.02..10 intensity:number 0..1 ownerId:id effectId:id parameter:string | Efeito sobe a intensity em at e volta a 0 em dur s (glitch, rgbDelay, cameraShake…). Efeito de camada exige ownerId.
+fx.spike effect!:mirror|feedback|levels|kaleidoscope|blur|crop|edge|colorKey|lumaKey|chromaKey|animaTracer|sharpen|zoomBlur|tiltShift|halftone|rgbDelay|noise|glitch|vhs|cameraShake|glow|vignette|chromaticAberration at!:number 0..7200 dur:number 0.02..10 intensity:number 0..1 ownerId:id effectId:id parameter:string | Efeito sobe a intensity em at e volta a 0 em dur s (glitch, rgbDelay, cameraShake…). Efeito de camada exige ownerId.
 text.animate layerId!:id in:fade|slide-up|pop|none out:fade|slide-up|pop|none duration:number 0.04..10 | Entrada e saída prontas (fade, slide-up, pop, none) como keyframes, com duration s cada.
-text.fromSrt srt!:string trackId:id idPrefix:id props:object | Cria uma legenda de texto por bloco SRT numa faixa nova, acima da área de interface das redes.
+text.fromSrt srt!:string trackId:id idPrefix:id props:object | Cria uma legenda de texto por bloco SRT numa faixa nova (legenda_track), dentro da área segura. Tamanho padrão 5,5% do lado menor da composição (vale em 16:9 e em 9:16); props muda tudo e layer.setMany ajusta depois.
 ## composição
 composition.set props!:object resize:adapt|keep | Muda nome, tamanho, fps, duração, fundo ou transparência. resize: adapt|keep ao mudar tamanho.
 ## props layer
@@ -80,7 +84,7 @@ name:string text:string fontFamily:string fontSize:number 4..2000 fontWeight:num
 name:string asset:string volume:number 0..2 muted:boolean startTime:number 0..7200 endTime:number 0.001..7200 sourceIn:number 0..7200 sourceOut:number 0..7200 playbackRate:number 0.05..8 reverse:boolean loop:boolean fadeInStart:number 0..7200 fadeInEnd:number 0..7200 fadeOutStart:number 0..7200 fadeOutEnd:number 0..7200
 ## props composition
 name:string width:int 16..8192 height:int 16..8192 fps:int 1..240 duration:number 0.1..7200 background:color transparent:boolean workArea:object grid:object
-Legenda automática: vct.transcribe começa na hora (Whisper local; o áudio não sai da máquina). Sem o modelo no navegador a pessoa vê o aviso de download. Confira status, leia o SRT com vct.transcript e aplique com text.fromSrt.
+Legenda automática: vct.transcribe começa na hora (Whisper local; o áudio não sai da máquina). Sem o modelo no navegador a pessoa vê o aviso de download. Mídia longa vai em blocos de ~5 min (start e end limitam o trecho; vct.cancelTranscribe cancela). Confira status (bloco N de M, tempo restante), leia o SRT com vct.transcript (já parcial) e aplique com text.fromSrt.
 Limites: projeto aberto pela pessoa. Salvar, exportar, importar e abrir só com vct.request (a pessoa confirma na tela); depois confira vct.status().
 Se a pessoa pausar o agente, batch plan dispatch undo redo e request falham até ela clicar em Retomar; leituras seguem.
 ```

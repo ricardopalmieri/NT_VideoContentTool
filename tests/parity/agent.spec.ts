@@ -17,8 +17,10 @@ test('agente edita só por window.vct: montar, revisar, desfazer', async ({ brow
 
     const report = await page.evaluate(async () => {
       const vct = window.vct;
-      let describe = vct.describe() as string;
+      let describe = vct.describe('tudo');
+      // more() continua a última leitura paginada: o índice só depois de juntar 'tudo'.
       while (describe.endsWith('[continua: vct.more()]')) describe = describe.replace('\n[continua: vct.more()]', '') + vct.more();
+      const index = vct.describe();
       // Musical times (bar:beat) are strings the parser converts; the TS types only list numbers.
       const batches: unknown = [
         [
@@ -33,6 +35,7 @@ test('agente edita só por window.vct: montar, revisar, desfazer', async ({ brow
           { type: 'fx.spike', effect: 'glitch', at: 'beat:4', dur: .25, intensity: .6 },
         ],
       ];
+      const planJson = vct.plan(batches as never, { dryRun: true, format: 'json' });
       const plan = vct.plan(batches as never, { label: 'Montagem do agente' });
       const summary = vct.summary();
       const lint = vct.lint();
@@ -40,12 +43,13 @@ test('agente edita só por window.vct: montar, revisar, desfazer', async ({ brow
       const undone = vct.undo();
       const afterUndo = vct.summary();
       vct.redo();
-      return { describeLength: describe.length, unsafe: /[?&=]/.test(describe + summary + lint), summary, lint, frameWidth: frame.width, undone, afterUndo, plan: plan.results.length };
+      return { describeLength: describe.length, unsafe: /[?&=]/.test(describe + index + summary + lint + plan + JSON.stringify(planJson)), summary, lint, frameWidth: frame.width, undone, afterUndo, plan, planJson };
     });
 
     expect(report.unsafe).toBe(false);
     expect(report.describeLength).toBeGreaterThan(2000);
-    expect(report.plan).toBe(2);
+    expect(report.plan).toMatch(/^ok · 2 lotes · \d+ comandos · desfazer: Montagem do agente/);
+    expect(report.planJson).toMatchObject({ ok: true, errors: [] });
     expect(report.summary).toContain('Títulos [titulos]: 0-4 titulo');
     expect(report.summary).toContain('Base [base]: 0-8 fundo');
     expect(report.summary).toContain('pós: glitch_spike_2000 glitch');

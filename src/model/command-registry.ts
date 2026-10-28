@@ -27,7 +27,7 @@ export const COMMANDS = {
   // Mídia
   "clip.place": {
     group: "mídia",
-    summary: "Põe uma mídia do bin na timeline num passo: tempo, trecho do arquivo, enquadramento e áudio vinculado. Sem endTime nem duration usa o resto do arquivo. Sem trackId cria faixa nova no topo.",
+    summary: "Põe uma mídia do bin na timeline num passo: tempo, trecho do arquivo, enquadramento e áudio vinculado. Sem fit entra no tamanho original do arquivo, centralizada. Sem endTime nem duration usa o resto do arquivo. Sem trackId cria faixa nova no topo.",
     fields: { layerId: id, asset: { type: "string", required: true, maxLength: 500 }, startTime: time, endTime: { type: "number", min: 0, max: 7200 },
       duration: { type: "number", min: .001, max: 7200 }, trackId: { type: "id" }, sourceIn: { type: "number", min: 0, max: 7200 },
       playbackRate: { type: "number", min: .05, max: 8 }, fit: { type: "enum", values: FITS }, audio: { type: "enum", values: ["linked", "none"] },
@@ -80,6 +80,13 @@ export const COMMANDS = {
     fields: { layerId: id, text: { type: "string", required: true, maxLength: 10000, allowEmpty: true } },
     example: { type: "layer.setText", layerId: "titulo", text: "Olá" },
   },
+  "layer.setMany": {
+    group: "camada",
+    summary: "Aplica as mesmas props a várias camadas num passo: layerIds, trackId e kind escolhem (os filtros se somam). multiply multiplica props numéricas pelo valor atual de cada camada (fontSize 1.4 deixa 40% maior). Valida como layer.set.",
+    fields: { layerIds: { type: "array", maxItems: 500, description: "lista de ids de camada" }, trackId: { type: "id" }, kind: { type: "enum", values: layerKinds },
+      props: { type: "object", description: "valores iguais para todas" }, multiply: { type: "object", description: "prop numérica: fator, como fontSize 1.4" } },
+    example: { type: "layer.setMany", trackId: "legenda_track", props: { fill: "#ffffff", shadowOpacity: .8 }, multiply: { fontSize: 1.4 } },
+  },
   // Clipes
   "clip.move": {
     group: "clipe", summary: "Move no tempo (e para trackId existente), com keyframes, fades e áudio vinculado.",
@@ -110,6 +117,12 @@ export const COMMANDS = {
     group: "clipe", summary: `Transição de entrada {type:${TRANSITION_TYPES.join("|")}, duration} ou null.`,
     fields: { layerId: id, transition: { type: "object", required: true, nullable: true } },
     example: { type: "clip.setTransition", layerId: "b2", transition: { type: "dissolve", duration: .5 } },
+  },
+  "clip.fade": {
+    group: "clipe",
+    summary: "Fade de entrada (in) e/ou saída (out), em s, no clipe e no áudio vinculado juntos. 0 tira o fade. Com transição, a sobreposição manda no áudio.",
+    fields: { layerId: id, in: { type: "number", min: 0, max: 7200 }, out: { type: "number", min: 0, max: 7200 } },
+    example: { type: "clip.fade", layerId: "torre1", in: .5, out: 1 },
   },
   // Faixas
   "track.create": {
@@ -276,7 +289,7 @@ export const COMMANDS = {
     example: { type: "text.animate", layerId: "titulo", in: "slide-up", out: "fade", duration: .4 },
   },
   "text.fromSrt": {
-    group: "macro", summary: "Cria uma legenda de texto por bloco SRT numa faixa nova, acima da área de interface das redes.",
+    group: "macro", summary: "Cria uma legenda de texto por bloco SRT numa faixa nova (legenda_track), dentro da área segura. Tamanho padrão 5,5% do lado menor da composição (vale em 16:9 e em 9:16); props muda tudo e layer.setMany ajusta depois.",
     fields: { srt: { type: "string", required: true, maxLength: 200000 }, trackId: { type: "id" }, idPrefix: { type: "id" }, props: { type: "object" } },
     example: { type: "text.fromSrt", srt: "1\n00:00:01,000 --> 00:00:03,000\nOlá" },
   },

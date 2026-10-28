@@ -6,7 +6,9 @@ const archivePath = new URL(`../release/NoisetupiVideoContentToolWeb-Hostinger-$
 const archive = unzipSync(new Uint8Array(await readFile(archivePath)));
 const index = strFromU8(archive["index.html"] || new Uint8Array());
 const version = JSON.parse(strFromU8(archive["version.json"] || new Uint8Array()));
-const scriptPath = Object.keys(archive).find((path) => /^assets\/index-.*\.js$/.test(path));
+// O build tem mais de um assets/index-*.js (pedaços com o mesmo nome): o principal é o que o index.html carrega.
+const bundles = Object.keys(archive).filter((path) => /^assets\/index-.*\.js$/.test(path));
+const scriptPath = bundles.find((path) => index.includes(path)) ?? bundles[0];
 if (!scriptPath) throw new Error("Bundle JavaScript não encontrado.");
 const script = strFromU8(archive[scriptPath]);
 const fontPaths = Object.keys(archive).filter((path) => /\.(woff2?|ttf|otf)$/.test(path));

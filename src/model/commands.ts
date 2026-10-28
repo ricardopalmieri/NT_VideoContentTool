@@ -61,6 +61,8 @@ export type VctCommand =
   | { type: "audioEffect.setParam"; effectId: string; parameter: string; value: number }
   | { type: "audioEffect.remove"; effectId: string }
   | { type: "layer.set"; layerId: string; props: Record<string, unknown>; allowOverlap?: boolean }
+  | ({ type: "layer.setMany" } & ops.SetManyCommand)
+  | { type: "clip.fade"; layerId: string; in?: number; out?: number }
   | { type: "clip.paste"; clipboard: ClipboardClips; startTime: number }
   | { type: "track.reorder"; trackId: string; index: number }
   | { type: "keyframe.set"; layerId: string; property: string; keys: unknown[]; timeBase?: TimeBase }
@@ -91,6 +93,20 @@ export type VctCommand =
   | ({ type: "text.animate" } & Parameters<typeof macros.expandAnimate>[1])
   | ({ type: "text.fromSrt" } & Parameters<typeof macros.expandSrt>[1]);
 
+/** A failure tied to one command of the batch (index counts from 0), so the agent sees which one broke. */
+export class CommandError extends Error {
+  constructor(message: string, readonly index?: number, readonly commandType?: string) {
+    super(message);
+    this.name = "CommandError";
+  }
+}
+
+function tagged(error: unknown, index: number, value: unknown) {
+  if (error instanceof CommandError) return error;
+  const type = isRecord(value) && typeof value.type === "string" ? value.type : undefined;
+  return new CommandError(error instanceof Error ? error.message : String(error), index, type);
+}
+
 export interface CommandResult {
   project: ProjectDocument;
   results: unknown[];
@@ -115,6 +131,9 @@ function parseCommand(value: unknown): VctCommand {
     }
   }
   if (type === "layer.create" && ["image", "video", "guide"].includes(value.kind as string)) requiredText(value.asset, "asset");
+  if (type === "layer.setMany" && value.layerIds !== undefined) {
+    for (const layerId of value.layerIds as unknown[]) requiredText(layerId, "layerIds");
+  }
   if (type === "clip.paste") {
     const clipboard = value.clipboard as Record<string, unknown>;
     if (!Array.isArray(clipboard.layers) || !Array.isArray(clipboard.audio) || !clipboard.layers.length) {
@@ -347,6 +366,8 @@ function runCommand(project: ProjectDocument, command: VctCommand, tolerance: nu
       throw new Error(`Efeito de áudio não encontrado: ${command.effectId}.`);
     }
     case "layer.set": return ops.setLayerProps(project, command.layerId, command.props, command.allowOverlap);
+    case "layer.setMany": return ops.setManyLayerProps(project, command);
+    case "clip.fade": return ops.fadeClip(project, command.layerId, command.in, command.out);
     case "clip.paste": {
       const pasted = pasteClips(project, command.clipboard, command.startTime);
       return { layerIds: pasted.map((layer) => layer.id) };
@@ -407,15 +428,25 @@ export function runProjectCommands(
   if (!Number.isFinite(tolerance) || tolerance < 0) throw new Error("A tolerância de keyframe é inválida.");
   // bar:beat times use the grid already in the project or set earlier in this batch.
   let timing = source.settings;
-  const commands = input.map((value) => {
-    const command = parseCommand(resolveCommandTimes(value, timing));
-    if (command.type === "composition.set" && isRecord(command.props) && isRecord(command.props.grid)) {
-      timing = { ...timing, grid: { offset: 0, beatsPerBar: 4, ...command.props.grid } as ProjectDocument["settings"]["grid"] };
+  const commands = input.map((value, index) => {
+    try {
+      const command = parseCommand(resolveCommandTimes(value, timing));
+      if (command.type === "composition.set" && isRecord(command.props) && isRecord(command.props.grid)) {
+        timing = { ...timing, grid: { offset: 0, beatsPerBar: 4, ...command.props.grid } as ProjectDocument["settings"]["grid"] };
+      }
+      return command;
+    } catch (error) {
+      throw tagged(error, index, value);
     }
-    return command;
   });
   const project = structuredClone(source);
-  const results = commands.map((command) => executeCommand(project, command, tolerance));
+  const results = commands.map((command, index) => {
+    try {
+      return executeCommand(project, command, tolerance);
+    } catch (error) {
+      throw tagged(error, index, command);
+    }
+  });
   normalizeTrackMeta(project);
   // A composition resize remaps every layer, locked ones included (as the editor always did).
   const resizing = commands.some((command) => command.type === "composition.set" && ("width" in command.props || "height" in command.props));

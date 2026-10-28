@@ -16,10 +16,21 @@ a evidência está em `docs/BASELINE-0.6.2.json`.
 | Inter | 5.3.0 do pacote Fontsource | OFL-1.1 | [Pacote](https://www.npmjs.com/package/@fontsource/inter/v/5.3.0), [aviso e licença](LICENSES/inter-OFL-1.1.txt) |
 | Space Grotesk | 5.3.0 do pacote Fontsource | OFL-1.1 | [Pacote](https://www.npmjs.com/package/@fontsource/space-grotesk/v/5.3.0), [aviso e licença](LICENSES/space-grotesk-OFL-1.1.txt) |
 | Syne | 5.3.0 do pacote Fontsource | OFL-1.1 | [Pacote](https://www.npmjs.com/package/@fontsource/syne/v/5.3.0), [aviso e licença](LICENSES/syne-OFL-1.1.txt) |
+| glfx.js, Evan Wallace (shaders portados: desfoque triangular/tilt-shift, zoom blur, meio-tom colorido, vibrance, vinheta, nitidez) | 0.0.4 | MIT | [Pacote](https://www.npmjs.com/package/glfx/v/0.0.4), [aviso e licença](LICENSES/glfx-MIT.txt) |
+| postprocessing, Raoul van Rüschen / pmndrs (ideias e fórmulas portadas: glitch, aberração cromática, vinheta, grão) | 6.39.5 | zlib | [Pacote](https://www.npmjs.com/package/postprocessing/v/6.39.5), [aviso e licença](LICENSES/postprocessing-zlib.txt) |
+| three.js, autores do three.js (estrutura do UnrealBloomPass: filtro de brilho, mips gaussianos, soma) | 0.186.1 | MIT | [Pacote](https://www.npmjs.com/package/three/v/0.186.1), [aviso e licença](LICENSES/three-MIT.txt) |
+| GPUImage, Brad Larson e colaboradores (exposição e balanço de branco, reescritos a partir das fórmulas; não está no npm) | — | BSD-3-Clause | [Fonte](https://github.com/BradLarson/GPUImage), [aviso e licença](LICENSES/GPUImage-BSD-3-Clause.txt) |
 
 Os textos de licença e copyrights foram copiados dos pacotes instalados nas
 versões acima. As versões Fontsource identificam os pacotes de distribuição,
 não necessariamente a versão interna do desenho tipográfico.
+
+Os efeitos de `src/renderer/effects/` são shaders GLSL escritos para este projeto
+com base nos algoritmos dos projetos acima (glfx.js, postprocessing, three.js e
+GPUImage). Nenhum arquivo deles é distribuído: nem os pacotes npm nem os
+repositórios entram no build; só a atribuição acima. Cada módulo cita sua origem
+no comentário de cabeçalho. O texto da licença do GPUImage é cópia do `License.txt` do
+repositório original (conferido em 27/10/2026).
 
 Transformers.js e ONNX Runtime Web rodam só quando a pessoa pede a legenda
 automática, num Web Worker; os arquivos WebAssembly do ONNX Runtime são

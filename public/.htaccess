@@ -10,6 +10,12 @@ Options -Indexes
 <IfModule mod_headers.c>
   Header always set X-Content-Type-Options "nosniff"
   Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  # Isolamento de origem (crossOriginIsolated): libera SharedArrayBuffer, e com ele as threads do WebAssembly na
+  # legenda automática (sem isso o WASM roda numa thread só). "credentialless" mantém o download do modelo no
+  # Hugging Face (fetch com CORS) e não exige CORP nos recursos de outros sites. Vale para todas as respostas,
+  # inclusive os scripts dos workers e o .wasm.
+  Header always set Cross-Origin-Opener-Policy "same-origin"
+  Header always set Cross-Origin-Embedder-Policy "credentialless"
   # Arquivos de assets/ têm hash no nome: um deploy novo gera nomes novos.
   <If "%{REQUEST_URI} =~ m#/assets/#">
     Header set Cache-Control "public, max-age=31536000, immutable"

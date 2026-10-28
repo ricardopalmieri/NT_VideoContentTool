@@ -1,4 +1,5 @@
 import { vertexSource, fragmentSource, compositeFragmentSource } from "./shaders";
+import { EFFECT_MODULES, EffectRuntime } from "./effects";
 import { sourceTimeFor } from "./source-time";
 import { shouldSeekVideo } from "./video-seek";
 import { fadeEnvelope } from "../timeline/timing";
@@ -6,10 +7,13 @@ import { visualTracks } from "../model/clip-tracks";
 import { transitionState, type TransitionState } from "../model/transitions";
 import type { EffectNode, Layer, ProjectDocument } from "../model/types";
 import { resolveAssetUrl } from "../io/web-platform";
+import { EFFECT_CATALOG } from "../model/effect-catalog";
 
 interface Target {
   framebuffer: WebGLFramebuffer;
   texture: WebGLTexture;
+  width: number;
+  height: number;
 }
 
 // Raster pré-efeitos de uma layer parada, já na GPU; `key` descreve tudo que o desenhou.
@@ -29,6 +33,13 @@ const POSITION_LOCATION = 0;
 const RASTER_CACHE_MAX_LAYERS = 32;
 const RASTER_CACHE_MAX_BYTES = 256 * 1024 * 1024;
 
+// Vista de diagnóstico (só preview e capturas; a exportação sempre a ignora).
+export interface RenderDiagnostics {
+  soloLayerId: string | null;
+  bypassEffects: boolean;
+}
+const NO_DIAGNOSTICS: RenderDiagnostics = { soloLayerId: null, bypassEffects: false };
+
 interface EffectHistory {
   targets: Target[];
   writeIndex: number;
@@ -39,6 +50,8 @@ interface EffectHistory {
 export class ComposerRenderer {
   readonly canvas: HTMLCanvasElement;
   private gl: WebGL2RenderingContext;
+  // Efeitos modulares (src/renderer/effects): cada um compila seus próprios passes e usa o pool de buffers daqui.
+  private fx: EffectRuntime;
   private program: WebGLProgram;
   // Só o composite (sem efeito): evita o shader de efeitos inteiro por pixel.
   private compositeProgram: WebGLProgram;
@@ -61,6 +74,7 @@ export class ComposerRenderer {
   private readonly handleFontsLoaded = () => { this.fontGeneration++; };
   private previewScale = 1;
   private exportScale = 1;
+  private diagnostics: RenderDiagnostics = NO_DIAGNOSTICS;
   private activeScale = 1;
   private previewPlaying = false;
   private contextLost = false;
@@ -89,6 +103,7 @@ export class ComposerRenderer {
     });
     if (!gl) throw new Error("WebGL2 is required.");
     this.gl = gl;
+    this.fx = new EffectRuntime(gl);
     this.program = this.createProgram(vertexSource, fragmentSource);
     this.compositeProgram = this.createProgram(vertexSource, compositeFragmentSource);
     this.sourceTexture = this.createTexture();
@@ -126,6 +141,17 @@ export class ComposerRenderer {
   // Resolução de saída da exportação (fração da composição); 1 mantém o render em 100%.
   setExportScale(scale: number) {
     this.exportScale = Math.max(.1, Math.min(1, Number.isFinite(scale) ? scale : 1));
+  }
+
+  // Solo mostra só uma layer; bypass pula efeitos de layer e de pós. Não muda o raster
+  // das layers (o cache continua valendo), mas o histórico do RGB delay deixa de ser
+  // contínuo quando os efeitos são pulados e por isso é descartado.
+  setDiagnostics(state: { soloLayerId: string | null; bypassEffects: boolean }) {
+    const next: RenderDiagnostics = { soloLayerId: state.soloLayerId ?? null, bypassEffects: !!state.bypassEffects };
+    if (next.soloLayerId === this.diagnostics.soloLayerId && next.bypassEffects === this.diagnostics.bypassEffects) return;
+    this.diagnostics = next.soloLayerId === null && !next.bypassEffects ? NO_DIAGNOSTICS : next;
+    if (!this.contextLost) this.clearEffectHistories();
+    this.invalidate();
   }
 
   private resizeRenderSurface(scale: number) {
@@ -259,6 +285,7 @@ export class ComposerRenderer {
       gl.deleteTexture(target.texture);
     }
     this.targets = [];
+    this.fx.dispose();
     gl.deleteTexture(this.sourceTexture);
     gl.deleteProgram(this.program);
     gl.deleteProgram(this.compositeProgram);
@@ -333,20 +360,9 @@ export class ComposerRenderer {
     return texture;
   }
 
+  // RGBA16F quando a GPU permite: os efeitos mantêm valores acima de 1 entre os passes.
   private createTarget(): Target {
-    const gl = this.gl;
-    const texture = this.createTexture();
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this.canvas.width, this.canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    const framebuffer = gl.createFramebuffer()!;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
-    if (status !== gl.FRAMEBUFFER_COMPLETE) {
-      gl.deleteFramebuffer(framebuffer);
-      gl.deleteTexture(texture);
-      throw new Error(`WebGL framebuffer is incomplete (${status}).`);
-    }
-    return { framebuffer, texture };
+    return this.fx.createTarget(this.canvas.width, this.canvas.height);
   }
 
   private resetTargets() {
@@ -356,6 +372,7 @@ export class ComposerRenderer {
       gl.deleteFramebuffer(target.framebuffer);
       gl.deleteTexture(target.texture);
     }
+    this.fx.reset();
     this.targets = [this.createTarget(), this.createTarget()];
     this.compTarget = this.createTarget();
     this.clearEffectHistories();
@@ -701,12 +718,14 @@ export class ComposerRenderer {
     return true;
   }
 
+  // Só os efeitos que ainda vivem no shader único; os demais são módulos em ./effects.
   private effectCode(kind: EffectNode["kind"]) {
-    return ({ mirror: 1, feedback: 2, levels: 3, kaleidoscope: 4, blur: 5, crop: 6, edge: 7, colorKey: 8, animaTracer: 9, lumaKey: 10, chromaKey: 11, rgbDelay: 20, noise: 21, glitch: 22, vhs: 23, cameraShake: 24, glow: 25 } as const)[kind];
+    const codes: Partial<Record<EffectNode["kind"], number>> = { mirror: 1, feedback: 2, kaleidoscope: 4, crop: 6, edge: 7, colorKey: 8, animaTracer: 9, lumaKey: 10, chromaKey: 11, rgbDelay: 20, vhs: 23, cameraShake: 24 };
+    return codes[kind] ?? 0;
   }
 
   private effectParam(effect: EffectNode, key: string, time: number) {
-    const fallback = effect.params[key] ?? 0;
+    const fallback = effect.params[key] ?? (EFFECT_CATALOG[effect.kind]?.defaults as Record<string, number> | undefined)?.[key] ?? 0;
     const keys = effect.keyframes?.[key];
     if (!keys?.length) return fallback;
     const ordered = [...keys].sort((a, b) => a.time - b.time);
@@ -728,9 +747,7 @@ export class ComposerRenderer {
     switch (effect.kind) {
       case "mirror": return [p.mode, p.center];
       case "feedback": return [];
-      case "levels": return [p.brightness, p.contrast, p.saturation, p.gamma];
       case "kaleidoscope": return [p.segments, p.rotation, p.zoom];
-      case "blur": return [p.radius];
       case "crop": return [p.left, p.right, p.top, p.bottom];
       case "edge": return [p.amount, p.threshold, p.colorize];
       case "colorKey": return [p.hue, p.tolerance, p.softness];
@@ -738,11 +755,9 @@ export class ComposerRenderer {
       case "chromaKey": return [p.red, p.green, p.blue, p.tolerance, p.softness, p.spill];
       case "animaTracer": return [p.progress, p.sensitivity, p.thickness, p.softness, p.direction, p.irregularity, 0, p.invert];
       case "rgbDelay": return [p.redDelay, p.greenDelay, p.blueDelay];
-      case "noise": return [p.amount, p.scale];
-      case "glitch": return [p.amount, p.frequency, p.blockSize, p.shift, p.rgbSplit, p.scanlines];
       case "vhs": return [p.amount, p.scanlines, p.tracking];
       case "cameraShake": return [p.amount, p.speed];
-      case "glow": return [p.threshold, p.radius, p.intensity, p.knee, p.saturation];
+      default: return [];
     }
   }
 
@@ -789,6 +804,23 @@ export class ComposerRenderer {
     const values = parameterOverrides || (effect ? this.effectValues(effect, time) : []);
     for (let i = 0; i < 8; i++) gl.uniform1f(this.uniforms.get(`u_p${i}`)!, values[i] || 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+
+  // Um módulo que não faz nada devolve a própria entrada: o próximo passe nunca pode escrever nela.
+  private otherTarget(current: WebGLTexture) {
+    return this.targets[0].texture === current ? this.targets[1] : this.targets[0];
+  }
+
+  // Parâmetros avaliados no tempo (keyframes) + os padrões do catálogo para chaves que o projeto não tem.
+  private moduleParams(effect: EffectNode, time: number) {
+    const params: Record<string, number> = { mix: this.effectParam(effect, "mix", time) };
+    for (const key of Object.keys(EFFECT_CATALOG[effect.kind].defaults)) params[key] = this.effectParam(effect, key, time);
+    return params;
+  }
+
+  private runModule(effect: EffectNode, input: WebGLTexture, target: Target, time: number) {
+    const frame = { time, width: this.canvas.width, height: this.canvas.height, scale: this.activeScale };
+    return this.fx.run(EFFECT_MODULES[effect.kind]!, this.moduleParams(effect, time), frame, input, target);
   }
 
   private rgbDelayChannels(effect: EffectNode, texture: WebGLTexture, time: number): [WebGLTexture, WebGLTexture, WebGLTexture] {
@@ -930,27 +962,13 @@ export class ComposerRenderer {
   private compositeRaster(layer: Layer, effects: EffectNode[], time: number, source: WebGLTexture, transitionOpacity = 1) {
     const gl = this.gl;
     let current = source;
-    let index = 0;
     gl.disable(gl.BLEND);
     for (const effect of effects) {
-      if (effect.kind === "blur") {
-        const radius = Math.max(0, this.effectParam(effect, "radius", time));
-        const quality = Math.max(1, Math.min(3, Math.round(this.effectParam(effect, "quality", time) || 1)));
-        for (let pass = 0; pass < quality; pass++) {
-          let target = this.targets[index % 2];
-          this.drawPass(current, target, effect, time, undefined, [radius / Math.sqrt(quality), 0]);
-          current = target.texture;
-          index++;
-          target = this.targets[index % 2];
-          this.drawPass(current, target, effect, time, undefined, [radius / Math.sqrt(quality), 1]);
-          current = target.texture;
-          index++;
-        }
-      } else {
-        const target = this.targets[index % 2];
+      const target = this.otherTarget(current);
+      if (EFFECT_MODULES[effect.kind]) current = this.runModule(effect, current, target, time);
+      else {
         this.drawPass(current, target, effect, time);
         current = target.texture;
-        index++;
       }
     }
     this.blendFor(layer.blendMode);
@@ -982,6 +1000,8 @@ export class ComposerRenderer {
     }
     this.notReady.clear();
     this.ensureRenderScale(exporting ? this.exportScale : this.previewScale);
+    // A exportação nunca usa a vista de diagnóstico.
+    const diagnostics = exporting ? NO_DIAGNOSTICS : this.diagnostics;
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.compTarget.framebuffer);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
@@ -991,10 +1011,11 @@ export class ComposerRenderer {
     gl.clear(gl.COLOR_BUFFER_BIT);
 
     for (const layer of this.drawOrder()) {
-      if (!layer.visible || (exporting && !layer.exportable) || time < layer.startTime || time > layer.endTime) continue;
+      if (diagnostics.soloLayerId !== null ? layer.id !== diagnostics.soloLayerId : !layer.visible) continue;
+      if ((exporting && !layer.exportable) || time < layer.startTime || time > layer.endTime) continue;
       const transition = transitionState(this.project, layer, time);
       if (transition.opacity <= .001 || (transition.reveal && transition.reveal.amount <= .001)) continue;
-      const enabledEffects = layer.effects.filter((item) => item.enabled);
+      const enabledEffects = diagnostics.bypassEffects ? [] : layer.effects.filter((item) => item.enabled);
       const trail = enabledEffects.find((effect) => effect.kind === "feedback");
       const visualEffects = enabledEffects.filter((effect) => effect !== trail);
       if (!trail) {
@@ -1039,13 +1060,15 @@ export class ComposerRenderer {
 
     gl.disable(gl.BLEND);
     let current = this.compTarget.texture;
-    let index = 0;
-    for (const effect of this.project.postEffects.filter((item) => item.enabled)) {
-      const target = this.targets[index % 2];
+    for (const effect of diagnostics.bypassEffects ? [] : this.project.postEffects.filter((item) => item.enabled)) {
+      const target = this.otherTarget(current);
+      if (EFFECT_MODULES[effect.kind]) {
+        current = this.runModule(effect, current, target, time);
+        continue;
+      }
       const channels = effect.kind === "rgbDelay" ? this.rgbDelayChannels(effect, current, time) : undefined;
       this.drawPass(current, target, effect, time, channels);
       current = target.texture;
-      index++;
     }
     this.drawPass(current, null, null, time);
   }

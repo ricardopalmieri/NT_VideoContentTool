@@ -18,23 +18,50 @@ export function renderWarningsButton(project: ProjectDocument, language: Languag
   return `<button type="button" class="warnings-button ${errors ? "has-errors" : ""}" id="open-warnings" aria-haspopup="dialog">${label}</button>`;
 }
 
+const openers = new Map<string, HTMLElement | null>();
+
 function closePanel(id: string) {
   document.getElementById(id)?.remove();
+  const opener = openers.get(id);
+  openers.delete(id);
+  // O foco volta ao botão que abriu a janela (se ele ainda existir).
+  if (opener?.isConnected) opener.focus({ preventScroll: true });
 }
 
 function openPanel(id: string, title: string, body: string, language: Language) {
+  const opener = document.activeElement instanceof HTMLElement && !document.getElementById(id)?.contains(document.activeElement) ? document.activeElement : openers.get(id) ?? null;
   closePanel(id);
+  openers.set(id, opener);
   const panel = document.createElement("div");
   panel.id = id;
   panel.className = "info-panel";
   panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
   panel.setAttribute("aria-label", title);
   panel.innerHTML = `<div class="info-panel-box"><header><strong>${escape(title)}</strong>
     <button type="button" data-close-panel aria-label="${language === "pt-BR" ? "Fechar" : "Close"}">×</button></header>${body}</div>`;
   panel.addEventListener("click", (event) => {
     if (event.target === panel || (event.target as HTMLElement).closest("[data-close-panel]")) closePanel(id);
   });
-  panel.addEventListener("keydown", (event) => { if (event.key === "Escape") closePanel(id); });
+  panel.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      closePanel(id);
+    } else if (event.key === "Tab") {
+      // Tab fica dentro da janela.
+      const items = [...panel.querySelectorAll<HTMLElement>("button, [tabindex]")].filter((item) => !item.matches(":disabled, [tabindex='-1']"));
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  });
   document.body.append(panel);
   panel.querySelector<HTMLElement>("[data-close-panel]")?.focus();
   return panel;

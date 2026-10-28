@@ -64,6 +64,14 @@ export function hideSheet() {
   document.getElementById(OVERLAY_ID)?.remove();
 }
 
+/** One captured frame on the same overlay, with its time in the label (captureFrame show). */
+export async function showFrame(frame: { dataUrl: string; width: number; height: number; time: number; notReady?: string[] }) {
+  const image = await loadImage(frame.dataUrl);
+  const warning = Boolean(frame.notReady?.length);
+  const label = `${frame.time.toFixed(2)} s${warning ? " (sem decode)" : ""}`;
+  showSheet(composeSheet([{ image, width: frame.width, height: frame.height, label, warning }], 1, Math.max(320, frame.width)), `Quadro ${label}`);
+}
+
 function seek(video: HTMLVideoElement, time: number) {
   return new Promise<boolean>((resolve) => {
     const timeout = window.setTimeout(() => resolve(false), 4000);

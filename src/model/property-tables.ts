@@ -45,7 +45,7 @@ export const LAYER_PROPERTIES = {
   startTime: time("início na timeline"),
   endTime: { type: "number", min: .001, max: 7200, description: "fim na timeline" },
   sourceIn: time("início no arquivo"),
-  sourceOut: time("fim no arquivo; 0 = até o fim"),
+  sourceOut: time("fim no arquivo; 0 vale até o fim"),
   playbackRate: { type: "number", min: .05, max: 8 },
   reverse: { type: "boolean" },
   loop: { type: "boolean" },
@@ -100,3 +100,31 @@ export const COMPOSITION_PROPERTIES = {
 } as const satisfies Record<string, FieldSpec>;
 
 export type CompositionProperty = keyof typeof COMPOSITION_PROPERTIES;
+
+export type PropertyKind = "text" | "geometry" | "image" | "video" | "guide" | "audio" | "composition";
+
+const COMMON_LAYER_PROPERTIES: readonly LayerProperty[] = [
+  "name", "x", "y", "width", "height", "scaleX", "scaleY", "rotation", "opacity", "blendMode", "visible", "locked", "exportable",
+  "startTime", "endTime", "fadeInStart", "fadeInEnd", "fadeOutStart", "fadeOutEnd", "scaleLocked", "sizeLocked",
+];
+const PAINT_PROPERTIES: readonly LayerProperty[] = ["fill", "fillOpacity", "fillEnabled", "stroke", "strokeOpacity", "strokeWidth", "strokeEnabled"];
+
+/** Which layer.set properties make sense for each kind of layer (layer.set itself accepts the whole table). */
+export const LAYER_KIND_PROPERTIES: Readonly<Record<"text" | "geometry" | "image" | "video" | "guide", readonly LayerProperty[]>> = {
+  text: [...COMMON_LAYER_PROPERTIES, "text", "fontFamily", "fontSize", "fontWeight", "align", ...PAINT_PROPERTIES, "shadowColor", "shadowOpacity", "shadowBlur", "shadowX", "shadowY"],
+  geometry: [...COMMON_LAYER_PROPERTIES, "geometry", ...PAINT_PROPERTIES],
+  image: [...COMMON_LAYER_PROPERTIES, "asset"],
+  video: [...COMMON_LAYER_PROPERTIES, "asset", "sourceIn", "sourceOut", "playbackRate", "reverse", "loop"],
+  guide: [...COMMON_LAYER_PROPERTIES, "asset"],
+};
+
+/** Names an agent may type after "props" in describe(), without accents. */
+const PROPERTY_KIND_ALIASES: Readonly<Record<string, PropertyKind | "layer">> = {
+  texto: "text", text: "text", forma: "geometry", geometria: "geometry", geometry: "geometry", shape: "geometry",
+  imagem: "image", image: "image", video: "video", guia: "guide", guide: "guide", audio: "audio",
+  composicao: "composition", composition: "composition", camada: "layer", layer: "layer",
+};
+
+export function propertyKindOf(name: string) {
+  return PROPERTY_KIND_ALIASES[name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase()];
+}

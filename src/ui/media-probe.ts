@@ -1,13 +1,10 @@
 // Reads what the bin shows about an imported file: kind, duration, size in
 // pixels, whether it has audio, a fingerprint for relink and a thumbnail.
-import { probeAudio } from "../audio/audio-engine";
+import { probeAudioInfo } from "../audio/audio-engine";
 import { fileFingerprint, resolveAssetUrl } from "../io/web-platform";
 import { assetKindOf } from "../model/media-assets";
 import type { AssetSourceMetadata } from "../model/types";
 
-// Decoding the whole audio of a very large video only to learn it has sound
-// costs too much memory; above this size hasAudio stays unknown.
-const AUDIO_PROBE_LIMIT = 400 * 1024 * 1024;
 const THUMB_WIDTH = 192;
 const thumbnails = new Map<string, string>();
 
@@ -72,14 +69,15 @@ export async function probeMedia(asset: string, file: File, source: AssetSourceM
     const info = await videoInfo(url);
     Object.assign(metadata, { duration: info.duration, width: info.width, height: info.height });
     if (info.thumb) thumbnails.set(asset, info.thumb);
-    if (file.size <= AUDIO_PROBE_LIMIT) metadata.hasAudio = await probeAudio(asset).then(() => true, () => false);
+    // Leitura do cabeçalho, sem decodificar o arquivo inteiro (antes ficava em cache na memória).
+    metadata.hasAudio = await probeAudioInfo(asset).then((info) => info.hasAudio, () => false);
   } else if (kind === "image") {
     const info = await imageInfo(url);
     Object.assign(metadata, { width: info.width, height: info.height });
     thumbnails.set(asset, info.thumb);
   } else {
-    const buffer = await probeAudio(asset);
-    metadata.duration = buffer.duration;
+    const info = await probeAudioInfo(asset);
+    metadata.duration = info.duration;
     metadata.hasAudio = true;
   }
   return metadata;

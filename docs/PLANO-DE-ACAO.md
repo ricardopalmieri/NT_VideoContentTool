@@ -36,9 +36,30 @@ Decisões tomadas durante a execução (revisar):
    `TODO(rodada1)`) e testar Firefox, WebKit/iPad emulado e pinça.
 2. **Batch 5.**
 3. **Batch 7** (legenda automática).
-4. Parada para testes do usuário e commit.
+4. Parada para testes do usuário e commit. **Feito** (`f903b1d`, `837220a`).
 
-Depois: 8 → 9 → 10 → 6.
+**Teste real do usuário (27/10/2026):** depoimento em vídeo 1280×720 numa
+composição 1920×1080, legenda automática com Whisper small e depois o Claude
+in Chrome fazendo um "tratamento de diretor de arte" com +40% nas legendas.
+A transcrição saiu fiel e a IA concluiu o trabalho, mas o teste mostrou:
+
+- **Legendas pequenas** (3,5% da altura, 38 px em 1080p) e nenhuma forma de
+  mudar o estilo de todas de uma vez: na interface é uma camada por vez.
+- **Mídia entra em tela cheia:** o enquadramento só oferece "Inteiro" e
+  "Preencher"; falta "Tamanho original" (o 1280×720 foi ampliado).
+- **Efeitos abaixo do nível profissional:** blur em camada de forma gera grade
+  de blocos e retângulos concêntricos; glow estoura fundos claros; faltam
+  vinheta, temperatura/tint, curvas, LUT e letterbox.
+- **Painel de propriedades longo demais** para a tela; pede seções em sanfona.
+- **Pedidos da IA:** `describe()` em 12 páginas e `describe('tipo')` como
+  objeto; retorno de `batch`/`dryRun` sem `ok`/`errors` claros; uma saída
+  com ? & = bloqueada pela extensão; não achou a sombra de texto (existe, mas
+  não aparece onde ela procurou); faltam caixa de fundo, entrelinha e
+  espaçamento de letras; `captureFrame` sem modo de ver na tela; faltam
+  `solo`/bypass para diagnóstico e `clip.fade` de vídeo+áudio; a faixa
+  "IA editando" empurra o layout e muda as coordenadas entre screenshots.
+
+**Nova ordem (27/10/2026):** 11 → pacote de efeitos novo (substitui os atuais) → 12 → resto do 13 → 8 → 9 → 10 → 6. Estado detalhado e especificações para continuar em `HANDOFF-CODEX.md`.
 
 ---
 
@@ -282,6 +303,87 @@ A ordem **0 → 1 → 2** é fixa. Do 3 em diante dá para trocar a ordem.
 - Máscaras e track matte (saem do Batch 6).
 - `wiggle` e `loop` nas keyframes; pré-composições.
 - Importar Lottie (Bodymovin) como camada, via lottie-web.
+
+### Batch 11: correções do teste real e API da IA (médio)
+
+- **Legenda automática maior e com estilo:** tamanho padrão proporcional à
+  composição (≈ 5,5% da altura, 59 px em 1080p) e, no diálogo, tamanho
+  (P/M/G), posição e caixa de fundo antes de inserir.
+- **Edição em massa:**
+  - selecionar várias camadas (Shift/Ctrl+clique, ou a faixa inteira pelo
+    cabeçalho) e editar uma propriedade comum aplica a todas, num passo de
+    desfazer;
+  - "Estilo da faixa" para faixas de legenda: tamanho, fonte, cor, sombra e
+    caixa valem para todas as legendas da faixa;
+  - comandos `layer.setMany` (lista de ids ou `trackId`) para a IA.
+- **Tamanho original sempre:** toda mídia entra no tamanho em pixels do
+  arquivo, centralizada (decisão do usuário, 27/10/2026). Depois a pessoa
+  ajusta com escala, à mão com o snap/alinhador, ou com os botões "Inteiro" e
+  "Preencher" na seção Transformação. A preferência de enquadramento padrão
+  sai; `clip.place` sem `fit` também usa o tamanho original.
+- **Faixa "IA editando" sobreposta:** não empurra mais o layout (posição
+  fixa, sem mudar as coordenadas do preview).
+- **API mais barata para a IA:**
+  - `describe()` vira um índice de uma página (grupos, comandos e campos
+    obrigatórios); `describe('tipo')` volta texto; `describe({ format:
+    'json' })` para quem quer objeto;
+  - `describe('layer.set')` lista as propriedades por tipo de camada
+    (texto mostra sombra, contorno, caixa…);
+  - `batch`, `plan` e `dryRun` devolvem texto curto `ok · N comandos ·
+    avisos: …` ou `erro no comando 3: …`; com `{ format: 'json' }`,
+    `{ ok, errors, warnings, results }`;
+  - toda saída da API passa pelo filtro de ? & =, inclusive objetos;
+  - `captureFrame({ show: true })` mostra o quadro na tela para screenshot,
+    como a folha de contato;
+  - `view.solo(layerId)` e `view.bypassEffects()` para diagnóstico: só mudam
+    a visualização, não o projeto nem o desfazer;
+  - `clip.fade` aplica fade de entrada/saída ao vídeo e ao áudio vinculado.
+- **Investigar primeiro o blur em forma:** reproduzir com teste de pixels;
+  checar se vem do cache de textura ou do shader sem efeito do Batch 5.
+
+### Batch 12: painel de propriedades e texto profissional (médio)
+
+- **Painel em sanfona:** seções Transformação, Texto, Aparência (cor,
+  contorno, sombra, caixa), Tempo e fades, Transição e Efeitos; abre a seção
+  em uso, lembra o estado, "abrir/fechar tudo", alvos de 44 px no tablet.
+- **Texto:** caixa de fundo (cor, opacidade, padding, raio), entrelinha,
+  espaçamento entre letras, alinhamento vertical, quebra automática pela
+  largura; estilos salvos aplicáveis a várias camadas.
+- **Legenda karaokê** com os tempos por palavra do Whisper (ficou do Batch 7).
+- Guia de área segura para legendas (liga/desliga no preview).
+
+### Batch 13: base de efeitos profissional (longo)
+
+- **Pipeline:** texturas intermediárias de 16 bits (RGBA16F, quando o
+  navegador suportar) para não criar faixas; blur, glow e mesclagem em luz
+  linear; alpha pré-multiplicado conferido em cada passo; borda da camada
+  configurável (transparente, estender, espelhar).
+- **Fontes validadas para portar** (licenças permissivas, com atribuição em
+  `THIRD_PARTY_LICENSES.md`):
+  - **GPUImage** (BSD-3): níveis, curvas, balanço de branco
+    (temperatura/tint), sombras/realces, vibrance, exposição, LUT, vinheta,
+    nitidez (unsharp mask), halftone;
+  - **glfx.js** (MIT): blur triangular, zoom blur, tilt-shift, lens blur,
+    denoise, ink, hexágonos, dot screen;
+  - **pmndrs/postprocessing** (zlib) e o UnrealBloom do three.js (MIT): bloom
+    com limiar suave e cadeia de mipmaps, vinheta, aberração cromática, grão
+    de filme;
+  - **W3C Compositing and Blending**: fórmulas dos modos de mesclagem, iguais
+    às do Photoshop;
+  - **ASC CDL** e lift/gamma/gain (padrão de correção de cor) e **LUT 3D
+    .cube** (padrão Adobe/Resolve), para importar LUTs livres;
+  - evitar fontes sem licença livre para uso comercial (ex.: lygia).
+- **Efeitos:**
+  - Cor: exposição, temperatura/tint, lift/gamma/gain, curvas, HSL e
+    vibrance, LUT;
+  - Desfoque: gaussiano separável (2 passes), direcional, zoom, tilt-shift;
+  - Luz: bloom e glow com limiar suave (não estoura fundo claro);
+  - Estilo: vinheta (intensidade, raio, suavidade, forma), grão de filme,
+    aberração cromática, nitidez;
+  - letterbox pronto (2:1, 2,39:1, 1:1, 4:5) e "looks" como macros.
+- **Validação:** cada shader tem uma versão de referência em JS (CPU) e um
+  teste compara pixels com tolerância; imagens de referência para o blur e o
+  glow em camadas maiores que o quadro.
 
 ## 6. Itens que acompanham todos os batches
 

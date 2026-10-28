@@ -1,6 +1,8 @@
 import { fadeInEnvelope, fadeOutEnvelope } from "../timeline/timing";
 import type { AudioTrack, ProjectDocument } from "../model/types";
 import { resolveAssetUrl } from "../io/web-platform";
+import { resampleTo16kMono } from "../transcribe/audio-prep";
+import type { StreamDecodeOptions, StreamDecodeStats } from "../transcribe/stream-decode";
 
 const decoded = new Map<string, AudioBuffer>();
 const reversed = new Map<string, AudioBuffer>();
@@ -258,4 +260,54 @@ export async function decodeAsset(asset: string) {
   } catch (error) {
     throw new Error(`Não foi possível decodificar o áudio de ${asset}: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+/**
+ * Áudio de um arquivo da bandeja em 16 kHz mono (só a transcrição usa), do trecho [from, from + length).
+ * Lê em janelas de 30 s e reamostra aos poucos: o pico de memória é o resultado mais uma janela, não o
+ * áudio inteiro em float. Se o contêiner ou o codec não pode ser lido assim, cai no caminho antigo
+ * (decodeAsset + reamostragem). Quando o arquivo já foi decodificado para tocar, reaproveita esse buffer.
+ */
+export async function decodeAssetTo16kMono(asset: string, options: StreamDecodeOptions = {}) {
+  const url = resolveAssetUrl(asset);
+  if (!url) throw new Error(`Não foi possível decodificar o áudio de ${asset}: arquivo ausente.`);
+  const report = (stats: StreamDecodeStats) => { (globalThis as { __VCT_AUDIO_PREP__?: StreamDecodeStats }).__VCT_AUDIO_PREP__ = stats; };
+  const fallback = async (reason = "") => {
+    const samples = await resampleTo16kMono(await decodeAsset(asset), options.from ?? 0, options.length);
+    report({ path: "fallback", windows: 0, inputFrames: 0, outputSamples: samples.length, windowFrames: 0, reason });
+    return samples;
+  };
+  if (decoded.has(url)) return fallback("cache");
+  try {
+    const blob = await (await fetch(url)).blob();
+    const { streamDecodeTo16kMono } = await import("../transcribe/stream-decode");
+    const { samples, stats } = await streamDecodeTo16kMono(blob, options);
+    report(stats);
+    return samples;
+  } catch (error) {
+    if (options.signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
+    // Contêiner, codec ou leitura que o leitor em partes não cobre: o caminho antigo decide.
+    return fallback(error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * Duração e presença de áudio de um arquivo da bandeja SEM decodificá-lo inteiro (probeAudio guarda o
+ * áudio todo em float para sempre; um vídeo de 30 min ocupa ~600 MB). Quem só precisa disso, como a
+ * importação, deve usar esta. Cai em probeAudio quando o leitor em partes não cobre o arquivo.
+ */
+export async function probeAudioInfo(asset: string): Promise<{ hasAudio: boolean; duration: number }> {
+  const url = resolveAssetUrl(asset);
+  if (!url) throw new Error(`Asset de áudio ausente: ${asset}`);
+  const cached = decoded.get(url);
+  if (cached) return { hasAudio: true, duration: cached.duration };
+  try {
+    const { streamProbeAudio } = await import("../transcribe/stream-decode");
+    const info = await streamProbeAudio(await (await fetch(url)).blob());
+    if (info) return info;
+  } catch {
+    // Cai no caminho antigo.
+  }
+  const buffer = await probeAudio(asset);
+  return { hasAudio: true, duration: buffer.duration };
 }

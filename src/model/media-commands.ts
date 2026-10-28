@@ -77,9 +77,9 @@ export function placeClip(project: ProjectDocument, command: PlaceCommand) {
     fadeInStart: command.startTime, fadeInEnd: command.startTime, fadeOutStart: end, fadeOutEnd: end,
     ...(kind === "video" ? { loop: false, sourceIn, sourceOut: sourceIn + used, playbackRate: rate } : {}),
   });
-  const fit = command.fit ?? (metadata?.width ? "contain" : "none");
-  if (fit !== "none") applyFit(layer, metadata, project.settings, fit);
-  else if (metadata?.width && metadata.height) Object.assign(layer, { width: metadata.width, height: metadata.height });
+  // Sem fit a mídia entra no tamanho original em pixels, centralizada (fit none); a pessoa ou layer.fit enquadra depois.
+  const fit = command.fit ?? "none";
+  if (fit !== "none" || (metadata?.width && metadata.height)) applyFit(layer, metadata, project.settings, fit);
   if (command.trackId) {
     if (overlapsTrack(project, command.trackId, command.startTime, end)) throw new Error(`Faixa ${command.trackId} ocupada entre ${command.startTime} e ${+end.toFixed(3)} s.`);
     if (!insertIntoTrack(project, layer, command.trackId)) throw new Error(`Faixa não encontrada: ${command.trackId}. Crie com track.create.`);

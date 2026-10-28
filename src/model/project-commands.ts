@@ -65,6 +65,65 @@ export function setLayerProps(project: ProjectDocument, layerId: string, rawProp
   return { layerId: layer.id, props };
 }
 
+export interface SetManyCommand {
+  layerIds?: string[]; trackId?: string; kind?: Layer["kind"];
+  props?: Record<string, unknown>; multiply?: Record<string, number>;
+}
+
+/**
+ * Same props for many layers (layerIds, trackId and kind narrow the choice together), validated like
+ * layer.set. `multiply` scales numeric props by a factor from each layer's current value (fontSize 1.4).
+ */
+export function setManyLayerProps(project: ProjectDocument, command: SetManyCommand) {
+  const { layerIds, trackId, kind, props, multiply } = command;
+  if (!layerIds && !trackId && !kind) throw new Error("Informe layerIds, trackId e/ou kind para escolher as camadas.");
+  if (!props && !multiply) throw new Error("Informe props e/ou multiply.");
+  if (props !== undefined && (!isRecord(props) || !Object.keys(props).length)) throw new Error("props deve ser um objeto com ao menos uma propriedade.");
+  if (multiply !== undefined && (!isRecord(multiply) || !Object.keys(multiply).length)) throw new Error("multiply deve ser um objeto com ao menos uma propriedade.");
+  for (const [key, factor] of Object.entries(multiply ?? {})) {
+    if (!Object.hasOwn(LAYER_PROPERTIES, key) || LAYER_PROPERTIES[key as keyof typeof LAYER_PROPERTIES].type !== "number") {
+      throw new Error(`multiply vale só para propriedades numéricas de layer.set: ${key}.`);
+    }
+    if (typeof factor !== "number" || !Number.isFinite(factor) || factor <= 0 || factor > 100) throw new Error(`multiply.${key} precisa de um fator maior que 0 e até 100.`);
+    if (props && key in props) throw new Error(`${key} aparece em props e em multiply; use só um dos dois.`);
+  }
+  let layers = layerIds ? layerIds.map((id) => findLayer(project, id)) : [...project.layers];
+  if (trackId) layers = layers.filter((layer) => trackIdOf(layer) === trackId);
+  if (kind) layers = layers.filter((layer) => layer.kind === kind);
+  if (!layers.length) throw new Error("Nenhuma camada corresponde à seleção (layerIds, trackId, kind).");
+  for (const layer of layers) {
+    const next: Record<string, unknown> = { ...props };
+    for (const [key, factor] of Object.entries(multiply ?? {})) {
+      const current = (layer as unknown as Record<string, unknown>)[key];
+      if (typeof current === "number") next[key] = Math.round(current * factor * 1000) / 1000;
+    }
+    if (!Object.keys(next).length) continue;
+    try {
+      setLayerProps(project, layer.id, next);
+    } catch (error) {
+      throw new Error(`${layer.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return { layerIds: layers.map((layer) => layer.id), count: layers.length };
+}
+
+/** Fade in/out of a clip in seconds; the linked audio clip gets the same fades (see syncLinkedAudioTracks). */
+export function fadeClip(project: ProjectDocument, layerId: string, fadeIn?: number, fadeOut?: number) {
+  if (fadeIn === undefined && fadeOut === undefined) throw new Error("Informe in e/ou out (segundos).");
+  const layer = findLayer(project, layerId);
+  const length = layer.endTime - layer.startTime;
+  const inLength = fadeIn ?? Math.max(0, layer.fadeInEnd - layer.fadeInStart);
+  const outLength = fadeOut ?? Math.max(0, layer.fadeOutEnd - layer.fadeOutStart);
+  if (inLength + outLength > length + EPSILON) {
+    throw new Error(`Os fades somam ${+(inLength + outLength).toFixed(3)} s, mais que o clipe (${+length.toFixed(3)} s).`);
+  }
+  const props: Record<string, number> = {};
+  if (fadeIn !== undefined) Object.assign(props, { fadeInStart: layer.startTime, fadeInEnd: +(layer.startTime + fadeIn).toFixed(4) });
+  if (fadeOut !== undefined) Object.assign(props, { fadeOutStart: +(layer.endTime - fadeOut).toFixed(4), fadeOutEnd: layer.endTime });
+  setLayerProps(project, layerId, props, true);
+  return { layerId, fadeIn: inLength, fadeOut: outLength, audioIds: project.audioTracks.filter((track) => track.linked && track.linkedLayerId === layerId).map((track) => track.id) };
+}
+
 export function setAudioProps(project: ProjectDocument, trackId: string, rawProps: unknown) {
   const props = parseProps(rawProps, AUDIO_PROPERTIES, "audio.set");
   const track = findAudio(project, trackId);

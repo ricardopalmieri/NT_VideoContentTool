@@ -101,7 +101,10 @@ function normalized(content: Buffer) {
   const project = JSON.parse(content.toString()) as ProjectDocument;
   // IDs e relógios são gerados na criação/salvamento de cada sessão.
   const { createdAt: _created, modifiedAt: _modified, ...rest } = project;
-  return { ...rest, layers: project.layers.map(({ id: _id, effects, ...layer }) => ({ ...layer, effects: effects.map(({ id: _effectId, ...effect }) => effect) })) };
+  // Parâmetros neutros que o pacote de efeitos acrescentou depois da 0.6.2 (levels: exposição, temperatura, tint, vibrance).
+  const added = new Set(['exposure', 'temperature', 'tint', 'vibrance']);
+  const withoutAdded = (params: Record<string, number>) => Object.fromEntries(Object.entries(params).filter(([key, value]) => !(added.has(key) && value === 0)));
+  return { ...rest, layers: project.layers.map(({ id: _id, effects, ...layer }) => ({ ...layer, effects: effects.map(({ id: _effectId, params, ...effect }) => ({ ...effect, params: withoutAdded(params) })) })) };
 }
 
 function savedDocument(content: Buffer) {
@@ -711,9 +714,9 @@ test('window.vct valida, consulta e aplica lote determinístico com undo único'
       const result = window.vct.batch([
         { type: "layer.setNumeric", layerId: targetId, property: "x", value: 111 },
         { type: "layer.setName", layerId: targetId, name: "Camada via API" },
-      ], { label: "Teste da API" });
+      ], { label: "Teste da API", format: "json" });
       return {
-        resultCount: result.length,
+        resultCount: result.results.length,
         validation,
         layerCount: window.vct.query("layers").length,
         effectCount: catalog.effects.length,
@@ -726,7 +729,7 @@ test('window.vct valida, consulta e aplica lote determinístico com undo único'
     expect(apiResult.validation).toEqual({ valid: true, issues: [] });
     expect(apiResult.resultCount).toBe(2);
     expect(apiResult.layerCount).toBe(2);
-    expect(apiResult.effectCount).toBe(17);
+    expect(apiResult.effectCount).toBe(23);
     expect(apiResult.eventCount).toBe(1);
     expect(apiResult.event).toMatchObject({ revision: 1, label: "Teste da API" });
     expect(apiResult.returnedName).toBe("Camada via API");

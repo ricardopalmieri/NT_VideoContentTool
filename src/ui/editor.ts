@@ -10,7 +10,7 @@ import { openShortcutsPanel, openWarningsPanel, renderWarningsButton } from "./i
 import { sourceTimeFor } from "../renderer/source-time";
 import { installAgentAutomation, openAgentPanel } from "../automation/agent-panel";
 import { audioLanes, clipNeighbors, copyClips, laneIdOf, overlapsTrack, trackIdOf, trackName, visualTracks, type ClipboardClips } from "../model/clip-tracks";
-import { assetKindOf, listAssets, type BinEntry } from "../model/media-assets";
+import { assetKindOf, fitFrame, listAssets, type BinEntry, type Fit } from "../model/media-assets";
 import { BIN_DRAG_TYPE, IMPORT_ACCEPT, bindMediaBin, openImportProgress, renderMediaBin, type BinActions, type BinView } from "./media-bin";
 import { binThumbnail, ensureThumbnail, probeMedia } from "./media-probe";
 import { autoTransitionsForOverlap, DEFAULT_TRANSITION_DURATION, isTransitionType, syncTransitionAudioFades, transitionWindow, TRANSITION_TYPES, type TransitionType } from "../model/transitions";
@@ -124,9 +124,32 @@ let videoTrackZoomY = Number(localStorage.getItem("nt-vct-video-track-zoom-y")) 
 let audioTrackZoomY = Number(localStorage.getItem("nt-vct-audio-track-zoom-y")) || 1;
 let timelineSnap = localStorage.getItem("nt-vct-timeline-snap") !== "false";
 let canvasSnap = localStorage.getItem("nt-vct-canvas-snap") !== "false";
-let leftColumnWidth = Number(localStorage.getItem("nt-vct-left-width")) || 264;
-let rightColumnWidth = Number(localStorage.getItem("nt-vct-right-width")) || 310;
-let timelineHeight = Number(localStorage.getItem("nt-vct-timeline-height")) || 240;
+// Tamanhos dos painéis (divisores). O armazenamento pode não existir (janela privada): nada disso pode quebrar o editor.
+const SPLIT_STORAGE = { left: "nt-vct-left-width", right: "nt-vct-right-width", timeline: "nt-vct-timeline-height", leftTop: "nt-vct-left-top-height", inspectorFx: "nt-vct-inspector-fx-height", labels: "nt-vct-track-labels-width" } as const;
+function readSplit(key: string): number | null {
+  try {
+    const value = Number(localStorage.getItem(key));
+    return Number.isFinite(value) && value > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+function writeSplit(key: string, value: number | null) {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, String(Math.round(value)));
+  } catch {
+    // Storage unavailable: the size just is not remembered.
+  }
+}
+let leftColumnWidth = readSplit(SPLIT_STORAGE.left) ?? 264;
+let rightColumnWidth = readSplit(SPLIT_STORAGE.right) ?? 310;
+let timelineHeight = readSplit(SPLIT_STORAGE.timeline) ?? 240;
+/** Altura da área de abas (Mídia/Efeitos) e dos efeitos no inspector; null = tamanho automático do CSS. */
+let leftTopHeight: number | null = readSplit(SPLIT_STORAGE.leftTop);
+let inspectorFxHeight: number | null = readSplit(SPLIT_STORAGE.inspectorFx);
+/** Largura da coluna com os nomes das faixas na timeline; null = largura padrão do CSS (muda com a tela). */
+let trackLabelsWidth: number | null = readSplit(SPLIT_STORAGE.labels);
 const expandedTimelineLayers = new Set<string>();
 let timelinePostExpanded = false;
 let libraryAccordion: "effects" | "post" = "effects";
@@ -190,13 +213,20 @@ const selectedEffect = () => {
     || project?.postEffects.find((effect) => effect.id === selectedEffectId);
 };
 
+/** True for the layers in a multi-selection (two or more), including the primary one. */
+const inMultiSelection = (layerId: string) => selectedClipIds.size > 1 && selectedClipIds.has(layerId);
+
 function syncSelectionClasses() {
   app.querySelectorAll<HTMLElement>("[data-layer-id]").forEach((item) =>
-    item.classList.toggle("is-selected", item.dataset.layerId === selectedLayerId));
+    item.classList.toggle("is-selected", item.dataset.layerId === selectedLayerId || inMultiSelection(item.dataset.layerId!)));
   app.querySelectorAll<HTMLElement>("[data-label-layer], [data-track-layer], [data-clip-layer]").forEach((item) => {
     const members = item.dataset.trackMembers?.split(" ");
     const id = item.dataset.labelLayer || item.dataset.trackLayer || item.dataset.clipLayer;
-    item.classList.toggle("is-selected", members && !item.dataset.clipLayer ? members.includes(selectedLayerId) : id === selectedLayerId);
+    item.classList.toggle("is-selected", members && !item.dataset.clipLayer
+      ? members.includes(selectedLayerId) || members.some(inMultiSelection)
+      : id === selectedLayerId);
+    if (item.dataset.clipLayer) item.classList.toggle("is-multi", inMultiSelection(item.dataset.clipLayer));
+    else if (members) item.classList.toggle("is-track-selected", members.length > 1 && members.every(inMultiSelection));
   });
   app.querySelectorAll<HTMLElement>("[data-timeline-order-audio], [data-audio-track], [data-move-audio-clip]").forEach((item) => {
     const members = item.dataset.laneMembers?.split(" ");
@@ -205,9 +235,10 @@ function syncSelectionClasses() {
   });
 }
 
-function selectLayerById(layerId: string, refreshTimeline = true) {
+function selectLayerById(layerId: string, refreshTimeline = true, keepMulti = false) {
   const layer = project?.layers.find((item) => item.id === layerId);
   if (!layer) return;
+  if (!keepMulti) selectedClipIds.clear();
   selectedLayerId = layer.id;
   selectedAudioTrackId = "";
   selectedEffectId = "";
@@ -225,6 +256,7 @@ function selectLayerById(layerId: string, refreshTimeline = true) {
 function selectAudioTrackById(trackId: string, refreshTimeline = true) {
   const track = project?.audioTracks.find((item) => item.id === trackId);
   if (!track) return;
+  selectedClipIds.clear();
   selectedAudioTrackId = track.id;
   selectedLayerId = "";
   selectedEffectId = "";
@@ -237,6 +269,94 @@ function selectAudioTrackById(trackId: string, refreshTimeline = true) {
   updateCurveTools();
   updateTransformBox();
   setStatus(`SELECT · ${track.name}`);
+}
+
+/** Shift/Ctrl+click: adds the layer to the selection or takes it out (the last one cannot be removed). */
+function toggleLayerInSelection(layerId: string, refreshTimeline = false) {
+  if (!project?.layers.some((item) => item.id === layerId)) return;
+  if (!selectedClipIds.size && selectedLayerId) selectedClipIds.add(selectedLayerId);
+  if (selectedClipIds.has(layerId) && selectedClipIds.size > 1) selectedClipIds.delete(layerId);
+  else selectedClipIds.add(layerId);
+  const primary = selectedClipIds.has(layerId) ? layerId : [...selectedClipIds].pop()!;
+  selectLayerById(primary, refreshTimeline, true);
+  if (selectedClipIds.size > 1) {
+    setStatus(`${editLabel("SELEÇÃO", "SELECTION")} · ${selectedClipIds.size} ${editLabel("camadas", "layers")}`);
+  }
+}
+
+/** True when two or more clips are selected and they are all the clips of this track (the whole track is selected). */
+const trackFullySelected = (clips: Array<{ id: string }>) => clips.length > 1 && selectedClipIds.size >= clips.length && clips.every((clip) => selectedClipIds.has(clip.id));
+
+/** Clicking a track (its label, name or an empty spot of its lane) selects every clip on it (a subtitle track becomes one selection). */
+function selectTrackClips(trackId: string) {
+  if (!project) return false;
+  const track = visualTracks(project).find((item) => item.id === trackId);
+  if (!track?.clips.length) return false;
+  selectedClipIds.clear();
+  if (track.clips.length > 1) track.clips.forEach((clip) => selectedClipIds.add(clip.id));
+  const primary = track.clips.find((clip) => clip.id === selectedLayerId) ?? track.clips[0];
+  selectLayerById(primary.id, false, true);
+  setStatus(`${editLabel("FAIXA", "TRACK")} ${trackName(project, trackId)} · ${track.clips.length} ${editLabel(track.clips.length === 1 ? "clipe" : "clipes", track.clips.length === 1 ? "clip" : "clips")}`);
+  return true;
+}
+
+/** Janelas do #modal-root (exportar, composição, mídia ausente): role=dialog, foco dentro, Tab preso, Esc fecha e o foco volta ao botão que abriu. */
+function bindModalRoot() {
+  const root = app.querySelector<HTMLElement>("#modal-root");
+  if (!root) return;
+  let opener: HTMLElement | null = null;
+  const focusables = (dialog: HTMLElement) => [...dialog.querySelectorAll<HTMLElement>("button, input, select, textarea, [tabindex]")]
+    .filter((item) => !item.matches(":disabled, [tabindex='-1']") && item.getClientRects().length > 0);
+  new MutationObserver(() => {
+    const dialog = root.querySelector<HTMLElement>(".export-modal");
+    if (!dialog) {
+      if (opener?.isConnected) opener.focus({ preventScroll: true });
+      opener = null;
+      return;
+    }
+    if (dialog.getAttribute("role") === "dialog") return;
+    opener = document.activeElement instanceof HTMLElement && !root.contains(document.activeElement) ? document.activeElement : null;
+    const title = dialog.querySelector<HTMLElement>("h2");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    if (title) {
+      title.id = title.id || "modal-title";
+      dialog.setAttribute("aria-labelledby", title.id);
+    }
+    dialog.tabIndex = -1;
+    dialog.focus({ preventScroll: true });
+  }).observe(root, { childList: true });
+  root.addEventListener("keydown", (event) => {
+    const dialog = root.querySelector<HTMLElement>(".export-modal");
+    if (!dialog) return;
+    if (event.key === "Escape") {
+      const close = dialog.querySelector<HTMLButtonElement>(":scope > header button");
+      if (close && !close.disabled) {
+        event.preventDefault();
+        event.stopPropagation();
+        close.click();
+      }
+    } else if (event.key === "Tab") {
+      const items = focusables(dialog);
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || active === dialog)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  });
+}
+
+/** A click on a timeline track label (not on the Layers list) selects the whole track. */
+function selectTimelineTrackOf(element: HTMLElement) {
+  const label = element.closest<HTMLElement>(".timeline-label-row.layer-label");
+  return Boolean(label?.dataset.trackId && selectTrackClips(label.dataset.trackId));
 }
 
 function openNoisetupiSite() {
@@ -490,6 +610,8 @@ function initializeRenderer(canvas: HTMLCanvasElement) {
   };
   renderer = new ComposerRenderer(canvas, () => void renderFrame(), onContextRestored);
   renderer.setProject(project!, projectRoot);
+  // A new renderer starts in the normal view; tell vct.view so it forgets any solo.
+  automationApi?.view({});
   void renderFrame();
 }
 
@@ -856,11 +978,16 @@ function layerGlyph(layer: Layer) {
 function renderEditor() {
   if (!project) return;
   const settings = project.settings;
+  // Tamanhos guardados de outra tela ou editados à mão: sempre dentro dos limites desta janela.
+  for (const id of ["left", "right", "timeline"] as const) {
+    const [low, high] = SPLITTERS[id].range();
+    SPLITTERS[id].apply(clamp(SPLITTERS[id].read(), low, Math.max(low, high)));
+  }
   app.innerHTML = `
-    <div class="editor-app ${playing || recordMode ? "is-live" : ""}" style="--left-width:${leftColumnWidth}px;--right-width:${rightColumnWidth}px;--timeline-height:${timelineHeight}px">
+    <div class="editor-app ${playing || recordMode ? "is-live" : ""}" style="--left-width:${leftColumnWidth}px;--right-width:${rightColumnWidth}px;--timeline-height:${timelineHeight}px${leftTopHeight ? `;--left-top-height:${leftTopHeight}px` : ""}${inspectorFxHeight ? `;--inspector-fx-height:${inspectorFxHeight}px` : ""}${trackLabelsWidth ? `;--labels-width:${trackLabelsWidth}px` : ""}">
       <header class="editor-topbar">
         <button class="nt-link editor-brand" id="brand-link" title="noisetupi.com.br" aria-label="Noisetupi"><img class="brand-icon" src="${logoSimple}" alt=""></button>
-        <div class="project-title"><strong>${escapeHtml(settings.name)}</strong><span>${settings.width}×${settings.height} / ${settings.fps} FPS</span></div>
+        <div class="project-title" title="${escapeHtml(settings.name)}"><strong>${escapeHtml(settings.name)}</strong><span>${settings.width}×${settings.height} / ${settings.fps} FPS</span></div>
         <div class="history-actions">
           <button id="undo" title="${t("undo")}" aria-label="${t("undo")}" ${project && history.canUndo(JSON.stringify(project)) ? "" : "disabled"}>↶</button>
           <button id="redo" title="${t("redo")}" aria-label="${t("redo")}" ${project && history.canRedo(JSON.stringify(project)) ? "" : "disabled"}>↷</button>
@@ -881,12 +1008,13 @@ function renderEditor() {
       </header>
       <aside class="left-panel has-tabs">
         ${renderLeftTop()}
+        ${splitterHtml("left-top")}
         <section class="stack-section">
           <header><span>${t("layers")}</span><small>${project.layers.length}</small></header>
           <div class="layer-stack" id="layer-stack">${project.layers.map(renderLayerItem).join("") || `<p class="empty-stack">${language === "pt-BR" ? "Sem camadas ainda" : "No layers yet"}</p>`}</div>
         </section>
       </aside>
-      <div class="column-resizer left-resizer" data-resize-column="left" title="Resize Layers"></div>
+      ${splitterHtml("left")}
       <main class="stage-area">
         <div class="stage-toolbar">
           <span>${t("preview")}</span>
@@ -919,11 +1047,11 @@ function renderEditor() {
           </div>
         </div>
       </main>
-      <div class="column-resizer right-resizer" data-resize-column="right" title="Resize Properties"></div>
+      ${splitterHtml("right")}
       <aside class="right-panel"><header class="panel-title">${t("properties")}</header><div id="inspector">${renderInspector()}</div></aside>
-      <div class="timeline-resizer" id="timeline-resizer" title="Resize Timeline"></div>
+      ${splitterHtml("timeline")}
       <section class="timeline-panel">${renderTimeline()}</section>
-      <div class="statusbar"><span id="status-text">READY · BUILD ${APP_VERSION}</span><span class="statusbar-end"><span id="warnings-slot">${project ? renderWarningsButton(project, language) : ""}</span><span class="statusbar-path">${projectJsonPath}</span></span></div>
+      <div class="statusbar"><span id="status-text">READY · BUILD ${APP_VERSION}</span><span class="statusbar-end"><span id="warnings-slot">${project ? renderWarningsButton(project, language) : ""}</span><span class="statusbar-path" title="${escapeHtml(projectJsonPath)}">${escapeHtml(projectJsonPath)}</span></span></div>
     </div>
     <div id="modal-root"></div>`;
   bindEditor();
@@ -963,15 +1091,26 @@ function effectLabel(kind: EffectKind) {
 }
 
 function renderLayerItem(layer: Layer) {
-  return `<article class="layer-item ${layer.id === selectedLayerId ? "is-selected" : ""}" data-layer-id="${layer.id}" data-select-layer-row="${layer.id}">
-    <span class="layer-order"><button data-move-layer="${layer.id}" data-direction="-1" title="Move up">▲</button><button data-move-layer="${layer.id}" data-direction="1" title="Move down">▼</button></span>
-    <button class="drag-handle" draggable="true" title="Drag layer">⠿</button>
+  const pt = language === "pt-BR";
+  const name = escapeHtml(layer.name);
+  const text = {
+    up: pt ? "Subir camada" : "Move layer up",
+    down: pt ? "Descer camada" : "Move layer down",
+    drag: pt ? "Arrastar para reordenar" : "Drag to reorder",
+    rename: pt ? "duplo clique para renomear" : "double-click to rename",
+    visible: pt ? "Visível" : "Visible",
+    lock: pt ? "Bloqueada" : "Locked",
+    fx: layer.effects.length ? `${layer.effects.length} FX` : (pt ? "Sem efeitos" : "No effects"),
+  };
+  return `<article class="layer-item ${layer.id === selectedLayerId || inMultiSelection(layer.id) ? "is-selected" : ""}" data-layer-id="${layer.id}" data-select-layer-row="${layer.id}">
+    <span class="layer-order"><button data-move-layer="${layer.id}" data-direction="-1" title="${text.up}" aria-label="${text.up}: ${name}">▲</button><button data-move-layer="${layer.id}" data-direction="1" title="${text.down}" aria-label="${text.down}: ${name}">▼</button></span>
+    <button class="drag-handle" draggable="true" title="${text.drag}" aria-label="${text.drag}: ${name}">⠿</button>
     <span class="layer-type" title="${layerIcon(layer)}">${layerGlyph(layer)}<small>${layerIcon(layer)}</small></span>
-    <button class="layer-name" data-select-layer="${layer.id}" data-rename-layer="${layer.id}" title="Double-click to rename">${escapeHtml(layer.name)}<small>${layer.effects.length ? `${layer.effects.length} FX` : layer.kind}</small></button>
-    <button class="layer-fx ${layer.effects.length ? "has-fx" : ""}" data-open-layer-fx="${layer.id}" title="${layer.effects.length ? `${layer.effects.length} FX` : "No effects"}">FX<small>${layer.effects.length || "−"}</small></button>
-    <button data-layer-visible="${layer.id}" title="Visible">${layer.visible ? "●" : "○"}</button>
-    <button data-layer-lock="${layer.id}" title="Lock">${layer.locked ? "▣" : "□"}</button>
-    <button class="layer-delete" data-delete-layer="${layer.id}" title="${t("delete")}">×</button>
+    <button class="layer-name" data-select-layer="${layer.id}" data-rename-layer="${layer.id}" title="${name} · ${text.rename}">${name}<small>${layer.effects.length ? `${layer.effects.length} FX` : layer.kind}</small></button>
+    <button class="layer-fx ${layer.effects.length ? "has-fx" : ""}" data-open-layer-fx="${layer.id}" title="${text.fx}" aria-label="${text.fx}: ${name}">FX<small>${layer.effects.length || "−"}</small></button>
+    <button data-layer-visible="${layer.id}" title="${text.visible}" aria-label="${text.visible}: ${name}" aria-pressed="${layer.visible}">${layer.visible ? "●" : "○"}</button>
+    <button data-layer-lock="${layer.id}" title="${text.lock}" aria-label="${text.lock}: ${name}" aria-pressed="${layer.locked}">${layer.locked ? "▣" : "□"}</button>
+    <button class="layer-delete" data-delete-layer="${layer.id}" title="${t("delete")}" aria-label="${t("delete")}: ${name}">×</button>
   </article>`;
 }
 
@@ -1264,6 +1403,8 @@ function renderInspector() {
     if (entry) return renderAssetInspector(entry);
     inspectedAsset = "";
   }
+  const multi = multiSelectionLayers();
+  if (multi.length > 1 && !effect) return renderMultiInspector(multi);
   if (!layer) {
     if (project.postEffects.length) return `<div class="effect-chain global-chain"><h3>${t("post")}</h3>${renderEffectChain(project.postEffects)}</div>`;
     return `<p class="inspector-empty">${t("noSelection")}</p>`;
@@ -1276,6 +1417,7 @@ function renderInspector() {
     <div class="inspector-header"><input data-layer-text="name" value="${escapeHtml(layer.name)}"><span>${layerIcon(layer)}</span></div>
     <div class="inspector-scroll">
       <section class="property-group"><div class="property-group-title"><h3>${t("transform")}</h3>${sectionTools("transform")}</div>
+        ${isFittable(layer) ? renderFitButtons([layer]) : ""}
         <div class="property-grid">
           ${numberField("X", "x", layer.x, -32768, 32768, 1)}
           ${numberField("Y", "y", layer.y, -32768, 32768, 1)}
@@ -1319,9 +1461,219 @@ function renderInspector() {
         ${renderTransitionControls(layer)}
         ${layer.kind === "guide" ? `<label class="check-row"><input type="checkbox" data-layer-check="exportable" ${layer.exportable ? "checked" : ""}><span>EXPORT GUIDE</span></label>` : ""}
       </section>
-      <section class="property-group"><div class="property-group-title"><h3>${t("effects")}</h3>${sectionTools("effects")}</div>${renderEffectChain(layer.effects)}</section>
     </div>
+    ${splitterHtml("inspector-fx")}
+    <section class="inspector-effects" aria-label="${t("effects")}"><div class="property-group-title"><h3>${t("effects")}</h3>${sectionTools("effects")}</div><div class="inspector-effects-body">${renderEffectChain(layer.effects)}</div></section>
     <div class="inspector-actions">${layer.asset ? `<button data-replace-layer-media="${layer.id}">${language === "pt-BR" ? "SUBSTITUIR MÍDIA" : "REPLACE MEDIA"}</button>` : ""}<button id="duplicate-layer">${t("duplicate")}</button><button class="danger" id="delete-layer">${t("delete")}</button></div>`;
+}
+
+// ---- Multi-selection: one inspector for the properties every selected layer has; each change is one layer.setMany.
+
+/** The selected layers when two or more are selected (Shift/Ctrl+click, track name), else []. */
+function multiSelectionLayers(): Layer[] {
+  if (!project || selectedClipIds.size < 2) return [];
+  const layers = project.layers.filter((layer) => selectedClipIds.has(layer.id));
+  return layers.length > 1 ? layers : [];
+}
+
+type MultiValue = number | string | undefined;
+
+const MULTI_READ: Record<string, (layer: Layer) => number | string> = {
+  x: (l) => l.x, y: (l) => l.y, scaleX: (l) => l.scaleX, scaleY: (l) => l.scaleY, rotation: (l) => l.rotation, opacity: (l) => l.opacity,
+  width: (l) => l.width, height: (l) => l.height, blendMode: (l) => l.blendMode,
+  fontFamily: (l) => l.fontFamily ?? "", fontSize: (l) => l.fontSize || 80, fontWeight: (l) => l.fontWeight || 500, strokeWidth: (l) => l.strokeWidth,
+  fill: (l) => l.fill, stroke: (l) => l.stroke,
+  shadowColor: (l) => l.shadowColor || "#000000", shadowOpacity: (l) => l.shadowOpacity ?? .6, shadowBlur: (l) => l.shadowBlur ?? 12,
+  shadowX: (l) => l.shadowX ?? 0, shadowY: (l) => l.shadowY ?? 4,
+};
+
+/** The value every layer shares for a property, or undefined when they differ (the inspector shows "—"). */
+function multiCommon(layers: Layer[], property: string): MultiValue {
+  const read = MULTI_READ[property];
+  const first = read(layers[0]);
+  const same = layers.every((layer) => {
+    const value = read(layer);
+    return typeof value === "number" && typeof first === "number" ? Math.abs(value - first) < 1e-6 : value === first;
+  });
+  return same ? first : undefined;
+}
+
+const multiNumberText = (value: MultiValue) => (typeof value === "number" ? String(Number(value.toFixed(4))) : "");
+
+function multiNumber(layers: Layer[], label: string, property: string, min: number, max: number, step: number) {
+  return `<label class="multi-field"><span>${label}</span><input type="number" data-multi-prop="${property}" min="${min}" max="${max}" step="${step}" placeholder="—" value="${multiNumberText(multiCommon(layers, property))}"></label>`;
+}
+
+function multiColor(layers: Layer[], label: string, property: string) {
+  const common = multiCommon(layers, property);
+  return `<label class="multi-field multi-color ${common === undefined ? "is-mixed" : ""}"><span>${label}</span><input type="color" data-multi-prop="${property}" value="${typeof common === "string" ? common : "#808080"}"><b aria-hidden="true">—</b></label>`;
+}
+
+/** Which of Original · Inteiro · Preencher the layer matches right now. */
+function layerMatchesFit(layer: Layer, fit: Fit) {
+  const meta = layer.asset ? project?.assetMetadata?.[layer.asset] : undefined;
+  if (!project || !meta?.width || !meta.height) return false;
+  const frame = fitFrame(meta.width, meta.height, project.settings, fit);
+  return Math.abs(layer.width - frame.width) < .6 && Math.abs(layer.height - frame.height) < .6 && Math.abs(layer.rotation - frame.rotation) < .01
+    && Math.abs(layer.scaleX - 1) < .001 && Math.abs(layer.scaleY - 1) < .001
+    && Math.abs(layer.x - project.settings.width / 2) < .6 && Math.abs(layer.y - project.settings.height / 2) < .6;
+}
+
+const FIT_CHOICES: Array<[Fit, string, string]> = [["none", "Original", "Original"], ["contain", "Inteiro", "Whole"], ["cover", "Preencher", "Fill"]];
+
+const isFittable = (layer: Layer) => Boolean(layer.asset) && (layer.kind === "video" || layer.kind === "image" || layer.kind === "guide");
+
+function renderFitButtons(layers: Layer[]) {
+  const pt = language === "pt-BR";
+  return `<div class="fit-row" role="group" aria-label="${pt ? "Enquadrar a mídia" : "Fit the media"}">${FIT_CHOICES.map(([fit, ptLabel, enLabel]) =>
+    `<button type="button" data-fit="${fit}" aria-pressed="${layers.every((layer) => layerMatchesFit(layer, fit))}">${pt ? ptLabel : enLabel}</button>`).join("")}</div>`;
+}
+
+function renderMultiInspector(layers: Layer[]) {
+  const pt = language === "pt-BR";
+  const kinds = [...new Set(layers.map((layer) => layer.kind))];
+  const allText = kinds.length === 1 && kinds[0] === "text";
+  const locked = layers.filter((layer) => layer.locked).length;
+  const shadowOn = layers.some(textShadowOn);
+  const blend = multiCommon(layers, "blendMode");
+  const family = multiCommon(layers, "fontFamily");
+  const fonts = ["IBM Plex Sans", "IBM Plex Mono", "Inter", "Space Grotesk", "Syne"];
+  return `<div data-multi-inspector>
+    <div class="inspector-header"><strong class="asset-title">${layers.length} ${pt ? "camadas" : "layers"}</strong><span>${kinds.map((kind) => kind.toUpperCase()).join(" · ")}</span></div>
+    <div class="inspector-scroll">
+      <p class="multi-note">${pt ? "Só o que é comum às camadas. “—” = valores diferentes; mudar um campo vale para todas, num único desfazer." : "Only what the layers share. “—” = different values; changing a field applies to all, in one undo step."}${locked ? ` ${pt ? `${locked} bloqueada(s) não mudam.` : `${locked} locked layer(s) stay as they are.`}` : ""}</p>
+      <section class="property-group"><h3>${t("transform")}</h3>
+        ${layers.every(isFittable) ? renderFitButtons(layers) : ""}
+        <div class="property-grid multi-grid">
+          ${multiNumber(layers, "X", "x", -32768, 32768, 1)}${multiNumber(layers, "Y", "y", -32768, 32768, 1)}
+          ${multiNumber(layers, "SCALE X", "scaleX", -20, 20, .01)}${multiNumber(layers, "SCALE Y", "scaleY", -20, 20, .01)}
+          ${multiNumber(layers, "ROTATION", "rotation", -3600, 3600, .1)}${multiNumber(layers, "OPACITY", "opacity", 0, 1, .01)}
+          ${multiNumber(layers, "WIDTH", "width", 1, 16384, 1)}${multiNumber(layers, "HEIGHT", "height", 1, 16384, 1)}
+        </div>
+      </section>
+      ${allText ? `<section class="property-group"><h3>${t("text")}</h3>
+        <label class="select-field"><span>FONT</span><select data-multi-prop="fontFamily">${family === undefined ? `<option value="" disabled selected>—</option>` : ""}${fonts.map((value) => `<option value="${value}" ${family === value ? "selected" : ""}>${value}</option>`).join("")}</select></label>
+        <div class="property-grid multi-grid">${multiNumber(layers, pt ? "TAMANHO" : "FONT SIZE", "fontSize", 4, 2000, 1)}${multiNumber(layers, pt ? "PESO" : "WEIGHT", "fontWeight", 100, 900, 100)}</div>
+        <div class="multi-scale" role="group" aria-label="${pt ? "Ajustar o tamanho da fonte" : "Adjust the font size"}">
+          <button type="button" data-multi-scale="0.9">−10%</button><button type="button" data-multi-scale="1.1">+10%</button>
+        </div>
+        <div class="property-grid multi-grid">${multiColor(layers, pt ? "COR" : "FILL", "fill")}${multiColor(layers, pt ? "CONTORNO" : "STROKE", "stroke")}${multiNumber(layers, pt ? "ESPESSURA" : "STROKE WIDTH", "strokeWidth", 0, 1000, .5)}</div>
+      </section>
+      <section class="property-group text-shadow-group"><h3>${pt ? "Sombra" : "Shadow"}</h3>
+        <label class="check-field"><input type="checkbox" data-multi-shadow ${layers.every(textShadowOn) ? "checked" : ""}><span>${pt ? "Sombra no texto" : "Text shadow"}</span></label>
+        <div class="shadow-fields" data-multi-shadow-fields ${shadowOn ? "" : "hidden"}>
+          ${multiColor(layers, pt ? "COR" : "COLOR", "shadowColor")}
+          <div class="property-grid multi-grid">${multiNumber(layers, pt ? "OPACIDADE" : "OPACITY", "shadowOpacity", 0, 1, .01)}${multiNumber(layers, "BLUR", "shadowBlur", 0, 200, 1)}${multiNumber(layers, "X", "shadowX", -500, 500, 1)}${multiNumber(layers, "Y", "shadowY", -500, 500, 1)}</div>
+        </div>
+      </section>` : ""}
+      <section class="property-group"><h3>${pt ? "COMPOSIÇÃO" : "COMPOSITING"}</h3>
+        <label class="select-field"><span>BLEND MODE</span><select data-multi-prop="blendMode">${blend === undefined ? `<option value="" disabled selected>—</option>` : ""}${["normal", "add", "multiply", "screen", "lighten", "darken"].map((value) => `<option value="${value}" ${blend === value ? "selected" : ""}>${value.toUpperCase()}</option>`).join("")}</select></label>
+      </section>
+    </div>
+    <div class="inspector-actions"><button class="danger" type="button" data-multi-delete>${t("delete")} (${layers.length})</button></div>
+  </div>`;
+}
+
+/** Refreshes the multi-inspector fields in place (no re-render, so the keyboard focus stays where it is). */
+function syncMultiInspector(force = false) {
+  const layers = multiSelectionLayers();
+  const box = app.querySelector<HTMLElement>("[data-multi-inspector]");
+  if (!box || layers.length < 2) return;
+  box.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-multi-prop]").forEach((field) => {
+    if (!force && field === document.activeElement) return;
+    const common = multiCommon(layers, field.dataset.multiProp!);
+    if (field instanceof HTMLInputElement && field.type === "color") {
+      field.value = typeof common === "string" ? common : "#808080";
+      field.closest(".multi-color")?.classList.toggle("is-mixed", common === undefined);
+    } else {
+      field.value = typeof common === "number" ? multiNumberText(common) : common ?? "";
+    }
+  });
+  const toggle = box.querySelector<HTMLInputElement>("[data-multi-shadow]");
+  if (toggle) {
+    const on = layers.filter(textShadowOn).length;
+    toggle.checked = on === layers.length;
+    toggle.indeterminate = on > 0 && on < layers.length;
+    box.querySelector<HTMLElement>("[data-multi-shadow-fields]")!.hidden = on === 0;
+  }
+  box.querySelectorAll<HTMLElement>("[data-fit]").forEach((button) =>
+    button.setAttribute("aria-pressed", String(layers.every((layer) => layerMatchesFit(layer, button.dataset.fit as Fit)))));
+}
+
+/** One layer.setMany for the unlocked selected layers; text boxes grow to keep fitting their lines. */
+function applyToSelection(label: string, change: { props?: Record<string, unknown>; multiply?: Record<string, number> }) {
+  const layers = multiSelectionLayers().filter((layer) => !layer.locked);
+  if (!layers.length) {
+    setStatus(editLabel("SELEÇÃO BLOQUEADA", "SELECTION LOCKED"));
+    return null;
+  }
+  // A whole selected track (the subtitle track) goes as trackId; anything else as the list of ids.
+  const trackId = trackIdOf(layers[0]);
+  const wholeTrack = layers.length === multiSelectionLayers().length
+    && project!.layers.filter((layer) => trackIdOf(layer) === trackId).every((layer) => selectedClipIds.has(layer.id))
+    && layers.every((layer) => trackIdOf(layer) === trackId);
+  const target = wholeTrack ? { trackId } : { layerIds: layers.map((layer) => layer.id) };
+  const commands: VctCommand[] = [{ type: "layer.setMany", ...target, ...change } as VctCommand];
+  const sizing = ["fontSize", "fontFamily", "fontWeight"].some((key) => change.props?.[key] !== undefined || change.multiply?.[key] !== undefined);
+  if (sizing) {
+    for (const layer of layers) {
+      if (layer.kind !== "text") continue;
+      const next = { ...layer, ...change.props } as Layer;
+      if (change.multiply?.fontSize) next.fontSize = Math.round((layer.fontSize || 80) * change.multiply.fontSize * 1000) / 1000;
+      const height = fittedTextHeight(next);
+      if (height !== undefined) commands.push({ type: "layer.set", layerId: layer.id, props: { height } });
+    }
+  }
+  const result = applyCommands(commands, `${label} (${layers.length})`, { panels: false });
+  syncMultiInspector(true);
+  return result;
+}
+
+function bindFitButtons(root: ParentNode) {
+  root.querySelectorAll<HTMLElement>("[data-fit]").forEach((button) => button.addEventListener("click", () => {
+    const fit = button.dataset.fit as Fit;
+    const layers = (multiSelectionLayers().length ? multiSelectionLayers() : [selectedLayer()]).filter((layer): layer is Layer => Boolean(layer && !layer.locked && isFittable(layer)));
+    if (!layers.length) return;
+    applyCommands(layers.map((layer): VctCommand => ({ type: "layer.fit", layerId: layer.id, fit })), editLabel("Enquadrar mídia", "Fit media"));
+    app.querySelector<HTMLElement>(`[data-fit="${fit}"]`)?.focus();
+  }));
+}
+
+function bindMultiControls(root: ParentNode) {
+  if (!root.querySelector("[data-multi-inspector]")) return;
+  root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-multi-prop]").forEach((field) => field.addEventListener("change", () => {
+    const property = field.dataset.multiProp!;
+    let value: number | string = field.value;
+    if (field instanceof HTMLInputElement && field.type === "number") {
+      if (!Number.isFinite(field.valueAsNumber)) {
+        syncMultiInspector(true);
+        return;
+      }
+      value = clamp(field.valueAsNumber, Number(field.min), Number(field.max));
+    }
+    if (value === "") return;
+    const props: Record<string, unknown> = { [property]: value };
+    if (property === "fill") props.fillEnabled = true;
+    if (property === "stroke" || (property === "strokeWidth" && Number(value) > 0)) props.strokeEnabled = true;
+    applyToSelection(propertyLabel(property), { props });
+  }));
+  root.querySelector<HTMLInputElement>("[data-multi-shadow]")?.addEventListener("change", (event) => {
+    const input = event.target as HTMLInputElement;
+    const layers = multiSelectionLayers();
+    if (!layers.length) return;
+    const color = multiCommon(layers, "shadowColor");
+    const number = (property: string, fallback: number) => {
+      const value = multiCommon(layers, property);
+      return typeof value === "number" ? value : fallback;
+    };
+    const props = input.checked
+      ? { shadowColor: typeof color === "string" ? color : "#000000", shadowOpacity: number("shadowOpacity", .6) > 0 ? number("shadowOpacity", .6) : .6, shadowBlur: number("shadowBlur", 12), shadowX: number("shadowX", 0), shadowY: number("shadowY", 4) }
+      : { shadowOpacity: 0 };
+    applyToSelection(editLabel("Sombra do texto", "Text shadow"), { props });
+  });
+  root.querySelectorAll<HTMLElement>("[data-multi-scale]").forEach((button) => button.addEventListener("click", () =>
+    applyToSelection(editLabel("Tamanho da fonte", "Font size"), { multiply: { fontSize: Number(button.dataset.multiScale) } })));
+  root.querySelector("[data-multi-delete]")?.addEventListener("click", deleteSelection);
 }
 
 function audioNumberField(label: string, property: keyof AudioTrack, value: number, min: number, max: number, step: number) {
@@ -1621,6 +1973,7 @@ function renderTimeline() {
         </div>
       </div>
       ${renderMinimap()}
+      ${splitterHtml("labels")}
     </div>`;
 }
 
@@ -1852,8 +2205,8 @@ function fadeOverlayStyle(item: Pick<Layer, "startTime" | "endTime" | "fadeInSta
 
 function renderTrackName(trackId: string) {
   if (!project) return "";
-  const hint = language === "pt-BR" ? "Clique duas vezes para renomear" : "Double-click to rename";
-  return `<span class="track-name" data-track-name="${trackId}" title="${hint}">${escapeHtml(trackName(project, trackId))}</span>`;
+  const hint = language === "pt-BR" ? "Clique para selecionar a faixa · duplo clique para renomear" : "Click to select the track · double-click to rename";
+  return `<span class="track-name" data-track-name="${trackId}" role="button" tabindex="0" title="${hint}">${escapeHtml(trackName(project, trackId))}</span>`;
 }
 
 function renderTimelineLabel(row: TimelineRow) {
@@ -1871,12 +2224,12 @@ function renderTimelineLabel(row: TimelineRow) {
   </div>`;
   if (row.type === "layer") {
     const open = expandedTimelineLayers.has(row.layer.id);
-    return `<div class="timeline-label-row layer-label ${row.clips.some((clip) => clip.id === selectedLayerId) ? "is-selected" : ""}" ${style} data-label-layer="${row.layer.id}" data-select-layer-row="${row.layer.id}" draggable="true" data-timeline-order-layer="${row.layer.id}" data-track-id="${row.trackId}" data-track-members="${row.clips.map((clip) => clip.id).join(" ")}">
+    return `<div class="timeline-label-row layer-label ${row.clips.some((clip) => clip.id === selectedLayerId) ? "is-selected" : ""} ${trackFullySelected(row.clips) ? "is-track-selected" : ""}" ${style} data-label-layer="${row.layer.id}" data-select-layer-row="${row.layer.id}" draggable="true" data-timeline-order-layer="${row.layer.id}" data-track-id="${row.trackId}" data-track-members="${row.clips.map((clip) => clip.id).join(" ")}">
       <span class="timeline-order"><button data-move-layer="${row.layer.id}" data-direction="-1">▲</button><button data-move-layer="${row.layer.id}" data-direction="1">▼</button></span>
       ${renderTrackName(row.trackId)}
       <button class="timeline-disclosure" data-toggle-timeline-layer="${row.layer.id}" ${row.layer.effects.length ? "" : "disabled"} title="Show effects">${row.layer.effects.length ? (open ? "▾" : "▸") : "·"}</button>
       ${timelineThumbnail(row.layer)}
-      <button class="timeline-label-name" data-select-layer="${row.layer.id}">${escapeHtml(row.layer.name)}</button>${row.clips.length > 1 ? `<span class="timeline-clip-count" title="${row.clips.length} ${language === "pt-BR" ? "clipes nesta faixa" : "clips on this track"}">${row.clips.length}</span>` : ""}
+      <button class="timeline-label-name" data-select-layer="${row.layer.id}" title="${escapeHtml(row.layer.name)}${row.clips.length > 1 ? (language === "pt-BR" ? " · clique para selecionar a faixa toda" : " · click to select the whole track") : ""}">${escapeHtml(row.layer.name)}</button>${row.clips.length > 1 ? `<span class="timeline-clip-count" title="${row.clips.length} ${language === "pt-BR" ? "clipes nesta faixa" : "clips on this track"}">${row.clips.length}</span>` : ""}
       ${row.layer.effects.length ? `<span class="timeline-fx-count">${row.layer.effects.length} FX</span>` : ""}
     </div>`;
   }
@@ -1931,7 +2284,7 @@ function renderTimelineTrack(row: TimelineRow, duration: number) {
   if (row.type === "audio") return `<div class="timeline-track audio-track-row ${row.clips.some((clip) => clip.id === selectedAudioTrackId) ? "is-selected" : ""}" ${style} data-audio-track="${row.track.id}" data-lane-id="${row.laneId}" data-lane-members="${row.clips.map((clip) => clip.id).join(" ")}">
     ${row.clips.map((clip) => renderAudioClipSpan(clip, duration)).join("")}
   </div>`;
-  if (row.type === "layer") return `<div class="timeline-track ${row.clips.some((clip) => clip.id === selectedLayerId) ? "is-selected" : ""}" ${style} data-track-layer="${row.layer.id}" data-track-id="${row.trackId}" data-track-members="${row.clips.map((clip) => clip.id).join(" ")}">
+  if (row.type === "layer") return `<div class="timeline-track ${row.clips.some((clip) => clip.id === selectedLayerId) ? "is-selected" : ""} ${trackFullySelected(row.clips) ? "is-track-selected" : ""}" ${style} data-track-layer="${row.layer.id}" data-track-id="${row.trackId}" data-track-members="${row.clips.map((clip) => clip.id).join(" ")}">
     ${row.clips.map((clip) => renderLayerClipSpan(clip, duration)).join("")}
   </div>`;
   if (row.type === "effect") return `<div class="timeline-track effect-track" ${style}>${timelineKeyDots(row.layer.id, row.effect)}</div>`;
@@ -2042,8 +2395,8 @@ function bindEditor() {
   bindDynamicControls();
   bindTimeline();
   bindDragAndDrop();
-  bindColumnResizers();
-  bindTimelineResizer();
+  bindSplitters();
+  bindModalRoot();
   app.querySelector<HTMLSelectElement>("#preview-quality")?.addEventListener("change", (event) => {
     previewQuality = (event.target as HTMLSelectElement).value;
     localStorage.setItem("nt-vct-preview-quality", previewQuality);
@@ -2142,17 +2495,12 @@ function bindTextControls(root: ParentNode) {
 }
 
 function bindDynamicControls(root: ParentNode = app) {
-  root.querySelectorAll<HTMLSelectElement>("[data-asset-fit]").forEach((select) => select.addEventListener("change", () => {
-    try {
-      localStorage.setItem("nt-vct-default-fit", select.value);
-    } catch {
-      // Storage unavailable: the choice only lasts until the next placement.
-    }
-    setStatus(`${language === "pt-BR" ? "ENQUADRAMENTO AO COLOCAR" : "FIT WHEN PLACED"} · ${select.value.toUpperCase()}`);
-  }));
+  bindFitButtons(root);
+  bindMultiControls(root);
   root.querySelectorAll<HTMLElement>("[data-select-layer]").forEach((button) => button.addEventListener("click", (event) => {
     event.stopPropagation();
-    selectLayerById(button.dataset.selectLayer!);
+    if (event.shiftKey || event.ctrlKey || event.metaKey) toggleLayerInSelection(button.dataset.selectLayer!, true);
+    else if (!selectTimelineTrackOf(button)) selectLayerById(button.dataset.selectLayer!);
   }));
   root.querySelectorAll<HTMLElement>("[data-select-audio]").forEach((button) => button.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -2160,7 +2508,8 @@ function bindDynamicControls(root: ParentNode = app) {
   }));
   root.querySelectorAll<HTMLElement>("[data-select-layer-row]").forEach((row) => row.addEventListener("click", (event) => {
     if ((event.target as HTMLElement).closest("button, input, select, textarea")) return;
-    selectLayerById(row.dataset.selectLayerRow!);
+    if (event.shiftKey || event.ctrlKey || event.metaKey) toggleLayerInSelection(row.dataset.selectLayerRow!, true);
+    else if (!selectTimelineTrackOf(row)) selectLayerById(row.dataset.selectLayerRow!);
   }));
   root.querySelectorAll<HTMLElement>("[data-select-audio-row]").forEach((row) => row.addEventListener("click", (event) => {
     if ((event.target as HTMLElement).closest("button, input, select, textarea")) return;
@@ -2674,13 +3023,20 @@ function updateInspector() {
   const target = app.querySelector("#inspector");
   if (!target) return;
   // Mantém a rolagem do painel quando a seleção não mudou (edição de valores).
-  const key = `${selectedLayerId}|${selectedAudioTrackId}|${selectedEffectId}`;
+  const key = `${selectedLayerId}|${selectedAudioTrackId}|${selectedEffectId}|${multiSelectionLayers().length}`;
   const scrollTop = key === inspectorScrollKey ? target.querySelector<HTMLElement>(".inspector-scroll")?.scrollTop || 0 : 0;
+  const effectsTop = key === inspectorScrollKey ? target.querySelector<HTMLElement>(".inspector-effects-body")?.scrollTop || 0 : 0;
+  const splitterFocused = document.activeElement instanceof HTMLElement && target.contains(document.activeElement) && document.activeElement.matches("[data-splitter]");
   inspectorScrollKey = key;
   target.innerHTML = renderInspector();
   bindDynamicControls(target);
+  bindSplitters(target);
+  syncMultiInspector(true);
   const scroll = target.querySelector<HTMLElement>(".inspector-scroll");
   if (scroll) scroll.scrollTop = scrollTop;
+  const effects = target.querySelector<HTMLElement>(".inspector-effects-body");
+  if (effects) effects.scrollTop = effectsTop;
+  if (splitterFocused) target.querySelector<HTMLElement>("[data-splitter]")?.focus({ preventScroll: true });
   // Nome completo no tooltip quando o painel estreito corta o rótulo.
   target.querySelectorAll<HTMLElement>(".param-scrub > span").forEach((label) => { label.title = label.textContent || ""; });
   const layer = selectedLayer();
@@ -2710,10 +3066,12 @@ function updateTimeline() {
   target.innerHTML = renderTimeline();
   bindTimeline();
   bindDynamicControls(target);
+  bindSplitters(target);
   const nextScroll = target.querySelector<HTMLElement>(".timeline-scroll");
   if (nextScroll) {
     nextScroll.scrollLeft = scrollLeft;
     nextScroll.scrollTop = scrollTop;
+    nextScroll.classList.toggle("is-scrolled-y", nextScroll.scrollTop > 0);
   }
   syncMinimap();
   syncRuler();
@@ -2940,19 +3298,6 @@ function removeBinAsset(asset: string) {
   updateInspector();
 }
 
-/** Default framing for a source placed on the timeline (the inspector can change it). */
-function defaultFit(entry?: Pick<BinEntry, "width" | "height">): "contain" | "cover" {
-  let stored: string | null = null;
-  try {
-    stored = localStorage.getItem("nt-vct-default-fit");
-  } catch {
-    stored = null;
-  }
-  if (stored === "contain" || stored === "cover") return stored;
-  const settings = project?.settings;
-  return entry?.width && entry.height && entry.height > entry.width && settings && settings.height > settings.width ? "cover" : "contain";
-}
-
 function renderAssetInspector(entry: BinEntry) {
   const pt = language === "pt-BR";
   const kinds = { video: pt ? "Vídeo" : "Video", image: pt ? "Imagem" : "Image", audio: pt ? "Áudio" : "Audio" };
@@ -2969,14 +3314,14 @@ function renderAssetInspector(entry: BinEntry) {
     ...(entry.size ? [[pt ? "Tamanho" : "Size", `${(entry.size / 1048576).toFixed(entry.size > 10485760 ? 0 : 1)} MB`] as [string, string]] : []),
     [pt ? "Em uso" : "Used by", names.length ? names.join(", ") : (pt ? "livre" : "unused")],
   ];
-  const fit = defaultFit(entry);
   return `<div class="inspector-header"><strong class="asset-title" title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</strong><span>${entry.kind ? kinds[entry.kind].toUpperCase() : "—"}</span></div>
     <div class="inspector-scroll">
       <section class="property-group asset-details"><h3>${pt ? "MÍDIA" : "MEDIA"}</h3>
         <dl>${rows.map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>
       </section>
-      ${entry.kind === "video" || entry.kind === "image" ? `<section class="property-group"><label class="select-field"><span>${pt ? "ENQUADRAR AO COLOCAR" : "FIT WHEN PLACED"}</span>
-        <select data-asset-fit><option value="contain" ${fit === "contain" ? "selected" : ""}>${pt ? "Inteiro (contain)" : "Whole (contain)"}</option><option value="cover" ${fit === "cover" ? "selected" : ""}>${pt ? "Preencher (cover)" : "Fill (cover)"}</option></select></label></section>` : ""}
+      ${entry.kind === "video" || entry.kind === "image" ? `<section class="property-group"><p class="asset-fit-note">${pt
+        ? "Entra na timeline no tamanho original, centralizada. Depois use Original · Inteiro · Preencher em Transformação."
+        : "Enters the timeline at its original size, centered. Then use Original · Whole · Fill under Transform."}</p></section>` : ""}
     </div>`;
 }
 
@@ -3011,13 +3356,14 @@ async function importSubtitles() {
 }
 
 /** SRT -> camadas de texto (macro text.fromSrt) num passo de desfazer. created é -1 se a edição foi recusada. */
-function insertSubtitles(target: ProjectDocument, srt: string, label: string) {
+function insertSubtitles(target: ProjectDocument, srt: string, label: string, props?: Record<string, unknown>, media: readonly VctCommand[] = []) {
   let prefix = "legenda";
   for (let n = 2; target.layers.some((layer) => layer.id.startsWith(prefix)) || target.tracks?.some((track) => track.id.startsWith(prefix)); n++) prefix = `legenda${n}_`;
   const before = target.layers.length;
   const cues = (srt.match(/-->/g) || []).length;
-  if (!applyCommands([{ type: "text.fromSrt", srt, idPrefix: prefix }], label)) return { created: -1, skipped: 0 };
-  const created = project ? project.layers.length - before : 0;
+  // A mídia da transcrição (clip.place / audio.create) entra no mesmo lote, antes das legendas: um só passo de desfazer.
+  if (!applyCommands([...media, { type: "text.fromSrt", srt, idPrefix: prefix, ...(props ? { props } : {}) }], label)) return { created: -1, skipped: 0 };
+  const created = project ? project.layers.length - before - media.filter((command) => command.type === "clip.place").length : 0;
   return { created, skipped: cues - created };
 }
 
@@ -3041,9 +3387,9 @@ const transcribeHost: TranscribeHost = {
       length: Math.min(span, (item.endTime - item.startTime) * rate), offset: item.startTime, scale: 1 / rate,
     };
   },
-  insertSrt(srt) {
+  insertSrt(srt, props, media) {
     if (!project || exportInProgress) return 0;
-    const { created } = insertSubtitles(project, srt, editLabel("Legenda automática", "Auto subtitles"));
+    const { created } = insertSubtitles(project, srt, editLabel("Legenda automática", "Auto subtitles"), props, media);
     return Math.max(0, created);
   },
 };
@@ -3133,7 +3479,7 @@ function placeAsset(asset: string, options: PlaceOptions = {}) {
     const lane = options.preferSelected && selected ? laneIdOf(selected) : "";
     const free = lane && !project.audioTracks.some((track) => laneIdOf(track) === lane && track.startTime < end - 1e-6 && track.endTime > start + 1e-6);
     commands.push({ type: "audio.create", trackId, asset, name: entry.name, startTime: start, endTime: end, ...(free ? { laneId: lane } : {}) });
-    const placed = applyCommands(commands, label, { select() { inspectedAsset = ""; } });
+    const placed = applyCommands(commands, label, { select() { inspectedAsset = ""; selectedClipIds.clear(); } });
     if (!placed) return;
     selectAudioTrackById(trackId);
     void generateAudioWaveform(asset);
@@ -3145,12 +3491,12 @@ function placeAsset(asset: string, options: PlaceOptions = {}) {
   if (!trackId && options.preferSelected && selected && !overlapsTrack(project, trackIdOf(selected), start, end)) trackId = trackIdOf(selected);
   commands.push({
     type: "clip.place", layerId, asset, startTime: start, endTime: end,
-    ...(entry.width ? { fit: defaultFit(entry) } : {}),
     ...(trackId ? { trackId } : {}),
   });
   const placed = applyCommands(commands, label, {
     select() {
       inspectedAsset = "";
+      selectedClipIds.clear();
       selectedLayerId = layerId;
       selectedAudioTrackId = "";
       selectedEffectId = "";
@@ -4241,10 +4587,27 @@ function bindTimeline() {
     updateTimeline();
   }));
   app.querySelector("#add-track")?.addEventListener("click", addEmptyTrack);
-  app.querySelectorAll<HTMLElement>("[data-track-name]").forEach((element) => element.addEventListener("dblclick", (event) => {
-    event.stopPropagation();
-    beginTrackRename(element);
-  }));
+  app.querySelectorAll<HTMLElement>("[data-track-name]").forEach((element) => {
+    element.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      beginTrackRename(element);
+    });
+    // Um clique no nome da faixa de vídeo seleciona todos os clipes dela; nas faixas de áudio segue a seleção normal da linha.
+    element.addEventListener("click", (event) => {
+      if (element.isContentEditable) return;
+      if (selectTrackClips(element.dataset.trackName!)) event.stopPropagation();
+    });
+    element.addEventListener("keydown", (event) => {
+      if (element.isContentEditable || event.target !== element) return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        if (!selectTrackClips(element.dataset.trackName!)) element.closest<HTMLElement>("[data-select-audio-row]")?.click();
+      } else if (event.key === "F2") {
+        event.preventDefault();
+        beginTrackRename(element);
+      }
+    });
+  });
   bindTimelineOrderDrag();
   bindCurveTools();
   app.querySelector<HTMLSelectElement>("#duration-unit")?.addEventListener("change", (event) => {
@@ -4300,7 +4663,7 @@ function bindTimeline() {
       button.classList.add("is-selected");
       selectedKeyRef = button.dataset.keyRef!;
       stopPlayback();
-      if (layerId !== "__post__") selectedLayerId = layerId;
+      if (layerId !== "__post__") { selectedLayerId = layerId; selectedClipIds.clear(); }
       selectedAudioTrackId = "";
       selectedEffectId = property.startsWith("fx:") ? property.split(":")[1] : "";
       setTime(Number(time), false);
@@ -4327,8 +4690,11 @@ function bindTimeline() {
   if (!scrubArea) return;
   const labels = app.querySelector<HTMLElement>(".timeline-labels");
   bindBinDrop(scrubArea);
+  // Rolada para baixo, a régua (fixa no topo) passa a cobrir as faixas; no topo, as alças da primeira faixa ficam por cima dela.
+  const markScrolled = () => scrubArea.classList.toggle("is-scrolled-y", scrubArea.scrollTop > 0);
   scrubArea.addEventListener("scroll", () => {
     if (labels && Math.abs(labels.scrollTop - scrubArea.scrollTop) > 1) labels.scrollTop = scrubArea.scrollTop;
+    markScrolled();
     syncMinimap();
   });
   scrubArea.addEventListener("wheel", (event) => {
@@ -4424,11 +4790,7 @@ function bindTimeline() {
     const track = audioId ? project.audioTracks.find((item) => item.id === audioId) : undefined;
     if (!layer && !track) return;
     if (layer && (event.ctrlKey || event.metaKey || event.shiftKey)) {
-      if (!selectedClipIds.size && selectedLayerId) selectedClipIds.add(selectedLayerId);
-      if (selectedClipIds.has(layer.id)) selectedClipIds.delete(layer.id);
-      else selectedClipIds.add(layer.id);
-      selectLayerById(layer.id, false);
-      updateTimeline();
+      toggleLayerInSelection(layer.id, true);
       return;
     }
     selectedClipIds.clear();
@@ -4675,6 +5037,8 @@ function bindTimeline() {
     handle.addEventListener("pointercancel", stop);
   }));
   let scrubbing = false;
+  // Um clique num espaço vazio da faixa (sem arrastar) também seleciona a faixa quando ela tem vários clipes.
+  let laneClick: { track: HTMLElement; x: number; y: number } | null = null;
   const scrubToPointer = (event: PointerEvent) => {
     if (!project || pinchPointers.size > 1) return;
     setTime(snapTimelineTime(timelineTimeFromPointer(event, scrubArea), scrubArea, "", "", event.altKey, true), false);
@@ -4684,6 +5048,8 @@ function bindTimeline() {
     event.preventDefault();
     stopPlayback();
     scrubbing = true;
+    const lane = (event.target as HTMLElement).closest<HTMLElement>(".timeline-track[data-track-members]");
+    laneClick = lane && (lane.dataset.trackMembers || "").split(" ").length > 1 ? { track: lane, x: event.clientX, y: event.clientY } : null;
     scrubArea.setPointerCapture(event.pointerId);
     scrubToPointer(event);
   });
@@ -4694,6 +5060,10 @@ function bindTimeline() {
     if (!scrubbing) return;
     scrubbing = false;
     if (scrubArea.hasPointerCapture(event.pointerId)) scrubArea.releasePointerCapture(event.pointerId);
+    const click = laneClick;
+    laneClick = null;
+    if (click && event.type === "pointerup" && !event.shiftKey && !event.ctrlKey && !event.metaKey && Math.hypot(event.clientX - click.x, event.clientY - click.y) < 4
+      && click.track.dataset.trackId && selectTrackClips(click.track.dataset.trackId)) return;
     updateInspector();
   };
   scrubArea.addEventListener("pointerup", stopScrubbing);
@@ -4851,61 +5221,199 @@ function bindDragAndDrop(root: ParentNode = app) {
   });
 }
 
-function bindColumnResizers() {
-  app.querySelectorAll<HTMLElement>("[data-resize-column]").forEach((handle) => {
-    handle.addEventListener("pointerdown", (event) => {
+// ---- Divisores redimensionáveis (role="separator"): arrastar (mouse e toque), setas, Home/End, duplo clique restaura.
+// Os tamanhos ficam no localStorage (com try/catch); sem tamanho guardado vale o padrão do CSS.
+type SplitId = "left" | "right" | "timeline" | "left-top" | "inspector-fx" | "labels";
+
+interface SplitSpec {
+  /** x: o divisor anda na horizontal (colunas); y: na vertical (alturas). */
+  axis: "x" | "y";
+  /** +1: arrastar para a direita/baixo aumenta o valor; −1: diminui. */
+  sign: 1 | -1;
+  label: [string, string];
+  storage: string;
+  /** Valor ao restaurar (duplo clique / Enter); null = tamanho automático do CSS. */
+  fallback: number | null;
+  /** Reaplica o layout a cada passo do arraste (a timeline mexe no canvas). */
+  live?: boolean;
+  read(): number;
+  range(): [number, number];
+  apply(value: number | null): void;
+  after?(): void;
+}
+
+function setEditorVar(name: string, value: string | null) {
+  const editor = app.querySelector<HTMLElement>(".editor-app");
+  if (!editor) return;
+  if (value === null) editor.style.removeProperty(name);
+  else editor.style.setProperty(name, value);
+}
+
+const SPLITTERS: Record<SplitId, SplitSpec> = {
+  left: {
+    axis: "x", sign: 1, storage: SPLIT_STORAGE.left, fallback: 264, after: () => fitCanvas(),
+    label: ["Largura do painel de mídia e camadas", "Media and layers panel width"],
+    read: () => leftColumnWidth,
+    range: () => [210, clamp(window.innerWidth - rightColumnWidth - 340, 210, 520)],
+    apply(value) { leftColumnWidth = value ?? 264; setEditorVar("--left-width", `${leftColumnWidth}px`); },
+  },
+  right: {
+    axis: "x", sign: -1, storage: SPLIT_STORAGE.right, fallback: 310, after: () => fitCanvas(),
+    label: ["Largura do painel de propriedades", "Properties panel width"],
+    read: () => rightColumnWidth,
+    range: () => [240, clamp(window.innerWidth - leftColumnWidth - 340, 240, 560)],
+    apply(value) { rightColumnWidth = value ?? 310; setEditorVar("--right-width", `${rightColumnWidth}px`); },
+  },
+  timeline: {
+    axis: "y", sign: -1, storage: SPLIT_STORAGE.timeline, fallback: 240, live: true, after: () => fitCanvas(),
+    label: ["Altura da timeline", "Timeline height"],
+    read: () => timelineHeight,
+    range: () => [150, Math.max(200, window.innerHeight - 300)],
+    apply(value) { timelineHeight = value ?? 240; setEditorVar("--timeline-height", `${timelineHeight}px`); },
+  },
+  "left-top": {
+    axis: "y", sign: 1, storage: SPLIT_STORAGE.leftTop, fallback: null,
+    label: ["Altura de mídia/efeitos e camadas", "Height of media/effects and layers"],
+    read: () => leftTopHeight ?? app.querySelector<HTMLElement>(".left-top")?.offsetHeight ?? 0,
+    range: () => [120, Math.max(120, (app.querySelector<HTMLElement>(".left-panel")?.clientHeight ?? 480) - 6 - 120)],
+    apply(value) { leftTopHeight = value; setEditorVar("--left-top-height", value === null ? null : `${value}px`); },
+  },
+  "inspector-fx": {
+    axis: "y", sign: -1, storage: SPLIT_STORAGE.inspectorFx, fallback: null,
+    label: ["Altura de propriedades e efeitos", "Height of properties and effects"],
+    read: () => inspectorFxHeight ?? app.querySelector<HTMLElement>(".inspector-effects")?.offsetHeight ?? 0,
+    range() {
+      const box = app.querySelector<HTMLElement>("#inspector");
+      const used = (box?.querySelector<HTMLElement>(":scope > .inspector-header")?.offsetHeight ?? 43) + (box?.querySelector<HTMLElement>(":scope > .inspector-actions")?.offsetHeight ?? 48) + 6;
+      return [96, Math.max(96, (box?.clientHeight ?? 600) - used - 140)];
+    },
+    apply(value) { inspectorFxHeight = value; setEditorVar("--inspector-fx-height", value === null ? null : `${value}px`); },
+  },
+  labels: {
+    axis: "x", sign: 1, storage: SPLIT_STORAGE.labels, fallback: null,
+    label: ["Largura dos nomes das faixas", "Track names width"],
+    read: () => trackLabelsWidth ?? app.querySelector<HTMLElement>(".timeline-labels")?.offsetWidth ?? 0,
+    range: () => [100, Math.max(100, Math.min(520, (app.querySelector<HTMLElement>(".timeline-body")?.clientWidth ?? 600) - 160))],
+    apply(value) { trackLabelsWidth = value; setEditorVar("--labels-width", value === null ? null : `${value}px`); },
+  },
+};
+
+function splitterHtml(id: SplitId) {
+  const spec = SPLITTERS[id];
+  const pt = language === "pt-BR";
+  const label = pt ? spec.label[0] : spec.label[1];
+  const hint = pt ? "arraste, use as setas ou dê dois cliques para restaurar" : "drag, use the arrow keys or double-click to reset";
+  return `<div class="splitter splitter-${spec.axis} splitter-${id}" data-splitter="${id}" role="separator" aria-orientation="${spec.axis === "x" ? "vertical" : "horizontal"}" aria-label="${label}" title="${label} · ${hint}" tabindex="0"></div>`;
+}
+
+function syncSplitter(handle: HTMLElement) {
+  const spec = SPLITTERS[handle.dataset.splitter as SplitId];
+  if (!spec) return;
+  const [low, high] = spec.range();
+  const now = Math.round(clamp(spec.read(), low, Math.max(low, high)));
+  handle.setAttribute("aria-valuemin", String(Math.round(low)));
+  handle.setAttribute("aria-valuemax", String(Math.round(Math.max(low, high))));
+  handle.setAttribute("aria-valuenow", String(now));
+  handle.setAttribute("aria-valuetext", `${now} px`);
+}
+
+let splitterResizeBound = false;
+const boundSplitters = new WeakSet<HTMLElement>();
+
+function bindSplitters(root: ParentNode = app) {
+  if (!splitterResizeBound) {
+    splitterResizeBound = true;
+    window.addEventListener("resize", () => app.querySelectorAll<HTMLElement>("[data-splitter]").forEach(syncSplitter));
+  }
+  root.querySelectorAll<HTMLElement>("[data-splitter]").forEach((handle) => {
+    if (boundSplitters.has(handle)) return;
+    boundSplitters.add(handle);
+    const spec = SPLITTERS[handle.dataset.splitter as SplitId];
+    if (!spec) return;
+    const reset = () => {
+      spec.apply(spec.fallback);
+      writeSplit(spec.storage, null);
+      spec.after?.();
+      syncSplitter(handle);
+    };
+    const commit = (value: number) => {
+      spec.apply(value);
+      writeSplit(spec.storage, value);
+      spec.after?.();
+      syncSplitter(handle);
+    };
+    syncSplitter(handle);
+    handle.addEventListener("focus", () => syncSplitter(handle));
+    handle.addEventListener("dblclick", (event) => {
       event.preventDefault();
-      const side = handle.dataset.resizeColumn as "left" | "right";
-      handle.setPointerCapture(event.pointerId);
-      document.body.classList.add("is-resizing-columns");
+      reset();
+    });
+    handle.addEventListener("keydown", (event) => {
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      const [low, high] = spec.range();
+      const arrows: Record<string, number> = spec.axis === "x" ? { ArrowLeft: -1, ArrowRight: 1 } : { ArrowUp: -1, ArrowDown: 1 };
+      const direction = arrows[event.key];
+      let next: number;
+      if (direction !== undefined) next = spec.read() + direction * spec.sign * (event.shiftKey ? 64 : 16);
+      else if (event.key === "Home") next = low;
+      else if (event.key === "End") next = high;
+      else if (event.key === "Enter") {
+        event.preventDefault();
+        event.stopPropagation();
+        reset();
+        return;
+      } else return;
+      // As setas não podem mover camadas nem a playhead enquanto o foco está no divisor.
+      event.preventDefault();
+      event.stopPropagation();
+      commit(clamp(next, low, Math.max(low, high)));
+    });
+    let lastTap = 0;
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      handle.focus({ preventScroll: true });
+      try { handle.setPointerCapture(event.pointerId); } catch { /* ponteiro sintético: segue sem captura */ }
+      const [low, high] = spec.range();
+      const startPoint = spec.axis === "x" ? event.clientX : event.clientY;
+      const startValue = clamp(spec.read(), low, Math.max(low, high));
+      let value = startValue;
+      let moved = false;
+      handle.classList.add("is-dragging");
+      document.body.classList.add("is-resizing", `is-resizing-${spec.axis}`);
       const move = (moveEvent: PointerEvent) => {
-        if (side === "left") leftColumnWidth = clamp(moveEvent.clientX, 210, 520);
-        else rightColumnWidth = clamp(window.innerWidth - moveEvent.clientX, 240, 560);
-        const editor = app.querySelector<HTMLElement>(".editor-app");
-        editor?.style.setProperty(side === "left" ? "--left-width" : "--right-width", `${side === "left" ? leftColumnWidth : rightColumnWidth}px`);
+        const delta = (spec.axis === "x" ? moveEvent.clientX : moveEvent.clientY) - startPoint;
+        if (Math.abs(delta) > 3) moved = true;
+        if (!moved) return;
+        value = clamp(startValue + spec.sign * delta, low, Math.max(low, high));
+        spec.apply(value);
+        if (spec.live) spec.after?.();
+        syncSplitter(handle);
       };
       const stop = (upEvent: PointerEvent) => {
         handle.removeEventListener("pointermove", move);
         handle.removeEventListener("pointerup", stop);
         handle.removeEventListener("pointercancel", stop);
-        if (handle.hasPointerCapture(upEvent.pointerId)) handle.releasePointerCapture(upEvent.pointerId);
-        document.body.classList.remove("is-resizing-columns");
-        localStorage.setItem("nt-vct-left-width", String(leftColumnWidth));
-        localStorage.setItem("nt-vct-right-width", String(rightColumnWidth));
-        fitCanvas();
+        try { if (handle.hasPointerCapture(upEvent.pointerId)) handle.releasePointerCapture(upEvent.pointerId); } catch { /* já solto */ }
+        handle.classList.remove("is-dragging");
+        document.body.classList.remove("is-resizing", "is-resizing-x", "is-resizing-y");
+        if (moved && upEvent.type === "pointerup") commit(value);
+        else if (moved) {
+          spec.apply(startValue);
+          spec.after?.();
+          syncSplitter(handle);
+        } else if (upEvent.type === "pointerup") {
+          // Dois toques seguidos restauram o tamanho (no toque o duplo clique do navegador não é confiável).
+          if (upEvent.timeStamp - lastTap < 400) {
+            lastTap = 0;
+            reset();
+          } else lastTap = upEvent.timeStamp;
+        }
       };
       handle.addEventListener("pointermove", move);
       handle.addEventListener("pointerup", stop);
       handle.addEventListener("pointercancel", stop);
     });
-  });
-}
-
-function bindTimelineResizer() {
-  const handle = app.querySelector<HTMLElement>("#timeline-resizer");
-  if (!handle) return;
-  handle.addEventListener("pointerdown", (event) => {
-    event.preventDefault();
-    handle.setPointerCapture(event.pointerId);
-    document.body.classList.add("is-resizing-timeline");
-    const startY = event.clientY;
-    const startHeight = timelineHeight;
-    const move = (moveEvent: PointerEvent) => {
-      timelineHeight = clamp(startHeight + startY - moveEvent.clientY, 150, Math.max(200, window.innerHeight - 300));
-      app.querySelector<HTMLElement>(".editor-app")?.style.setProperty("--timeline-height", `${timelineHeight}px`);
-      fitCanvas();
-    };
-    const stop = (upEvent: PointerEvent) => {
-      handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", stop);
-      handle.removeEventListener("pointercancel", stop);
-      if (handle.hasPointerCapture(upEvent.pointerId)) handle.releasePointerCapture(upEvent.pointerId);
-      document.body.classList.remove("is-resizing-timeline");
-      localStorage.setItem("nt-vct-timeline-height", String(Math.round(timelineHeight)));
-    };
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", stop);
-    handle.addEventListener("pointercancel", stop);
   });
 }
 
@@ -6098,6 +6606,10 @@ automationApi = createVctApi({
   stillFrame: async (time, maxWidth) => {
     const { notReady } = await renderStillFrame(time);
     return { canvas: copyCompositionCanvas(maxWidth), notReady };
+  },
+  setDiagnostics: (state) => {
+    renderer?.setDiagnostics?.(state);
+    void renderFrame();
   },
   commitProject: (next, label) => {
     if (!project) throw new Error("Nenhum projeto está aberto.");

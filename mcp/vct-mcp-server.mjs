@@ -200,7 +200,6 @@ server.registerTool("vct_connection_info", {
 }, async () => asText({ connected: Boolean(page), bridge: `ws://127.0.0.1:${PORT}`, token: TOKEN, link: `${EDITOR_URL}#agent=ws://127.0.0.1:${PORT}&token=${TOKEN}`, help: page ? undefined : connectionHelp() }));
 
 for (const [name, method, description] of [
-  ["vct_describe", "describe", "Contrato da API em texto curto: todos os comandos, campos, limites e regras de tempo."],
   ["vct_get_timeline", "getTimeline", "Timeline compacta: faixas, clipes (id, nome, tipo, início/fim em s), transições e faixas de áudio."],
   ["vct_get_project", "getProject", "Projeto completo em JSON (grande; use só se a timeline não bastar)."],
   ["vct_validate", "validate", "Valida o projeto aberto."],
@@ -209,8 +208,17 @@ for (const [name, method, description] of [
   server.registerTool(name, { description, annotations: { readOnlyHint: true } }, async () => forward(method, {}));
 }
 
+server.registerTool("vct_describe", {
+  description: "Índice de uma página da API (comandos e campos obrigatórios). Com type: um comando (campos e exemplo), 'props texto' (forma, imagem, video, guia, audio, composicao), 'regras' ou 'tudo'.",
+  inputSchema: {
+    type: z.string().max(80).optional().describe("Comando (clip.place), 'props texto', 'regras' ou 'tudo'. Sem valor: o índice."),
+    format: z.enum(["text", "json"]).optional().describe("json devolve objeto em vez de texto."),
+  },
+  annotations: { readOnlyHint: true },
+}, async ({ type, format }) => forward("describe", { type, format }));
+
 server.registerTool("vct_dry_run", {
-  description: "Simula um lote de comandos sem alterar o projeto e devolve resultados e a timeline resultante.",
+  description: "Simula um lote de comandos sem alterar o projeto e devolve um texto curto: ok (simulação) com avisos, ou o erro no comando N.",
   inputSchema: { commands: commandSchema },
   annotations: { readOnlyHint: true },
 }, async ({ commands }) => forward("dryRun", { commands }));

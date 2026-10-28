@@ -85,14 +85,17 @@ describe('agent API', () => {
     const confirm = vi.fn(() => true);
     const api = createVctApi({ getProject: () => doc, keyframeTolerance: () => 1 / 60, commitProject: commit, confirmConsequential: confirm });
     const commands: VctCommand[] = [{ type: 'clip.split', layerId: 'v', time: 4, newLayerId: 'b' }];
-    const plan = api.dryRun(commands);
+    const plan = api.dryRun(commands, { format: 'json' });
     expect(commit).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
-    expect(api.batch(commands)).toEqual(plan.results);
+    expect(plan).toMatchObject({ ok: true, errors: [], warnings: [] });
+    expect(api.dryRun(commands)).toMatch(/^ok \(simulação\) · 1 comando/);
+    expect(api.batch(commands, { format: 'json' }).results).toEqual(plan.results);
     expect(api.getTimeline()).toEqual(plan.timeline);
-    plan.timeline.tracks[0].clips[0].name = 'Mutated';
+    plan.timeline!.tracks[0].clips[0].name = 'Mutated';
     expect(doc.layers[0].name).not.toBe('Mutated');
-    expect((api.describe('clip.split') as { fields: Record<string, { required?: boolean }> }).fields.newLayerId.required).toBe(true);
+    expect((api.describe('clip.split', { format: 'json' }) as unknown as { fields: Record<string, { required?: boolean }> }).fields.newLayerId.required).toBe(true);
+    expect(api.describe('clip.split')).toContain('newLayerId!:id');
   });
 
   it('cancelled removal leaves the project intact and dryRun only reports the confirmation', () => {
@@ -100,9 +103,11 @@ describe('agent API', () => {
     const commit = vi.fn();
     const confirm = vi.fn(() => false);
     const api = createVctApi({ getProject: () => doc, keyframeTolerance: () => 1 / 60, commitProject: commit, confirmConsequential: confirm });
-    expect(api.dryRun([{ type: 'clip.remove', layerId: 'v' }]).requiresConfirmation).toBe(true);
+    expect(api.dryRun([{ type: 'clip.remove', layerId: 'v' }], { format: 'json' }).requiresConfirmation).toBe(true);
+    expect(api.dryRun([{ type: 'clip.remove', layerId: 'v' }])).toContain('pede confirmação');
     expect(confirm).not.toHaveBeenCalled();
-    expect(() => api.dispatch({ type: 'clip.remove', layerId: 'v' })).toThrow('cancelado');
+    expect(api.dispatch({ type: 'clip.remove', layerId: 'v' })).toBe('erro: Lote cancelado pelo usuário.');
+    expect(api.dispatch({ type: 'clip.remove', layerId: 'v' }, { format: 'json' })).toMatchObject({ ok: false, errors: ['erro: Lote cancelado pelo usuário.'] });
     expect(commit).not.toHaveBeenCalled();
     expect(doc.layers).toHaveLength(1);
   });
@@ -117,7 +122,7 @@ describe('agent API', () => {
     expect(() => api.undo()).toThrow('Exporting');
     expect(() => api.redo()).toThrow('Exporting');
     expect(api.getTimeline().tracks).toHaveLength(1);
-    expect(api.dryRun([{ type: 'clip.remove', layerId: 'v' }]).timeline.tracks).toHaveLength(0);
+    expect(api.dryRun([{ type: 'clip.remove', layerId: 'v' }], { format: 'json' }).timeline!.tracks).toHaveLength(0);
     expect(commit).not.toHaveBeenCalled();
     expect(undo).not.toHaveBeenCalled();
   });

@@ -161,7 +161,7 @@ describe("window.vct API", () => {
       confirmConsequential,
     });
 
-    expect(() => api.dispatch({ type: "effect.remove", effectId: "levels-1" })).toThrow("cancelado");
+    expect(api.dispatch({ type: "effect.remove", effectId: "levels-1" })).toContain("cancelado");
     expect(confirmConsequential).toHaveBeenCalledOnce();
     expect(commit).not.toHaveBeenCalled();
     expect(active.layers[0].effects).toHaveLength(1);
