@@ -1,0 +1,42 @@
+[
+  {
+    "frame": 0,
+    "differentChannels": 1806,
+    "maxDelta": 27
+  },
+  {
+    "frame": 1,
+    "differentChannels": 1217,
+    "maxDelta": 10
+  },
+  {
+    "frame": 2,
+    "differentChannels": 131,
+    "maxDelta": 1
+  },
+  {
+    "frame": 3,
+    "differentChannels": 0,
+    "maxDelta": 0
+  },
+  {
+    "frame": 4,
+    "differentChannels": 0,
+    "maxDelta": 0
+  },
+  {
+    "frame": 5,
+    "differentChannels": 0,
+    "maxDelta": 0
+  },
+  {
+    "frame": 6,
+    "differentChannels": 0,
+    "maxDelta": 0
+  },
+  {
+    "frame": 7,
+    "differentChannels": 0,
+    "maxDelta": 0
+  }
+]

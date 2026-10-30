@@ -1,0 +1,55 @@
+--- media-tab
+ok-scroll div#left-tabpanel.left-tab-body client=377 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=126 scroll=1154
+ok-scroll div.inspector-scroll client=286 scroll=1595
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=172 scroll=326
+--- effects-tab
+ok-scroll div#left-tabpanel.left-tab-body client=377 scroll=630
+ok-scroll div#layer-stack.layer-stack client=126 scroll=1154
+ok-scroll div.inspector-scroll client=286 scroll=1595
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=172 scroll=326
+--- inspector-single
+ok-scroll div#left-tabpanel.left-tab-body client=377 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=126 scroll=1154
+ok-scroll div.inspector-scroll client=286 scroll=1595
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=172 scroll=326
+--- inspector-multi
+ok-scroll div#left-tabpanel.left-tab-body client=377 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=126 scroll=1154
+ok-scroll div.inspector-scroll client=456 scroll=1065
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=172 scroll=326
+--- export
+ok-scroll div#left-tabpanel.left-tab-body client=377 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=126 scroll=1154
+ok-scroll div.inspector-scroll client=456 scroll=1065
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=172 scroll=326
+--- composition
+ok-scroll div#left-tabpanel.left-tab-body client=377 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=126 scroll=1154
+ok-scroll div.inspector-scroll client=456 scroll=1065
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=172 scroll=326
+--- shortcuts
+ok-scroll div#left-tabpanel.left-tab-body client=377 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=126 scroll=1154
+ok-scroll div.inspector-scroll client=456 scroll=1065
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=172 scroll=326
+--- warnings
+ok-scroll div#left-tabpanel.left-tab-body client=377 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=126 scroll=1154
+ok-scroll div.inspector-scroll client=456 scroll=1065
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=172 scroll=326
+ok-scroll ul.info-list client=575 scroll=1335
+--- transcribe
+ok-scroll div#left-tabpanel.left-tab-body client=377 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=126 scroll=1154
+ok-scroll div.inspector-scroll client=456 scroll=1065
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=172 scroll=326

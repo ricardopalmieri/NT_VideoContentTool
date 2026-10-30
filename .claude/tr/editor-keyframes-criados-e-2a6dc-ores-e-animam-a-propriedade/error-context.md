@@ -1,0 +1,398 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - button "Noisetupi" [ref=e5] [cursor=pointer]
+    - generic "Paridade 0.6.2" [ref=e6]:
+      - strong [ref=e7]: Paridade 0.6.2
+      - generic [ref=e8]: 320×180 / 8 FPS
+    - generic [ref=e9]:
+      - button "Desfazer" [ref=e10] [cursor=pointer]: ↶
+      - button "Refazer" [disabled] [ref=e11]: ↷
+    - generic [ref=e12]:
+      - button "Novo projeto" [ref=e13] [cursor=pointer]:
+        - img [ref=e14]
+      - button "Abrir projeto" [ref=e17] [cursor=pointer]:
+        - img [ref=e18]
+      - button "Salvar" [active] [ref=e20] [cursor=pointer]:
+        - img [ref=e21]
+      - button "Coletar mídias" [ref=e24] [cursor=pointer]:
+        - img [ref=e25]
+      - button "Composição" [ref=e28] [cursor=pointer]:
+        - img [ref=e29]
+      - button "Exportar" [ref=e32] [cursor=pointer]:
+        - img [ref=e33]
+      - button "Editar com IA" [ref=e36] [cursor=pointer]:
+        - img [ref=e37]
+      - button "Mudar idioma" [ref=e40] [cursor=pointer]:
+        - img [ref=e41]
+  - complementary [ref=e44]:
+    - generic [ref=e45]:
+      - tablist "Biblioteca" [ref=e46]:
+        - tab "Mídia" [selected] [ref=e47] [cursor=pointer]
+        - tab "Efeitos" [ref=e48] [cursor=pointer]
+      - tabpanel "Mídia" [ref=e49]:
+        - region "Mídia" [ref=e50]:
+          - generic [ref=e51]:
+            - button "Importar mídia" [ref=e52] [cursor=pointer]
+            - searchbox "Buscar mídia" [ref=e53]
+            - combobox "Filtrar por tipo" [ref=e54] [cursor=pointer]:
+              - option "Tudo" [selected]
+              - option "Vídeo"
+              - option "Imagem"
+              - option "Áudio"
+          - button "Importar mídia Vídeos, imagens e áudios. Você também pode arrastar os arquivos para cá." [ref=e56] [cursor=pointer]:
+            - strong [ref=e57]: Importar mídia
+            - generic [ref=e58]: Vídeos, imagens e áudios. Você também pode arrastar os arquivos para cá.
+          - generic [ref=e59]:
+            - generic [ref=e60]: Criar
+            - button "Texto" [ref=e61] [cursor=pointer]
+            - button "Forma" [ref=e62] [cursor=pointer]
+            - button "Guia" [ref=e63] [cursor=pointer]
+            - button "Importar legendas (SRT)" [ref=e64] [cursor=pointer]
+            - button "Legendar automaticamente" [ref=e65] [cursor=pointer]
+    - separator "Altura de mídia/efeitos e camadas" [ref=e66]
+    - generic [ref=e67]:
+      - generic [ref=e68]:
+        - generic [ref=e69]: LAYERS
+        - generic [ref=e70]: "2"
+      - generic [ref=e71]:
+        - article [ref=e72]:
+          - generic [ref=e73]:
+            - 'button "Subir camada: Quadrado" [ref=e74] [cursor=pointer]': ▲
+            - 'button "Descer camada: Quadrado" [ref=e75] [cursor=pointer]': ▼
+          - 'button "Arrastar para reordenar: Quadrado" [ref=e76]': ⠿
+          - generic "GEO" [ref=e77]:
+            - img [ref=e78]
+            - generic [ref=e80]: GEO
+          - button "Quadrado 1 FX" [ref=e81] [cursor=pointer]:
+            - text: Quadrado
+            - generic [ref=e82]: 1 FX
+          - 'button "1 FX: Quadrado" [ref=e83] [cursor=pointer]':
+            - text: FX
+            - generic [ref=e84]: "1"
+          - 'button "Visível: Quadrado" [pressed] [ref=e85] [cursor=pointer]': ●
+          - 'button "Bloqueada: Quadrado" [ref=e86] [cursor=pointer]': □
+          - 'button "Excluir: Quadrado" [ref=e87] [cursor=pointer]': ×
+        - article [ref=e88]:
+          - generic [ref=e89]:
+            - 'button "Subir camada: Text" [ref=e90] [cursor=pointer]': ▲
+            - 'button "Descer camada: Text" [ref=e91] [cursor=pointer]': ▼
+          - 'button "Arrastar para reordenar: Text" [ref=e92]': ⠿
+          - generic "TXT" [ref=e93]:
+            - img [ref=e94]
+            - generic [ref=e96]: TXT
+          - button "Text text" [ref=e97] [cursor=pointer]:
+            - text: Text
+            - generic [ref=e98]: text
+          - 'button "Sem efeitos: Text" [ref=e99] [cursor=pointer]':
+            - text: FX
+            - generic [ref=e100]: −
+          - 'button "Visível: Text" [pressed] [ref=e101] [cursor=pointer]': ●
+          - 'button "Bloqueada: Text" [ref=e102] [cursor=pointer]': □
+          - 'button "Excluir: Text" [ref=e103] [cursor=pointer]': ×
+  - separator "Largura do painel de mídia e camadas" [ref=e104]
+  - main [ref=e105]:
+    - generic [ref=e106]:
+      - generic [ref=e107]: Preview
+      - generic [ref=e108]:
+        - generic [ref=e109]:
+          - generic [ref=e110]: PLAY QUALITY
+          - combobox "PLAY QUALITY 100%" [ref=e111] [cursor=pointer]:
+            - option "AUTO"
+            - option "FULL" [selected]
+            - option "75%"
+            - option "50%"
+            - option "33%"
+            - option "25%"
+          - generic [ref=e112]: 100%
+        - button "SNAP" [ref=e113] [cursor=pointer]
+        - generic [ref=e114]:
+          - button "Zoom out" [ref=e115] [cursor=pointer]:
+            - img [ref=e116]
+          - generic [ref=e119]: 100%
+          - button "Zoom in" [ref=e120] [cursor=pointer]:
+            - img [ref=e121]
+          - button "Ajustar" [ref=e124] [cursor=pointer]
+    - generic [ref=e126]:
+      - generic:
+        - button "Resize nw" [ref=e128]
+        - button "Resize n" [ref=e129]
+        - button "Resize ne" [ref=e130]
+        - button "Resize e" [ref=e131]
+        - button "Resize se" [ref=e132]
+        - button "Resize s" [ref=e133]
+        - button "Resize sw" [ref=e134]
+        - button "Resize w" [ref=e135]
+        - button "Rotate" [ref=e136]
+  - separator "Largura do painel de propriedades" [ref=e137]
+  - complementary [ref=e138]:
+    - generic [ref=e139]: PROPRIEDADES
+    - generic [ref=e140]:
+      - generic [ref=e141]:
+        - textbox [ref=e142]: Quadrado
+        - generic [ref=e143]: GEO
+      - generic [ref=e144]:
+        - generic [ref=e145]:
+          - generic [ref=e146]:
+            - heading "Transformação" [level=3] [ref=e147]
+            - generic [ref=e148]:
+              - button "COPY" [ref=e149] [cursor=pointer]
+              - button "PASTE" [disabled] [ref=e150]
+          - generic [ref=e151]:
+            - generic [ref=e152]:
+              - generic [ref=e153]:
+                - generic "X"
+                - spinbutton "X ◆" [ref=e154]: "160"
+              - button "◆" [ref=e155] [cursor=pointer]
+            - generic [ref=e156]:
+              - generic [ref=e157]:
+                - generic "Y"
+                - spinbutton "Y ◆" [ref=e158]: "125"
+              - button "◆" [ref=e159] [cursor=pointer]
+            - button "▣ SCALE X/Y" [ref=e161] [cursor=pointer]
+            - generic [ref=e162]:
+              - generic [ref=e163]:
+                - generic "SCALE X"
+                - spinbutton "SCALE X ◆" [ref=e164]: "1"
+              - button "◆" [ref=e165] [cursor=pointer]
+            - generic [ref=e166]:
+              - generic [ref=e167]:
+                - generic "SCALE Y"
+                - spinbutton "SCALE Y ◆" [ref=e168]: "1"
+              - button "◆" [ref=e169] [cursor=pointer]
+            - generic [ref=e170]:
+              - generic [ref=e171]:
+                - generic "ROTATION"
+                - spinbutton "ROTATION ◆" [ref=e172]: "0"
+              - button "◆" [ref=e173] [cursor=pointer]
+            - generic [ref=e174]:
+              - generic [ref=e175]:
+                - generic "OPACITY"
+                - spinbutton "OPACITY ◆" [ref=e176]: "1"
+              - button "◆" [ref=e177] [cursor=pointer]
+            - button "▣ SIZE W/H" [ref=e179] [cursor=pointer]
+            - generic [ref=e180]:
+              - generic [ref=e181]:
+                - generic "WIDTH"
+                - spinbutton "WIDTH ◆" [ref=e182]: "63"
+              - button "◆" [ref=e183] [cursor=pointer]
+            - generic [ref=e184]:
+              - generic [ref=e185]:
+                - generic "HEIGHT"
+                - spinbutton "HEIGHT ◆" [ref=e186]: "63"
+              - button "◆" [ref=e187] [cursor=pointer]
+        - generic [ref=e188]:
+          - heading "Aparência" [level=3] [ref=e189]
+          - generic [ref=e190]:
+            - generic [ref=e191]: SHAPE
+            - combobox "SHAPE" [ref=e192] [cursor=pointer]:
+              - option "rectangle" [selected]
+              - option "ellipse"
+              - option "triangle"
+              - option "polygon"
+              - option "line"
+          - generic [ref=e193]:
+            - generic [ref=e194]:
+              - 'checkbox "FILL #f0eee8 ◆" [checked] [ref=e195]'
+              - text: FILL
+              - textbox [ref=e196]: "#f0eee8"
+              - button "◆" [ref=e197] [cursor=pointer]
+            - generic [ref=e198]:
+              - 'checkbox "STROKE #ce111b ◆" [ref=e199]'
+              - text: STROKE
+              - textbox [ref=e200]: "#ce111b"
+              - button "◆" [ref=e201] [cursor=pointer]
+          - generic [ref=e202]:
+            - generic [ref=e203]:
+              - generic [ref=e204]:
+                - generic "FILL ALPHA"
+                - spinbutton "FILL ALPHA ◆" [ref=e205]: "1"
+              - button "◆" [ref=e206] [cursor=pointer]
+            - generic [ref=e207]:
+              - generic [ref=e208]:
+                - generic "STROKE ALPHA"
+                - spinbutton "STROKE ALPHA ◆" [ref=e209]: "1"
+              - button "◆" [ref=e210] [cursor=pointer]
+          - generic [ref=e212]:
+            - generic [ref=e213]:
+              - generic "STROKE"
+              - spinbutton "STROKE ◆" [ref=e214]: "4"
+            - button "◆" [ref=e215] [cursor=pointer]
+        - generic [ref=e216]:
+          - heading "COMPOSIÇÃO" [level=3] [ref=e217]
+          - generic [ref=e218]:
+            - generic [ref=e219]: BLEND MODE
+            - combobox "BLEND MODE" [ref=e220] [cursor=pointer]:
+              - option "NORMAL" [selected]
+              - option "ADD"
+              - option "MULTIPLY"
+              - option "SCREEN"
+              - option "LIGHTEN"
+              - option "DARKEN"
+        - generic [ref=e221]:
+          - generic [ref=e222]:
+            - heading "Tempo" [level=3] [ref=e223]
+            - generic [ref=e224]:
+              - button "COPY" [ref=e225] [cursor=pointer]
+              - button "PASTE" [disabled] [ref=e226]
+          - generic [ref=e227]:
+            - generic [ref=e229]:
+              - generic "START"
+              - spinbutton "START" [ref=e230]: "0"
+            - generic [ref=e232]:
+              - generic "END"
+              - spinbutton "END" [ref=e233]: "1"
+          - heading "FADES" [level=4] [ref=e234]
+          - generic [ref=e235]:
+            - generic [ref=e237]:
+              - generic "FADE IN ATÉ"
+              - spinbutton "FADE IN ATÉ" [ref=e238]: "0.5"
+            - generic [ref=e240]:
+              - generic "FADE OUT DESDE"
+              - spinbutton "FADE OUT DESDE" [ref=e241]: "1"
+          - heading "TRANSIÇÃO DE ENTRADA" [level=4] [ref=e242]
+          - combobox "Transição de entrada" [ref=e245] [cursor=pointer]:
+            - option "Nenhuma" [selected]
+            - option "Dissolver"
+            - option "Fade pelo fundo"
+            - option "Cortina →"
+            - option "Cortina ←"
+            - option "Empurrar"
+      - separator "Altura de propriedades e efeitos" [ref=e246]
+      - region "EFEITOS" [ref=e247]:
+        - generic [ref=e248]:
+          - heading "EFEITOS" [level=3] [ref=e249]
+          - generic [ref=e250]:
+            - button "COPY" [ref=e251] [cursor=pointer]
+            - button "PASTE" [disabled] [ref=e252]
+        - article [ref=e255]:
+          - generic [ref=e256]:
+            - button "▲" [ref=e257] [cursor=pointer]
+            - button "▼" [ref=e258] [cursor=pointer]
+          - button "⠿" [ref=e259]
+          - button "●" [ref=e260] [cursor=pointer]
+          - button "Níveis / cores" [ref=e261] [cursor=pointer]
+          - button "×" [ref=e262] [cursor=pointer]
+      - generic [ref=e263]:
+        - button "Duplicar" [ref=e264] [cursor=pointer]
+        - button "Excluir" [ref=e265] [cursor=pointer]
+  - separator "Altura da timeline" [ref=e266]
+  - generic [ref=e267]:
+    - generic [ref=e268]:
+      - generic [ref=e269]:
+        - button "Ir ao início" [ref=e270] [cursor=pointer]: "|◀"
+        - button "Tocar / pausar" [ref=e271] [cursor=pointer]: ▶
+        - button "Ir ao fim" [ref=e272] [cursor=pointer]: ▶|
+        - button "Loop" [ref=e273] [cursor=pointer]: ↻
+        - button "REC" [ref=e274] [cursor=pointer]: REC
+        - generic [ref=e276]: 00:00.25 / 00:01.00
+        - button "+ faixa" [ref=e277] [cursor=pointer]
+      - generic [ref=e278]:
+        - generic [ref=e279]: CURVE
+        - combobox [ref=e280] [cursor=pointer]:
+          - option "LINEAR"
+          - option "BEZIER"
+          - option "EASE IN"
+          - option "EASE OUT"
+          - option "EASE IN/OUT" [selected]
+          - option "HOLD"
+      - generic [ref=e281]:
+        - generic "Zoom horizontal" [ref=e282]: H
+        - button "Reduzir zoom horizontal" [ref=e283] [cursor=pointer]:
+          - img [ref=e284]
+        - button "Ampliar zoom horizontal" [ref=e287] [cursor=pointer]:
+          - img [ref=e288]
+        - generic "Zoom vertical" [ref=e291]: V
+        - button "Reduzir zoom vertical" [ref=e292] [cursor=pointer]:
+          - img [ref=e293]
+        - button "Ampliar zoom vertical" [ref=e296] [cursor=pointer]:
+          - img [ref=e297]
+      - button "Modo Sobrepor" [ref=e300] [cursor=pointer]:
+        - img [ref=e301]
+      - button "Cortar no playhead" [ref=e304] [cursor=pointer]:
+        - img [ref=e305]
+      - button "SNAP" [ref=e309] [cursor=pointer]
+      - generic [ref=e310]:
+        - text: DURAÇÃO
+        - textbox "DURAÇÃO HH:MM:SS:FF" [ref=e311]: 00:00:01:00
+        - combobox "Unidade da duração" [ref=e312] [cursor=pointer]:
+          - option "HH:MM:SS:FF" [selected]
+          - option "FRAMES"
+      - generic [ref=e313]: FRAME 2
+    - generic [ref=e314]:
+      - generic [ref=e315]:
+        - button "Início da região de trabalho" [ref=e316] [cursor=pointer]: "["
+        - button "Fim da região de trabalho" [ref=e317] [cursor=pointer]: "]"
+        - button "Limpar região de trabalho" [disabled] [ref=e318]: "[×]"
+        - button "Fechar espaços" [ref=e319] [cursor=pointer]:
+          - img [ref=e320]
+      - generic [ref=e322]:
+        - generic [ref=e323]:
+          - strong [ref=e324]: VIDEO
+          - generic [ref=e325]: "2"
+          - generic [ref=e326]:
+            - button "Reduzir altura das faixas" [ref=e327] [cursor=pointer]: −
+            - button "Aumentar altura das faixas" [ref=e328] [cursor=pointer]: +
+        - generic [ref=e329]:
+          - generic [ref=e330]:
+            - button "▲" [ref=e331] [cursor=pointer]
+            - button "▼" [ref=e332] [cursor=pointer]
+          - button "V2" [ref=e333] [cursor=pointer]
+          - button "▸" [ref=e334] [cursor=pointer]
+          - button "Quadrado" [ref=e337] [cursor=pointer]
+          - generic [ref=e338]: 1 FX
+        - generic [ref=e339]:
+          - generic [ref=e340]:
+            - button "▲" [ref=e341] [cursor=pointer]
+            - button "▼" [ref=e342] [cursor=pointer]
+          - button "V1" [ref=e343] [cursor=pointer]
+          - button "·" [disabled] [ref=e344]
+          - generic [ref=e345]: VC
+          - button "Text" [ref=e346] [cursor=pointer]
+        - generic [ref=e347]:
+          - button "·" [disabled] [ref=e348]
+          - strong [ref=e349]: POST FX
+          - generic [ref=e350]: "0"
+        - generic [ref=e351]:
+          - strong [ref=e352]: AUDIO
+          - generic [ref=e353]: "0"
+          - generic [ref=e354]:
+            - button "Reduzir altura das faixas" [ref=e355] [cursor=pointer]: −
+            - button "Aumentar altura das faixas" [ref=e356] [cursor=pointer]: +
+      - generic [ref=e358]:
+        - generic [ref=e359]:
+          - generic [ref=e360]: 00:00:00
+          - generic [ref=e361]: 00:00:01
+          - generic [ref=e362]: 00:00:02
+          - generic [ref=e363]: 00:00:03
+          - generic [ref=e364]: 00:00:04
+          - generic [ref=e365]: 00:00:05
+          - generic [ref=e366]: 00:00:06
+          - generic [ref=e367]: 00:00:07
+          - generic [ref=e368]: 00:01:00
+        - generic [ref=e369]:
+          - generic [ref=e371]:
+            - generic [ref=e372]:
+              - button "Trim start" [ref=e373]
+              - generic: rectangle
+              - button "fadeInEnd" [ref=e374]
+              - button "fadeOutStart" [ref=e375]
+              - generic: Quadrado
+              - button "Trim end" [ref=e376]
+            - button "◆" [ref=e377] [cursor=pointer]
+            - button "◆" [ref=e378] [cursor=pointer]
+          - generic [ref=e380]:
+            - button "Trim start" [ref=e381]
+            - generic: VCT
+            - button "fadeInEnd" [ref=e382]
+            - button "fadeOutStart" [ref=e383]
+            - generic: Text
+            - button "Trim end" [ref=e384]
+  - generic [ref=e391]:
+    - generic [ref=e392]: PROJETO SALVO
+    - generic [ref=e393]:
+      - button "1 aviso" [ref=e395] [cursor=pointer]
+      - generic "Paridade 0.6.ntvct" [ref=e396]
+```

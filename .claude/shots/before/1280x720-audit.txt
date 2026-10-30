@@ -1,0 +1,57 @@
+--- media-tab
+ok-scroll div#left-tabpanel.left-tab-body client=293 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=40 scroll=1154
+ok-scroll div.inspector-scroll client=281 scroll=1685
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=167 scroll=326
+--- effects-tab
+ok-scroll div#left-tabpanel.left-tab-body client=293 scroll=630
+ok-scroll div#layer-stack.layer-stack client=40 scroll=1154
+ok-scroll div.inspector-scroll client=281 scroll=1685
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=167 scroll=326
+--- inspector-single
+ok-scroll div#left-tabpanel.left-tab-body client=293 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=40 scroll=1154
+ok-scroll div.inspector-scroll client=281 scroll=1685
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=167 scroll=326
+--- inspector-multi
+ok-scroll div#left-tabpanel.left-tab-body client=293 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=40 scroll=1154
+CLIPPED aside.right-panel client=407 scroll=1191
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=167 scroll=326
+--- export
+ok-scroll div#left-tabpanel.left-tab-body client=293 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=40 scroll=1154
+CLIPPED aside.right-panel client=407 scroll=1191
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=167 scroll=326
+--- composition
+ok-scroll div#left-tabpanel.left-tab-body client=293 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=40 scroll=1154
+CLIPPED aside.right-panel client=407 scroll=1191
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=167 scroll=326
+--- shortcuts
+ok-scroll div#left-tabpanel.left-tab-body client=293 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=40 scroll=1154
+CLIPPED aside.right-panel client=407 scroll=1191
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=167 scroll=326
+ok-scroll table.shortcut-table client=449 scroll=460
+--- warnings
+ok-scroll div#left-tabpanel.left-tab-body client=293 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=40 scroll=1154
+CLIPPED aside.right-panel client=407 scroll=1191
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=167 scroll=326
+ok-scroll ul.info-list client=449 scroll=1335
+--- transcribe
+ok-scroll div#left-tabpanel.left-tab-body client=293 scroll=1346
+ok-scroll div#layer-stack.layer-stack client=40 scroll=1154
+CLIPPED aside.right-panel client=407 scroll=1191
+ok-scroll div.timeline-labels client=182 scroll=326
+ok-scroll div.timeline-scroll client=167 scroll=326
+ok-scroll section.export-modal.transcribe-modal client=686 scroll=753
